@@ -9,6 +9,7 @@ uncertainty instead of flattening everything into "facts".
 
 from __future__ import annotations
 
+import io
 import json
 import math
 import os
@@ -19,12 +20,30 @@ import uuid
 from datetime import datetime
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
+from PIL import Image
+
 from ..config import Config
 from ..models.project import ProjectManager, ProjectStatus
 from ..utils.llm_client import LLMClient
 from ..utils.logger import get_logger
 
 logger = get_logger("envfish.map_seed")
+PIL_NEAREST = getattr(getattr(Image, "Resampling", Image), "NEAREST")
+
+
+WORLD_COVER_CLASSES: Dict[int, Dict[str, Any]] = {
+    10: {"name": "Tree cover", "name_zh": "树木覆盖", "color": (0, 100, 0), "category": "ecology", "node_family": "EcologicalReceptor", "importance": 8},
+    20: {"name": "Shrubland", "name_zh": "灌丛", "color": (255, 187, 34), "category": "ecology", "node_family": "EcologicalReceptor", "importance": 6},
+    30: {"name": "Grassland", "name_zh": "草地", "color": (255, 255, 76), "category": "ecology", "node_family": "EcologicalReceptor", "importance": 6},
+    40: {"name": "Cropland", "name_zh": "农田", "color": (240, 150, 255), "category": "ecology", "node_family": "EcologicalReceptor", "importance": 6},
+    50: {"name": "Built-up", "name_zh": "建成区", "color": (250, 0, 0), "category": "facility", "node_family": "Infrastructure", "importance": 7},
+    60: {"name": "Bare / sparse vegetation", "name_zh": "裸地/稀疏植被", "color": (180, 180, 180), "category": "ecology", "node_family": "EcologicalReceptor", "importance": 5},
+    70: {"name": "Snow and ice", "name_zh": "雪冰", "color": (240, 240, 240), "category": "ecology", "node_family": "EnvironmentalCarrier", "importance": 4},
+    80: {"name": "Permanent water bodies", "name_zh": "永久水体", "color": (0, 100, 200), "category": "ecology", "node_family": "EnvironmentalCarrier", "importance": 9},
+    90: {"name": "Herbaceous wetland", "name_zh": "草本湿地", "color": (0, 150, 160), "category": "ecology", "node_family": "EcologicalReceptor", "importance": 9},
+    95: {"name": "Mangroves", "name_zh": "红树林", "color": (0, 207, 117), "category": "ecology", "node_family": "EcologicalReceptor", "importance": 10},
+    100: {"name": "Moss and lichen", "name_zh": "苔藓/地衣", "color": (250, 230, 160), "category": "ecology", "node_family": "EcologicalReceptor", "importance": 5},
+}
 
 
 def _utcnow_iso() -> str:
@@ -76,6 +95,20 @@ def _radius_to_bbox(lat: float, lon: float, radius_m: float) -> Dict[str, float]
         "min_lon": round(lon - lon_delta, 6),
         "max_lon": round(lon + lon_delta, 6),
     }
+
+
+def _lonlat_to_mercator(lon: float, lat: float) -> Tuple[float, float]:
+    x = lon * 20037508.34 / 180.0
+    y = math.log(math.tan((90.0 + lat) * math.pi / 360.0)) / (math.pi / 180.0)
+    y = y * 20037508.34 / 180.0
+    return x, y
+
+
+def _mercator_to_lonlat(x: float, y: float) -> Tuple[float, float]:
+    lon = x / 20037508.34 * 180.0
+    lat = y / 20037508.34 * 180.0
+    lat = 180.0 / math.pi * (2.0 * math.atan(math.exp(lat * math.pi / 180.0)) - math.pi / 2.0)
+    return lon, lat
 
 
 def _circle_polygon(lat: float, lon: float, radius_m: float, steps: int = 24) -> List[List[float]]:
@@ -247,9 +280,14 @@ class MapSeedManager:
             progress_callback("collecting", 20, "采集周边空间要素和环境基线")
 
         features = self._collect_spatial_features(lat, lon, radius_m)
+        remote_sensing_features, remote_sensing_summary, remote_sensing_layers = self._collect_worldcover_features(
+            lat=lat,
+            lon=lon,
+            radius_m=radius_m,
+        )
         environment_baseline = self._build_environment_baseline(lat, lon, admin_context)
         features = self._merge_context_features(
-            features=features,
+            features=features + remote_sensing_features,
             lat=lat,
             lon=lon,
             admin_context=admin_context,
@@ -286,16 +324,7 @@ class MapSeedManager:
             graph=graph,
         )
 
-        remote_sensing_summary = {
-            "status": "planned",
-            "provider": "copernicus_dataspace",
-            "note": (
-                "MVP 当前已完成 map-first 空间事实层与代理图谱生成，"
-                "Copernicus/Sentinel-2 指数和影像分析已预留接口，后续阶段接入。"
-            ),
-        }
-
-        layers = self._build_layers_payload(aoi, features, graph)
+        layers = self._build_layers_payload(aoi, features, graph, remote_sensing_layers=remote_sensing_layers)
         self._write_json(self._seed_file(seed_id, self.GRAPH_FILENAME), graph)
         self._write_json(self._seed_file(seed_id, self.LAYERS_FILENAME), layers)
         self._write_text(self._seed_file(seed_id, self.REPORT_FILENAME), report_text)
@@ -533,6 +562,286 @@ out center tags;
             if len(selected) >= 28:
                 break
         return selected
+
+    def _collect_worldcover_features(
+        self,
+        *,
+        lat: float,
+        lon: float,
+        radius_m: int,
+    ) -> Tuple[List[Dict[str, Any]], Dict[str, Any], List[Dict[str, Any]]]:
+        bbox = _radius_to_bbox(lat, lon, radius_m)
+        minx, miny = _lonlat_to_mercator(bbox["min_lon"], bbox["min_lat"])
+        maxx, maxy = _lonlat_to_mercator(bbox["max_lon"], bbox["max_lat"])
+        params = {
+            "service": "WMS",
+            "version": "1.1.1",
+            "request": "GetMap",
+            "layers": "WORLDCOVER_2021_MAP",
+            "srs": "EPSG:3857",
+            "bbox": f"{minx},{miny},{maxx},{maxy}",
+            "width": "256",
+            "height": "256",
+            "styles": "worldcover.txt",
+            "format": "image/png",
+            "transparent": "true",
+            "time": "2021-12-31",
+        }
+        url = "https://services.terrascope.be/wms/v2?" + urllib.parse.urlencode(params)
+
+        try:
+            with urllib.request.urlopen(url, timeout=30.0) as response:
+                image = Image.open(io.BytesIO(response.read())).convert("RGBA")
+        except Exception as exc:
+            logger.warning(f"WorldCover GetMap failed: {exc}")
+            return [], {
+                "status": "failed",
+                "provider": "esa_worldcover",
+                "product": "WorldCover 2021 v200",
+                "error": str(exc),
+                "note": "未能获取 WorldCover 遥感层，已退回 OSM 和上下文特征。",
+            }, []
+
+        sampled = image.resize((128, 128), resample=PIL_NEAREST)
+        width, height = sampled.size
+        grid: List[List[int]] = []
+        class_pixel_counts: Dict[int, int] = {}
+
+        for row in range(height):
+            row_codes: List[int] = []
+            for col in range(width):
+                rgba = sampled.getpixel((col, row))
+                code = self._match_worldcover_class(rgba[:3], alpha=rgba[3])
+                row_codes.append(code)
+                if code:
+                    class_pixel_counts[code] = class_pixel_counts.get(code, 0) + 1
+            grid.append(row_codes)
+
+        visited = [[False for _ in range(width)] for _ in range(height)]
+        min_component_pixels = max(10, int(width * height * 0.0015))
+        components_by_code: Dict[int, List[Dict[str, Any]]] = {}
+
+        for row in range(height):
+            for col in range(width):
+                code = grid[row][col]
+                if code == 0 or visited[row][col]:
+                    continue
+                queue = [(row, col)]
+                visited[row][col] = True
+                pixels = []
+                min_row = max_row = row
+                min_col = max_col = col
+                sum_row = 0
+                sum_col = 0
+
+                while queue:
+                    current_row, current_col = queue.pop()
+                    pixels.append((current_row, current_col))
+                    sum_row += current_row
+                    sum_col += current_col
+                    min_row = min(min_row, current_row)
+                    max_row = max(max_row, current_row)
+                    min_col = min(min_col, current_col)
+                    max_col = max(max_col, current_col)
+
+                    for next_row, next_col in [
+                        (current_row - 1, current_col),
+                        (current_row + 1, current_col),
+                        (current_row, current_col - 1),
+                        (current_row, current_col + 1),
+                    ]:
+                        if next_row < 0 or next_row >= height or next_col < 0 or next_col >= width:
+                            continue
+                        if visited[next_row][next_col] or grid[next_row][next_col] != code:
+                            continue
+                        visited[next_row][next_col] = True
+                        queue.append((next_row, next_col))
+
+                if len(pixels) < min_component_pixels:
+                    continue
+
+                components_by_code.setdefault(code, []).append(
+                    {
+                        "pixel_count": len(pixels),
+                        "min_row": min_row,
+                        "max_row": max_row,
+                        "min_col": min_col,
+                        "max_col": max_col,
+                        "centroid_row": sum_row / len(pixels),
+                        "centroid_col": sum_col / len(pixels),
+                    }
+                )
+
+        detected_features: List[Dict[str, Any]] = []
+        remote_layers: List[Dict[str, Any]] = []
+        total_detected_pixels = sum(class_pixel_counts.values()) or 1
+
+        for code, components in components_by_code.items():
+            class_meta = WORLD_COVER_CLASSES.get(code)
+            if not class_meta:
+                continue
+            components.sort(key=lambda item: item["pixel_count"], reverse=True)
+            layer_features = []
+
+            for index, component in enumerate(components[:2], start=1):
+                centroid_lon, centroid_lat = self._pixel_to_lonlat(
+                    component["centroid_col"],
+                    component["centroid_row"],
+                    width=width,
+                    height=height,
+                    minx=minx,
+                    miny=miny,
+                    maxx=maxx,
+                    maxy=maxy,
+                )
+                geometry = self._component_bbox_geometry(
+                    component=component,
+                    width=width,
+                    height=height,
+                    minx=minx,
+                    miny=miny,
+                    maxx=maxx,
+                    maxy=maxy,
+                )
+                share = round(component["pixel_count"] / total_detected_pixels * 100, 2)
+                feature_id = f"worldcover_{code}_{index}"
+                summary = (
+                    f"基于 ESA WorldCover 2021 10m 土地覆盖图识别出的{class_meta['name_zh']}斑块，"
+                    f"约占分析范围像元的 {share}% 。"
+                )
+                detected_features.append(
+                    {
+                        "feature_id": feature_id,
+                        "name": f"{class_meta['name_zh']}斑块 {index}",
+                        "category": class_meta["category"],
+                        "subtype": f"worldcover_{code}",
+                        "node_family": class_meta["node_family"],
+                        "source_kind": "detected",
+                        "lat": round(centroid_lat, 6),
+                        "lon": round(centroid_lon, 6),
+                        "distance_m": round(_haversine_m(lat, lon, centroid_lat, centroid_lon), 1),
+                        "importance": class_meta["importance"],
+                        "summary": summary,
+                        "geometry": geometry,
+                        "tags": {
+                            "provider": "esa_worldcover",
+                            "product": "WorldCover 2021 v200",
+                            "class_code": code,
+                            "class_name": class_meta["name"],
+                            "class_name_zh": class_meta["name_zh"],
+                            "pixel_share_pct": share,
+                        },
+                        "confidence": 0.78,
+                    }
+                )
+                layer_features.append(
+                    {
+                        "type": "Feature",
+                        "geometry": geometry,
+                        "properties": {
+                            "name": f"{class_meta['name_zh']}斑块 {index}",
+                            "color": self._rgb_to_hex(class_meta["color"]),
+                            "pixel_share_pct": share,
+                            "class_code": code,
+                            "class_name": class_meta["name_zh"],
+                        },
+                    }
+                )
+
+            if layer_features:
+                remote_layers.append(
+                    {
+                        "id": f"worldcover_{code}",
+                        "name": f"遥感 {class_meta['name_zh']}",
+                        "type": "geojson",
+                        "color": self._rgb_to_hex(class_meta["color"]),
+                        "visible": True,
+                        "note": "ESA WorldCover 2021 v200 遥感识别结果",
+                        "data": {
+                            "type": "FeatureCollection",
+                            "features": layer_features,
+                        },
+                    }
+                )
+
+        detected_classes = [
+            {
+                "code": code,
+                "name": WORLD_COVER_CLASSES[code]["name"],
+                "name_zh": WORLD_COVER_CLASSES[code]["name_zh"],
+                "pixel_share_pct": round(class_pixel_counts[code] / total_detected_pixels * 100, 2),
+            }
+            for code in sorted(class_pixel_counts)
+            if code in WORLD_COVER_CLASSES
+        ]
+        remote_summary = {
+            "status": "completed" if detected_features else "empty",
+            "provider": "esa_worldcover",
+            "product": "WorldCover 2021 v200",
+            "mode": "wms_classified_png_sampling",
+            "detected_features_count": len(detected_features),
+            "detected_classes": detected_classes,
+            "note": "基于 ESA WorldCover 2021 年度土地覆盖图识别，属于卫星派生地表分类，不是实时影像解译。",
+        }
+        return detected_features, remote_summary, remote_layers
+
+    def _match_worldcover_class(self, rgb: Tuple[int, int, int], *, alpha: int) -> int:
+        if alpha == 0:
+            return 0
+        best_code = 0
+        best_distance = float("inf")
+        for code, meta in WORLD_COVER_CLASSES.items():
+            distance = sum((rgb[index] - meta["color"][index]) ** 2 for index in range(3))
+            if distance < best_distance:
+                best_distance = distance
+                best_code = code
+        return best_code if best_distance <= 6400 else 0
+
+    def _pixel_to_lonlat(
+        self,
+        col: float,
+        row: float,
+        *,
+        width: int,
+        height: int,
+        minx: float,
+        miny: float,
+        maxx: float,
+        maxy: float,
+    ) -> Tuple[float, float]:
+        mercator_x = minx + ((col + 0.5) / width) * (maxx - minx)
+        mercator_y = maxy - ((row + 0.5) / height) * (maxy - miny)
+        return _mercator_to_lonlat(mercator_x, mercator_y)
+
+    def _component_bbox_geometry(
+        self,
+        *,
+        component: Dict[str, Any],
+        width: int,
+        height: int,
+        minx: float,
+        miny: float,
+        maxx: float,
+        maxy: float,
+    ) -> Dict[str, Any]:
+        left_x = minx + (component["min_col"] / width) * (maxx - minx)
+        right_x = minx + ((component["max_col"] + 1) / width) * (maxx - minx)
+        top_y = maxy - (component["min_row"] / height) * (maxy - miny)
+        bottom_y = maxy - ((component["max_row"] + 1) / height) * (maxy - miny)
+
+        min_lon, max_lat = _mercator_to_lonlat(left_x, top_y)
+        max_lon, min_lat = _mercator_to_lonlat(right_x, bottom_y)
+        coordinates = [
+            [round(min_lon, 6), round(min_lat, 6)],
+            [round(max_lon, 6), round(min_lat, 6)],
+            [round(max_lon, 6), round(max_lat, 6)],
+            [round(min_lon, 6), round(max_lat, 6)],
+            [round(min_lon, 6), round(min_lat, 6)],
+        ]
+        return {"type": "Polygon", "coordinates": [coordinates]}
+
+    def _rgb_to_hex(self, rgb: Tuple[int, int, int]) -> str:
+        return "#{:02x}{:02x}{:02x}".format(*rgb)
 
     def _merge_context_features(
         self,
@@ -850,13 +1159,13 @@ out center tags;
             subtype = feature["subtype"]
             if subtype in {"beach", "coastline", "pier", "marina", "breakwater", "groyne"}:
                 scores["coastal"] += 3
-            if subtype in {"river", "stream", "canal", "ditch", "water", "reservoir", "basin"}:
+            if subtype in {"river", "stream", "canal", "ditch", "water", "reservoir", "basin", "worldcover_80"}:
                 scores["inland_water"] += 2
-            if subtype in {"wetland"}:
+            if subtype in {"wetland", "worldcover_90", "worldcover_95"}:
                 scores["wetland"] += 4
-            if subtype in {"industrial", "commercial", "residential", "hospital", "school", "university"}:
+            if subtype in {"industrial", "commercial", "residential", "hospital", "school", "university", "worldcover_50"}:
                 scores["urban_edge"] += 2
-            if subtype in {"farmland", "farmyard", "meadow"}:
+            if subtype in {"farmland", "farmyard", "meadow", "worldcover_40"}:
                 scores["agricultural"] += 3
 
         title = max(scores.items(), key=lambda item: item[1])[0]
@@ -992,6 +1301,7 @@ out center tags;
                 "node_count": len(nodes),
                 "edge_count": len(edges),
                 "observed_nodes": len([node for node in nodes if node["attributes"]["source_kind"] == "observed"]),
+                "detected_nodes": len([node for node in nodes if node["attributes"]["source_kind"] == "detected"]),
                 "inferred_nodes": len([node for node in nodes if node["attributes"]["source_kind"] == "inferred"]),
             },
         }
@@ -1026,36 +1336,36 @@ out center tags;
             return center["lat"], center["lon"], None
 
         proxy_specs = []
-        if observed_subtypes & {"residential", "commercial", "commercial_hub", "office_cluster", "hospital", "school", "university", "road_corridor", "transit_stop", "rail_station"}:
+        if observed_subtypes & {"residential", "commercial", "commercial_hub", "office_cluster", "hospital", "school", "university", "road_corridor", "transit_stop", "rail_station", "worldcover_50"}:
             proxy_specs.append(
                 {
                     "key": "residents",
                     "name": f"{admin_context.get('district') or admin_context.get('city') or '周边'}居民群体",
                     "label": "HumanActor",
                     "summary": "围绕居住、通勤与日常公共服务活动形成的居民代理群体。",
-                    "anchors": [node for node in feature_nodes if node["attributes"].get("subtype") in {"residential", "commercial", "commercial_hub", "office_cluster", "hospital", "school", "university", "road_corridor", "transit_stop", "rail_station"}],
-                    "targets": {"depends_on": {"residential", "commercial_hub", "road_corridor", "transit_stop", "water", "park"}, "affected_by": {"industrial", "wastewater_plant", "reservoir"}},
+                    "anchors": [node for node in feature_nodes if node["attributes"].get("subtype") in {"residential", "commercial", "commercial_hub", "office_cluster", "hospital", "school", "university", "road_corridor", "transit_stop", "rail_station", "worldcover_50"}],
+                    "targets": {"depends_on": {"residential", "commercial_hub", "road_corridor", "transit_stop", "water", "park", "worldcover_50"}, "affected_by": {"industrial", "wastewater_plant", "reservoir"}},
                 }
             )
-        if observed_subtypes & {"industrial", "farmyard", "farmland", "pier", "marina", "power_plant", "warehouse", "commercial_hub", "office_cluster", "road_corridor", "transit_stop", "rail_station"}:
+        if observed_subtypes & {"industrial", "farmyard", "farmland", "pier", "marina", "power_plant", "warehouse", "commercial_hub", "office_cluster", "road_corridor", "transit_stop", "rail_station", "worldcover_50"}:
             proxy_specs.append(
                 {
                     "key": "operators",
                     "name": "生产者/经营者群体",
                     "label": "OrganizationActor",
                     "summary": "围绕生产、运输、经营和基础设施运维活动形成的代理主体。",
-                    "anchors": [node for node in feature_nodes if node["attributes"].get("subtype") in {"industrial", "farmyard", "farmland", "pier", "marina", "power_plant", "warehouse", "commercial_hub", "office_cluster", "road_corridor", "transit_stop", "rail_station"}],
+                    "anchors": [node for node in feature_nodes if node["attributes"].get("subtype") in {"industrial", "farmyard", "farmland", "pier", "marina", "power_plant", "warehouse", "commercial_hub", "office_cluster", "road_corridor", "transit_stop", "rail_station", "worldcover_50"}],
                     "targets": {"uses": {"industrial", "farmland", "pier", "marina", "power_plant", "commercial_hub", "road_corridor", "transit_stop"}, "affects": {"water", "wetland", "reservoir"}},
                 }
             )
-        if observed_subtypes & {"beach", "park", "garden", "tourism", "marina", "commercial_hub", "transit_stop", "rail_station"}:
+        if observed_subtypes & {"beach", "park", "garden", "tourism", "marina", "commercial_hub", "transit_stop", "rail_station", "worldcover_50"}:
             proxy_specs.append(
                 {
                     "key": "visitors",
                     "name": "游客/访客群体",
                     "label": "HumanActor",
                     "summary": "围绕滨水休闲、旅游与短时访问活动形成的代理群体。",
-                    "anchors": [node for node in feature_nodes if node["attributes"].get("subtype") in {"beach", "park", "garden", "marina", "commercial_hub", "transit_stop", "rail_station"} or node["attributes"].get("category") == "facility"],
+                    "anchors": [node for node in feature_nodes if node["attributes"].get("subtype") in {"beach", "park", "garden", "marina", "commercial_hub", "transit_stop", "rail_station", "worldcover_50"} or node["attributes"].get("category") == "facility"],
                     "targets": {"uses": {"beach", "park", "garden", "marina", "commercial_hub"}, "depends_on": {"commercial", "commercial_hub", "pier", "transit_stop", "rail_station"}},
                 }
             )
@@ -1070,19 +1380,19 @@ out center tags;
                 "targets": {"regulates": {"industrial", "wastewater_plant", "protected_area", "reservoir", "pier", "road_corridor", "transit_stop", "rail_station"}},
             }
         )
-        if observed_subtypes & {"park", "nature_reserve", "garden", "wastewater_plant", "reservoir", "wetland", "road_corridor", "transit_stop"}:
+        if observed_subtypes & {"park", "nature_reserve", "garden", "wastewater_plant", "reservoir", "wetland", "road_corridor", "transit_stop", "worldcover_90", "worldcover_95"}:
             proxy_specs.append(
                 {
                     "key": "maintainers",
                     "name": "治理/维护主体",
                     "label": "OrganizationActor",
                     "summary": "承担生态修复、设施维护、巡护或运营维护的代理主体。",
-                    "anchors": [node for node in feature_nodes if node["attributes"].get("subtype") in {"park", "nature_reserve", "garden", "wastewater_plant", "reservoir", "wetland", "road_corridor", "transit_stop"}],
-                    "targets": {"maintains": {"park", "nature_reserve", "garden", "wastewater_plant", "reservoir", "wetland", "road_corridor", "transit_stop"}},
+                    "anchors": [node for node in feature_nodes if node["attributes"].get("subtype") in {"park", "nature_reserve", "garden", "wastewater_plant", "reservoir", "wetland", "road_corridor", "transit_stop", "worldcover_90", "worldcover_95"}],
+                    "targets": {"maintains": {"park", "nature_reserve", "garden", "wastewater_plant", "reservoir", "wetland", "road_corridor", "transit_stop", "worldcover_90", "worldcover_95"}},
                 }
             )
 
-        if observed_subtypes & {"water", "wetland", "industrial", "wastewater_plant", "reservoir", "coastline", "road_corridor", "transit_stop", "weather_baseline"}:
+        if observed_subtypes & {"water", "wetland", "industrial", "wastewater_plant", "reservoir", "coastline", "road_corridor", "transit_stop", "weather_baseline", "worldcover_80", "worldcover_90", "worldcover_95"}:
             proxy_specs.append(
                 {
                     "key": "vulnerable_groups",
@@ -1090,7 +1400,7 @@ out center tags;
                     "label": "HumanActor",
                     "summary": "在暴露、通达性或生计依赖上更容易受到环境变化影响的代理群体。",
                     "anchors": feature_nodes,
-                    "targets": {"exposed_to": {"water", "wetland", "industrial", "wastewater_plant", "coastline", "road_corridor", "weather_baseline"}},
+                    "targets": {"exposed_to": {"water", "wetland", "industrial", "wastewater_plant", "coastline", "road_corridor", "weather_baseline", "worldcover_80", "worldcover_90", "worldcover_95"}},
                 }
             )
 
@@ -1315,8 +1625,9 @@ out center tags;
                 "",
                 "## 6. 说明",
                 "- observed 节点来自公开空间要素。",
+                "- detected 节点来自 ESA WorldCover 2021 卫星派生土地覆盖识别。",
                 "- inferred 节点来自规则与 LLM 约束推断，不代表真实具名主体。",
-                "- 遥感真分析将在下一阶段接入 Copernicus/Sentinel-2。",
+                "- 当前遥感层是年度土地覆盖产品，不是实时卫星图像解译。",
             ]
         )
 
@@ -1331,7 +1642,7 @@ out center tags;
         stats = graph.get("stats") or {}
         title = f"{place} · {scene} map seed"
         summary = (
-            f"基于公开空间数据为 {place} 生成 {scene} 场景地图图谱，"
+            f"基于公开空间数据与卫星派生土地覆盖为 {place} 生成 {scene} 场景地图图谱，"
             f"共 {stats.get('node_count', 0)} 个节点、{stats.get('edge_count', 0)} 条边。"
         )
         return {"title": title, "summary": summary}
@@ -1341,11 +1652,103 @@ out center tags;
         aoi: Dict[str, Any],
         features: List[Dict[str, Any]],
         graph: Dict[str, Any],
+        *,
+        remote_sensing_layers: Optional[List[Dict[str, Any]]] = None,
     ) -> Dict[str, Any]:
+        detected_points = [
+            {
+                "lat": item["lat"],
+                "lon": item["lon"],
+                "label": item["name"],
+                "radius": 6,
+            }
+            for item in features
+            if item["source_kind"] == "detected"
+        ]
+        observed_points = [
+            {
+                "lat": item["lat"],
+                "lon": item["lon"],
+                "label": item["name"],
+                "radius": 5,
+            }
+            for item in features
+            if item["source_kind"] == "observed"
+        ]
+        inferred_points = [
+            {
+                "lat": node["attributes"].get("lat"),
+                "lon": node["attributes"].get("lon"),
+                "label": node["name"],
+                "radius": 6,
+            }
+            for node in graph["nodes"]
+            if node["attributes"].get("source_kind") == "inferred"
+            and node["attributes"].get("lat") is not None
+            and node["attributes"].get("lon") is not None
+        ]
+        layers = [
+            {
+                "id": "analysis-area",
+                "name": "分析范围",
+                "type": "geojson",
+                "color": "#0f766e",
+                "visible": True,
+                "note": "当前地图选点分析半径",
+                "data": {
+                    "type": "FeatureCollection",
+                    "features": [
+                        {
+                            "type": "Feature",
+                            "geometry": aoi["polygon"],
+                            "properties": {"name": "分析范围"},
+                        }
+                    ],
+                },
+            }
+        ]
+        layers.extend(remote_sensing_layers or [])
+        if observed_points:
+            layers.append(
+                {
+                    "id": "observed-features",
+                    "name": "公开空间要素",
+                    "type": "points",
+                    "color": "#1f5d45",
+                    "visible": True,
+                    "note": "来自 OSM / 逆地理编码 / 环境基线的观测节点",
+                    "data": observed_points,
+                }
+            )
+        if detected_points:
+            layers.append(
+                {
+                    "id": "detected-features",
+                    "name": "遥感识别节点",
+                    "type": "points",
+                    "color": "#0f766e",
+                    "visible": True,
+                    "note": "来自 ESA WorldCover 的卫星派生地表覆盖节点",
+                    "data": detected_points,
+                }
+            )
+        if inferred_points:
+            layers.append(
+                {
+                    "id": "inferred-proxies",
+                    "name": "代理人类节点",
+                    "type": "points",
+                    "color": "#d97706",
+                    "visible": True,
+                    "note": "规则与 LLM 推断的人类代理节点",
+                    "data": inferred_points,
+                }
+            )
         return {
             "center": aoi["center"],
             "radius_m": aoi["radius_m"],
             "analysis_polygon": aoi["polygon"],
+            "layers": layers,
             "feature_points": [
                 {
                     "id": item["feature_id"],

@@ -11,6 +11,7 @@ from flask import request, jsonify, send_file
 from . import simulation_bp
 from ..config import Config
 from ..services.map_seed_manager import MapSeedManager
+from ..services.env_simulation_config_generator import normalize_search_mode
 from ..services.zep_entity_reader import ZepEntityReader
 from ..services.oasis_profile_generator import OasisProfileGenerator
 from ..services.simulation_manager import SimulationManager, SimulationStatus
@@ -225,6 +226,12 @@ def create_simulation():
             engine_mode=data.get('engine_mode', 'envfish'),
             scenario_mode=data.get('scenario_mode', 'baseline_mode'),
             diffusion_template=data.get('diffusion_template', 'marine'),
+            search_mode=normalize_search_mode(data.get('search_mode', 'fast')),
+            temporal_preset=data.get('temporal_preset', 'standard'),
+            configured_total_rounds=data.get('configured_total_rounds', data.get('max_rounds', 12)),
+            configured_minutes_per_round=data.get('configured_minutes_per_round', data.get('minutes_per_round', 60)),
+            reference_time=data.get('reference_time', ''),
+            diffusion_provider=data.get('diffusion_provider', 'auto'),
         )
         
         return jsonify({
@@ -443,7 +450,15 @@ def prepare_simulation():
                         "status": "ready",
                         "message": "已有完成的准备工作，无需重复生成",
                         "already_prepared": True,
-                        "prepare_info": prepare_info
+                        "prepare_info": prepare_info,
+                        "scenario_mode": state.scenario_mode,
+                        "diffusion_template": state.diffusion_template,
+                        "search_mode": state.search_mode,
+                        "temporal_preset": state.temporal_preset,
+                        "configured_total_rounds": state.configured_total_rounds,
+                        "configured_minutes_per_round": state.configured_minutes_per_round,
+                        "reference_time": state.reference_time,
+                        "diffusion_provider": state.diffusion_provider,
                     }
                 })
             else:
@@ -473,10 +488,29 @@ def prepare_simulation():
         parallel_profile_count = data.get('parallel_profile_count', 5)
         scenario_mode = data.get('scenario_mode', state.scenario_mode or 'baseline_mode')
         diffusion_template = data.get('diffusion_template', state.diffusion_template or 'marine')
+        search_mode = normalize_search_mode(data.get('search_mode', state.search_mode or 'fast'))
+        temporal_profile = dict(data.get('temporal_profile') or {})
+        if data.get('temporal_preset') and not temporal_profile.get('preset'):
+            temporal_profile['preset'] = data.get('temporal_preset')
+        if data.get('max_rounds') and not temporal_profile.get('total_rounds'):
+            temporal_profile['total_rounds'] = data.get('max_rounds')
+        if data.get('minutes_per_round') and not temporal_profile.get('minutes_per_round'):
+            temporal_profile['minutes_per_round'] = data.get('minutes_per_round')
+        temporal_profile.setdefault('preset', state.temporal_preset or 'standard')
+        temporal_profile.setdefault('total_rounds', state.configured_total_rounds or 12)
+        temporal_profile.setdefault('minutes_per_round', state.configured_minutes_per_round or 60)
+        reference_time = str(data.get('reference_time') or state.reference_time or '')
+        diffusion_provider = str(data.get('diffusion_provider') or state.diffusion_provider or 'auto')
         injected_variables = data.get('injected_variables') or []
 
         state.scenario_mode = scenario_mode
         state.diffusion_template = diffusion_template
+        state.search_mode = search_mode
+        state.temporal_preset = str(temporal_profile.get('preset') or 'standard')
+        state.configured_total_rounds = max(4, int(temporal_profile.get('total_rounds') or 12))
+        state.configured_minutes_per_round = max(10, int(temporal_profile.get('minutes_per_round') or 60))
+        state.reference_time = reference_time
+        state.diffusion_provider = diffusion_provider
 
         # ========== 同步获取实体数量（在后台任务启动前） ==========
         # 这样前端在调用prepare后立即就能获取到预期Agent总数
@@ -596,6 +630,10 @@ def prepare_simulation():
                     parallel_profile_count=parallel_profile_count,
                     scenario_mode=scenario_mode,
                     diffusion_template=diffusion_template,
+                    search_mode=search_mode,
+                    temporal_profile=temporal_profile,
+                    reference_time=reference_time,
+                    diffusion_provider=diffusion_provider,
                     injected_variables=injected_variables,
                 )
                 
@@ -632,6 +670,10 @@ def prepare_simulation():
                 "entity_types": state.entity_types,  # 实体类型列表
                 "scenario_mode": scenario_mode,
                 "diffusion_template": diffusion_template,
+                "search_mode": search_mode,
+                "temporal_profile": temporal_profile,
+                "reference_time": reference_time,
+                "diffusion_provider": diffusion_provider,
                 "injected_variables_count": len(injected_variables),
             }
         })
@@ -691,6 +733,7 @@ def get_prepare_status():
         if simulation_id:
             is_prepared, prepare_info = _check_simulation_prepared(simulation_id)
             if is_prepared:
+                prepared_state = SimulationManager().get_simulation(simulation_id)
                 return jsonify({
                     "success": True,
                     "data": {
@@ -699,7 +742,10 @@ def get_prepare_status():
                         "progress": 100,
                         "message": "已有完成的准备工作",
                         "already_prepared": True,
-                        "prepare_info": prepare_info
+                        "prepare_info": prepare_info,
+                        "scenario_mode": prepared_state.scenario_mode if prepared_state else None,
+                        "diffusion_template": prepared_state.diffusion_template if prepared_state else None,
+                        "search_mode": prepared_state.search_mode if prepared_state else None,
                     }
                 })
         
@@ -730,6 +776,7 @@ def get_prepare_status():
             if simulation_id:
                 is_prepared, prepare_info = _check_simulation_prepared(simulation_id)
                 if is_prepared:
+                    prepared_state = SimulationManager().get_simulation(simulation_id)
                     return jsonify({
                         "success": True,
                         "data": {
@@ -739,7 +786,10 @@ def get_prepare_status():
                             "progress": 100,
                             "message": "任务已完成（准备工作已存在）",
                             "already_prepared": True,
-                            "prepare_info": prepare_info
+                            "prepare_info": prepare_info,
+                            "scenario_mode": prepared_state.scenario_mode if prepared_state else None,
+                            "diffusion_template": prepared_state.diffusion_template if prepared_state else None,
+                            "search_mode": prepared_state.search_mode if prepared_state else None,
                         }
                     })
             
@@ -1112,7 +1162,9 @@ def get_simulation_profiles_realtime(simulation_id: str):
             }), 404
         
         # 确定文件路径
-        if platform == "reddit":
+        if platform == "envfish":
+            profiles_file = os.path.join(sim_dir, "profiles_full.json")
+        elif platform == "reddit":
             profiles_file = os.path.join(sim_dir, "reddit_profiles.json")
         else:
             profiles_file = os.path.join(sim_dir, "twitter_profiles.csv")
@@ -1128,7 +1180,7 @@ def get_simulation_profiles_realtime(simulation_id: str):
             file_modified_at = datetime.fromtimestamp(file_stat.st_mtime).isoformat()
             
             try:
-                if platform == "reddit":
+                if platform in {"reddit", "envfish"}:
                     with open(profiles_file, 'r', encoding='utf-8') as f:
                         profiles = json.load(f)
                 else:
@@ -1274,6 +1326,10 @@ def get_simulation_config_realtime(simulation_id: str):
         if config:
             response_data["summary"] = {
                 "total_agents": len(config.get("agent_configs", [])),
+                "total_regions": len(config.get("region_graph", [])),
+                "total_subregions": len(config.get("subregion_graph", [])),
+                "total_transport_edges": len(config.get("transport_edges", [])),
+                "total_relationships": len(config.get("agent_relationship_graph", [])),
                 "simulation_hours": config.get("time_config", {}).get("total_simulation_hours"),
                 "initial_posts_count": len(config.get("event_config", {}).get("initial_posts", [])),
                 "hot_topics_count": len(config.get("event_config", {}).get("hot_topics", [])),
@@ -1285,6 +1341,10 @@ def get_simulation_config_realtime(simulation_id: str):
             response_data["engine_mode"] = config.get("engine_mode")
             response_data["scenario_mode"] = config.get("scenario_mode")
             response_data["diffusion_template"] = config.get("diffusion_template")
+            response_data["search_mode"] = config.get("search_mode")
+            response_data["temporal_profile"] = config.get("temporal_profile")
+            response_data["reference_time"] = config.get("reference_time")
+            response_data["diffusion_context"] = config.get("diffusion_context")
 
             grounding_summary = config.get("data_grounding_summary") or {}
             if isinstance(grounding_summary, dict):
@@ -1679,6 +1739,7 @@ def start_simulation():
         response_data['engine_mode'] = state.engine_mode
         response_data['scenario_mode'] = state.scenario_mode
         response_data['diffusion_template'] = state.diffusion_template
+        response_data['search_mode'] = state.search_mode
         if max_rounds:
             response_data['max_rounds_applied'] = max_rounds
         response_data['graph_memory_update_enabled'] = enable_graph_memory_update
@@ -1866,6 +1927,7 @@ def get_run_status(simulation_id: str):
                     "engine_mode": simulation_state.engine_mode if simulation_state else None,
                     "scenario_mode": simulation_state.scenario_mode if simulation_state else None,
                     "diffusion_template": simulation_state.diffusion_template if simulation_state else None,
+                    "search_mode": simulation_state.search_mode if simulation_state else None,
                 }
             })
         
@@ -1876,6 +1938,7 @@ def get_run_status(simulation_id: str):
             result["engine_mode"] = simulation_state.engine_mode
             result["scenario_mode"] = simulation_state.scenario_mode
             result["diffusion_template"] = simulation_state.diffusion_template
+            result["search_mode"] = simulation_state.search_mode
         return jsonify({
             "success": True,
             "data": result
@@ -1991,11 +2054,13 @@ def get_run_status_detail(simulation_id: str):
             envfish_artifacts = SimulationRunner.get_envfish_artifacts(simulation_id)
             result["envfish"] = envfish_artifacts
             result["region_graph"] = envfish_artifacts.get("region_graph", [])
+            result["subregion_graph"] = envfish_artifacts.get("subregion_graph", [])
             result["risk_objects"] = envfish_artifacts.get("risk_objects", [])
             result["primary_risk_object"] = envfish_artifacts.get("primary_risk_object")
             result["round_snapshots"] = envfish_artifacts.get("round_snapshots", [])
             result["latest_snapshot"] = envfish_artifacts.get("latest_snapshot")
             result["spread_events"] = envfish_artifacts.get("spread_events", [])
+            result["agent_interactions"] = envfish_artifacts.get("agent_interactions", [])
             result["interventions"] = envfish_artifacts.get("interventions", [])
             result["regional_scores"] = envfish_artifacts.get("regional_scores", [])
             latest_snapshot = envfish_artifacts.get("latest_snapshot") or {}

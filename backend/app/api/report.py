@@ -6,11 +6,13 @@ Report API路由
 import os
 import traceback
 import threading
+from datetime import datetime
 from flask import request, jsonify, send_file
 
 from . import report_bp
 from ..config import Config
-from ..services.report_agent import ReportAgent, ReportManager, ReportStatus
+from ..services.report_agent import Report, ReportAgent, ReportManager, ReportStatus
+from ..services.report_analysis import ReportAnalysisService
 from ..services.simulation_manager import SimulationManager
 from ..models.project import ProjectManager
 from ..models.task import TaskManager, TaskStatus
@@ -108,6 +110,16 @@ def generate_report():
         # 提前生成 report_id，以便立即返回给前端
         import uuid
         report_id = f"report_{uuid.uuid4().hex[:12]}"
+
+        placeholder_report = Report(
+            report_id=report_id,
+            simulation_id=simulation_id,
+            graph_id=graph_id,
+            simulation_requirement=simulation_requirement,
+            status=ReportStatus.PENDING,
+            created_at=datetime.now().isoformat(),
+        )
+        ReportManager.save_report(placeholder_report)
         
         # 创建异步任务
         task_manager = TaskManager()
@@ -552,6 +564,188 @@ def chat_with_report_agent():
         
     except Exception as e:
         logger.error(f"对话失败: {str(e)}")
+        return jsonify({
+            "success": False,
+            "error": str(e),
+            "traceback": traceback.format_exc()
+        }), 500
+
+
+@report_bp.route('/<report_id>/analysis/overview', methods=['GET'])
+def get_report_analysis_overview(report_id: str):
+    """获取结果分析页面的总览数据。"""
+    try:
+        service = ReportAnalysisService(report_id)
+        return jsonify({
+            "success": True,
+            "data": service.get_overview()
+        })
+    except ValueError as e:
+        return jsonify({
+            "success": False,
+            "error": str(e),
+        }), 404
+    except Exception as e:
+        logger.error(f"获取结果分析总览失败: {report_id}, error={str(e)}")
+        return jsonify({
+            "success": False,
+            "error": str(e),
+            "traceback": traceback.format_exc()
+        }), 500
+
+
+@report_bp.route('/<report_id>/analysis/tab/<tab_id>', methods=['GET'])
+def get_report_analysis_tab(report_id: str, tab_id: str):
+    """按标签获取结构化分析数据。"""
+    try:
+        service = ReportAnalysisService(report_id)
+        return jsonify({
+            "success": True,
+            "data": service.get_tab_data(tab_id)
+        })
+    except ValueError as e:
+        status_code = 400 if "不支持的 tab" in str(e) else 404
+        return jsonify({
+            "success": False,
+            "error": str(e),
+        }), status_code
+    except Exception as e:
+        logger.error(f"获取结果分析标签失败: report_id={report_id}, tab_id={tab_id}, error={str(e)}")
+        return jsonify({
+            "success": False,
+            "error": str(e),
+            "traceback": traceback.format_exc()
+        }), 500
+
+
+@report_bp.route('/<report_id>/analysis/graph', methods=['GET'])
+def get_report_analysis_graph(report_id: str):
+    """获取结果分析页使用的统一图谱数据。"""
+    try:
+        service = ReportAnalysisService(report_id)
+        return jsonify({
+            "success": True,
+            "data": service.get_graph_data()
+        })
+    except ValueError as e:
+        return jsonify({
+            "success": False,
+            "error": str(e),
+        }), 404
+    except Exception as e:
+        logger.error(f"获取结果分析图谱失败: report_id={report_id}, error={str(e)}")
+        return jsonify({
+            "success": False,
+            "error": str(e),
+            "traceback": traceback.format_exc()
+        }), 500
+
+
+@report_bp.route('/<report_id>/analysis/node/context', methods=['POST'])
+def get_report_analysis_node_context(report_id: str):
+    """获取节点探索上下文。"""
+    try:
+        data = request.get_json() or {}
+        node_id = data.get('node_id')
+        round_range = data.get('round_range')
+
+        if not node_id:
+            return jsonify({
+                "success": False,
+                "error": "请提供 node_id"
+            }), 400
+
+        service = ReportAnalysisService(report_id)
+        return jsonify({
+            "success": True,
+            "data": service.get_node_context(node_id=node_id, round_range=round_range)
+        })
+    except ValueError as e:
+        return jsonify({
+            "success": False,
+            "error": str(e),
+        }), 404
+    except Exception as e:
+        logger.error(f"获取节点上下文失败: report_id={report_id}, error={str(e)}")
+        return jsonify({
+            "success": False,
+            "error": str(e),
+            "traceback": traceback.format_exc()
+        }), 500
+
+
+@report_bp.route('/<report_id>/analysis/node/explore', methods=['POST'])
+def explore_report_analysis_node(report_id: str):
+    """执行节点深度探索。"""
+    try:
+        data = request.get_json() or {}
+        node_id = data.get('node_id')
+        round_range = data.get('round_range')
+
+        if not node_id:
+            return jsonify({
+                "success": False,
+                "error": "请提供 node_id"
+            }), 400
+
+        service = ReportAnalysisService(report_id)
+        return jsonify({
+            "success": True,
+            "data": service.explore_node(node_id=node_id, round_range=round_range)
+        })
+    except ValueError as e:
+        return jsonify({
+            "success": False,
+            "error": str(e),
+        }), 404
+    except Exception as e:
+        logger.error(f"执行节点深度探索失败: report_id={report_id}, error={str(e)}")
+        return jsonify({
+            "success": False,
+            "error": str(e),
+            "traceback": traceback.format_exc()
+        }), 500
+
+
+@report_bp.route('/<report_id>/analysis/node/chat', methods=['POST'])
+def chat_on_report_analysis_node(report_id: str):
+    """围绕节点上下文进行追问。"""
+    try:
+        data = request.get_json() or {}
+        node_id = data.get('node_id')
+        message = data.get('message')
+        chat_history = data.get('chat_history', [])
+        round_range = data.get('round_range')
+
+        if not node_id:
+            return jsonify({
+                "success": False,
+                "error": "请提供 node_id"
+            }), 400
+
+        if not message:
+            return jsonify({
+                "success": False,
+                "error": "请提供 message"
+            }), 400
+
+        service = ReportAnalysisService(report_id)
+        return jsonify({
+            "success": True,
+            "data": service.chat_on_node(
+                node_id=node_id,
+                message=message,
+                chat_history=chat_history,
+                round_range=round_range
+            )
+        })
+    except ValueError as e:
+        return jsonify({
+            "success": False,
+            "error": str(e),
+        }), 404
+    except Exception as e:
+        logger.error(f"节点上下文追问失败: report_id={report_id}, error={str(e)}")
         return jsonify({
             "success": False,
             "error": str(e),

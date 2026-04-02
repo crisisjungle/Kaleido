@@ -309,7 +309,6 @@ const graphData = computed(() => (seedData.value ? normalizeGraphData(seedData.v
 
 const nodeCount = computed(() => graphData.value?.node_count || graphData.value?.nodes?.length || 0)
 const edgeCount = computed(() => graphData.value?.edge_count || graphData.value?.edges?.length || 0)
-const layerCount = computed(() => visibleLayers.value.filter((layer) => layer.visible !== false).length)
 const seedSummary = computed(() => {
   const source = seedData.value || {}
   return (
@@ -438,7 +437,56 @@ function normalizeLayers(source) {
     }))
   }
 
-  return []
+  const derivedLayers = []
+
+  if (source?.analysis_polygon) {
+    derivedLayers.push({
+      id: 'analysis-polygon',
+      name: '分析范围',
+      type: 'geojson',
+      color: '#0f766e',
+      visible: true,
+      note: '地图选点分析范围',
+      data: {
+        type: 'FeatureCollection',
+        features: [
+          {
+            type: 'Feature',
+            geometry: source.analysis_polygon,
+            properties: { name: '分析范围', color: '#0f766e' }
+          }
+        ]
+      }
+    })
+  }
+
+  if (Array.isArray(source?.feature_points) && source.feature_points.length > 0) {
+    const grouped = source.feature_points.reduce((acc, item) => {
+      const sourceKind = item?.source_kind || 'observed'
+      if (!acc[sourceKind]) acc[sourceKind] = []
+      acc[sourceKind].push({
+        lat: item.lat,
+        lon: item.lon,
+        label: item.name,
+        radius: sourceKind === 'detected' ? 7 : 6
+      })
+      return acc
+    }, {})
+
+    Object.entries(grouped).forEach(([key, points], index) => {
+      derivedLayers.push({
+        id: `legacy-${key}`,
+        name: `${key} 特征`,
+        type: 'points',
+        color: pickLayerColor(index, key),
+        visible: true,
+        note: '后端兼容层转换出的空间节点',
+        data: points
+      })
+    })
+  }
+
+  return derivedLayers
 }
 
 function inferLayerType(layer) {
@@ -490,6 +538,8 @@ const mapLayers = computed(() => {
   const explicitLayers = visibleLayers.value.length > 0 ? visibleLayers.value : normalizeLayers(layersData.value)
   return [...explicitLayers, ...derived]
 })
+
+const layerCount = computed(() => mapLayers.value.filter((layer) => layer.visible !== false).length)
 
 function syncLayerVisibility() {
   visibleLayers.value = visibleLayers.value.map((layer) => ({ ...layer }))

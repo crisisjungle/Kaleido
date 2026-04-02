@@ -19,7 +19,7 @@
     
     <div class="graph-container" ref="graphContainer">
       <!-- 图谱可视化 -->
-      <div v-if="graphData" class="graph-view">
+      <div v-if="hasGraphContent" class="graph-view">
         <svg ref="graphSvg" class="graph-svg"></svg>
         
         <!-- 构建中/模拟中提示 -->
@@ -100,6 +100,15 @@
                 <span v-for="label in selectedItem.data.labels" :key="label" class="label-tag">
                   {{ label }}
                 </span>
+              </div>
+            </div>
+
+            <div v-if="enableAnalysisActions" class="detail-section node-action-section">
+              <div class="section-title">节点操作</div>
+              <div class="node-action-buttons">
+                <button class="node-action-btn" @click="triggerNodeAction('view')">查看详情</button>
+                <button class="node-action-btn" @click="triggerNodeAction('chat')">开始交流</button>
+                <button class="node-action-btn primary" @click="triggerNodeAction('explore')">深度探索</button>
               </div>
             </div>
           </div>
@@ -212,12 +221,12 @@
       <!-- 等待/空状态 -->
       <div v-else class="graph-state">
         <div class="empty-icon">❖</div>
-        <p class="empty-text">等待本体生成...</p>
+        <p class="empty-text">{{ currentPhase === 4 ? '结果图谱暂无可用节点' : '等待本体生成...' }}</p>
       </div>
     </div>
 
     <!-- 底部图例 (Bottom Left) -->
-    <div v-if="graphData && entityTypes.length" class="graph-legend">
+    <div v-if="hasGraphContent && entityTypes.length" class="graph-legend">
       <span class="legend-title">Entity Types</span>
       <div class="legend-items">
         <div class="legend-item" v-for="type in entityTypes" :key="type.name">
@@ -228,7 +237,7 @@
     </div>
     
     <!-- 显示边标签开关 -->
-    <div v-if="graphData" class="edge-labels-toggle">
+    <div v-if="hasGraphContent" class="edge-labels-toggle">
       <label class="toggle-switch">
         <input type="checkbox" v-model="showEdgeLabels" />
         <span class="slider"></span>
@@ -258,10 +267,14 @@ const props = defineProps({
   highlightLabel: {
     type: String,
     default: ''
+  },
+  enableAnalysisActions: {
+    type: Boolean,
+    default: false
   }
 })
 
-const emit = defineEmits(['refresh', 'toggle-maximize'])
+const emit = defineEmits(['refresh', 'toggle-maximize', 'node-select', 'node-action'])
 
 const graphContainer = ref(null)
 const graphSvg = ref(null)
@@ -313,6 +326,12 @@ const entityTypes = computed(() => {
   return Object.values(typeMap)
 })
 
+const hasGraphContent = computed(() => {
+  const nodes = props.graphData?.nodes || []
+  const edges = props.graphData?.edges || []
+  return nodes.length > 0 || edges.length > 0
+})
+
 // 格式化时间
 const formatDateTime = (dateStr) => {
   if (!dateStr) return ''
@@ -331,9 +350,32 @@ const formatDateTime = (dateStr) => {
   }
 }
 
+const buildNodePayload = (item) => {
+  if (!item || item.type !== 'node' || !item.data) return null
+  return {
+    uuid: item.data.uuid,
+    name: item.data.name,
+    labels: item.data.labels || [],
+    summary: item.data.summary || '',
+    attributes: item.data.attributes || {},
+    entityType: item.entityType,
+    color: item.color,
+  }
+}
+
 const closeDetailPanel = () => {
   selectedItem.value = null
   expandedSelfLoops.value = new Set() // 重置展开状态
+}
+
+const triggerNodeAction = (action) => {
+  const payload = buildNodePayload(selectedItem.value)
+  if (!payload) return
+  emit('node-action', {
+    action,
+    node: payload,
+    timestamp: Date.now(),
+  })
 }
 
 let currentSimulation = null
@@ -343,8 +385,12 @@ let linkLabelBgRef = null
 const renderGraph = () => {
   if (!graphSvg.value || !props.graphData) return
   
-  // 停止之前的仿真
+  // 停止之前的仿真并保存节点位置以防止图谱不必要地跳动
+  const oldNodeMap = new Map()
   if (currentSimulation) {
+    currentSimulation.nodes().forEach(oldNode => {
+      oldNodeMap.set(oldNode.id, oldNode)
+    })
     currentSimulation.stop()
   }
   
@@ -368,12 +414,22 @@ const renderGraph = () => {
   const nodeMap = {}
   nodesData.forEach(n => nodeMap[n.uuid] = n)
   
-  const nodes = nodesData.map(n => ({
-    id: n.uuid,
-    name: n.name || 'Unnamed',
-    type: n.labels?.find(l => l !== 'Entity') || 'Entity',
-    rawData: n
-  }))
+  const nodes = nodesData.map(n => {
+    const oldNode = oldNodeMap.get(n.uuid)
+    return {
+      id: n.uuid,
+      name: n.name || 'Unnamed',
+      type: n.labels?.find(l => l !== 'Entity') || 'Entity',
+      rawData: n,
+      x: oldNode ? oldNode.x : undefined,
+      y: oldNode ? oldNode.y : undefined,
+      fx: oldNode && oldNode.fx !== null ? oldNode.fx : undefined,
+      fy: oldNode && oldNode.fy !== null ? oldNode.fy : undefined,
+      vx: oldNode ? oldNode.vx : undefined,
+      vy: oldNode ? oldNode.vy : undefined,
+      _isDragging: oldNode ? oldNode._isDragging : false
+    }
+  })
 
   const highlightedIdSet = new Set(
     (props.highlightNodeIds || [])
@@ -509,6 +565,7 @@ const renderGraph = () => {
 
   // Simulation - 根据边数量动态调整节点间距
   const simulation = d3.forceSimulation(nodes)
+    .alpha(oldNodeMap.size > 0 ? 0.3 : 1) // 降低热度避免图谱位置突变跳动
     .force('link', d3.forceLink(edges).id(d => d.id).distance(d => {
       // 根据这对节点之间的边数量动态调整距离
       // 基础距离 150，每多一条边增加 40
@@ -744,6 +801,7 @@ const renderGraph = () => {
         entityType: d.type,
         color: getColor(d.type)
       }
+      emit('node-select', buildNodePayload(selectedItem.value))
     })
     .on('mouseenter', (event, d) => {
       if (!selectedItem.value || selectedItem.value.data?.uuid !== d.rawData.uuid) {
@@ -1217,6 +1275,46 @@ input:checked + .slider:before {
   border-top: 1px solid #F0F0F0;
 }
 
+.node-action-section {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.node-action-buttons {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.node-action-btn {
+  height: 32px;
+  padding: 0 12px;
+  border-radius: 8px;
+  border: 1px solid #E2E8F0;
+  background: #FFF;
+  color: #334155;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.node-action-btn:hover {
+  background: #F8FAFC;
+  border-color: #CBD5E1;
+}
+
+.node-action-btn.primary {
+  background: #0F766E;
+  color: #FFF;
+  border-color: #0F766E;
+}
+
+.node-action-btn.primary:hover {
+  background: #0B5F59;
+}
+
 .section-title {
   font-size: 12px;
   font-weight: 600;
@@ -1302,7 +1400,7 @@ input:checked + .slider:before {
 /* Building hint */
 .graph-building-hint {
   position: absolute;
-  bottom: 160px; /* Moved up from 80px */
+  top: 72px; /* Move to top center to prevent overlap with bottom legend */
   left: 50%;
   transform: translateX(-50%);
   background: rgba(0, 0, 0, 0.65);

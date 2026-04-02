@@ -43,6 +43,58 @@ export const getReport = (reportId) => {
 }
 
 /**
+ * 获取结果分析总览
+ * @param {string} reportId
+ */
+export const getReportAnalysisOverview = (reportId) => {
+  return service.get(`/api/report/${reportId}/analysis/overview`)
+}
+
+/**
+ * 获取结果分析标签数据
+ * @param {string} reportId
+ * @param {string} tabId
+ */
+export const getReportAnalysisTab = (reportId, tabId) => {
+  return service.get(`/api/report/${reportId}/analysis/tab/${tabId}`)
+}
+
+/**
+ * 获取结果分析图谱
+ * @param {string} reportId
+ */
+export const getReportAnalysisGraph = (reportId) => {
+  return service.get(`/api/report/${reportId}/analysis/graph`)
+}
+
+/**
+ * 获取节点上下文
+ * @param {string} reportId
+ * @param {Object} data - { node_id, round_range? }
+ */
+export const getReportNodeContext = (reportId, data) => {
+  return requestWithRetry(() => service.post(`/api/report/${reportId}/analysis/node/context`, data), 2, 600)
+}
+
+/**
+ * 节点深度探索
+ * @param {string} reportId
+ * @param {Object} data - { node_id, round_range? }
+ */
+export const exploreReportNode = (reportId, data) => {
+  return requestWithRetry(() => service.post(`/api/report/${reportId}/analysis/node/explore`, data), 2, 800)
+}
+
+/**
+ * 节点上下文追问
+ * @param {string} reportId
+ * @param {Object} data - { node_id, message, chat_history?, round_range? }
+ */
+export const chatWithReportNode = (reportId, data) => {
+  return requestWithRetry(() => service.post(`/api/report/${reportId}/analysis/node/chat`, data), 2, 800)
+}
+
+/**
  * 与 Report Agent 对话
  * @param {Object} data - { simulation_id, message, chat_history? }
  */

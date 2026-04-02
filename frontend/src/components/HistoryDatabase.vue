@@ -427,7 +427,7 @@ const goToSimulation = () => {
 const goToReport = () => {
   if (selectedProject.value?.report_id) {
     router.push({
-      name: 'Report',
+      name: 'Analysis',
       params: { reportId: selectedProject.value.report_id }
     })
     closeModal()

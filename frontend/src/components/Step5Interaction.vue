@@ -121,7 +121,7 @@
                   v-for="(agent, idx) in profiles" 
                   :key="idx"
                   class="dropdown-item"
-                  @click="selectAgent(agent, idx)"
+                  @click="selectAgent(agent, getAgentId(agent, idx))"
                 >
                   <div class="agent-avatar">{{ (agent.username || 'A')[0] }}</div>
                   <div class="agent-info">
@@ -325,12 +325,12 @@
                   v-for="(agent, idx) in profiles" 
                   :key="idx"
                   class="agent-checkbox"
-                  :class="{ checked: selectedAgents.has(idx) }"
+                  :class="{ checked: selectedAgents.has(getAgentId(agent, idx)) }"
                 >
                   <input 
                     type="checkbox" 
-                    :checked="selectedAgents.has(idx)"
-                    @change="toggleAgentSelection(idx)"
+                    :checked="selectedAgents.has(getAgentId(agent, idx))"
+                    @change="toggleAgentSelection(getAgentId(agent, idx))"
                   >
                   <div class="checkbox-avatar">{{ (agent.username || 'A')[0] }}</div>
                   <div class="checkbox-info">
@@ -466,6 +466,12 @@ const addLog = (msg) => {
   emit('add-log', msg)
 }
 
+const getAgentId = (agent, fallback = null) => {
+  const candidate = agent?.agent_id ?? agent?.user_id ?? fallback
+  const parsed = Number(candidate)
+  return Number.isNaN(parsed) ? fallback : parsed
+}
+
 const toggleSectionCollapse = (idx) => {
   if (!generatedSections.value[idx + 1]) return
   const newSet = new Set(collapsedSections.value)
@@ -529,7 +535,7 @@ const selectAgent = (agent, idx) => {
   saveChatHistory()
   
   selectedAgent.value = agent
-  selectedAgentIndex.value = idx
+  selectedAgentIndex.value = getAgentId(agent, idx)
   chatTarget.value = 'agent'
   showAgentDropdown.value = false
   
@@ -791,7 +797,7 @@ const toggleAgentSelection = (idx) => {
 
 const selectAllAgents = () => {
   const newSet = new Set()
-  profiles.value.forEach((_, idx) => newSet.add(idx))
+  profiles.value.forEach((agent, idx) => newSet.add(getAgentId(agent, idx)))
   selectedAgents.value = newSet
 }
 
@@ -827,7 +833,7 @@ const submitSurvey = async () => {
       
       for (const interview of interviews) {
         const agentIdx = interview.agent_id
-        const agent = profiles.value[agentIdx]
+        const agent = profiles.value.find(item => getAgentId(item) === agentIdx)
         
         // 优先使用 reddit 平台回复，其次 twitter
         let responseContent = '无响应'
@@ -915,6 +921,13 @@ const loadProfiles = async () => {
   if (!props.simulationId) return
   
   try {
+    const envfishRes = await getSimulationProfilesRealtime(props.simulationId, 'envfish')
+    if (envfishRes.success && envfishRes.data?.profiles?.length) {
+      profiles.value = envfishRes.data.profiles || []
+      addLog(`加载了 ${profiles.value.length} 个 EnvFish 个体`)
+      return
+    }
+
     const res = await getSimulationProfilesRealtime(props.simulationId, 'reddit')
     if (res.success && res.data) {
       profiles.value = res.data.profiles || []

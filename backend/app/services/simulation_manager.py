@@ -17,7 +17,7 @@ from typing import Any, Dict, List, Optional
 
 from ..utils.logger import get_logger
 from .env_profile_generator import EnvProfileGenerator
-from .env_simulation_config_generator import EnvSimulationConfigGenerator
+from .env_simulation_config_generator import EnvSimulationConfigGenerator, normalize_search_mode
 from .envfish_models import ENVFISH_ENGINE_MODE, InjectedVariable, dump_json, write_profiles_csv
 from .map_seed_manager import MapSeedManager
 from .risk_object_builder import RiskObjectBuilder
@@ -52,6 +52,12 @@ class SimulationState:
     engine_mode: str = ENVFISH_ENGINE_MODE
     scenario_mode: str = "baseline_mode"
     diffusion_template: str = "marine"
+    search_mode: str = "fast"
+    temporal_preset: str = "standard"
+    configured_total_rounds: int = 12
+    configured_minutes_per_round: int = 60
+    reference_time: str = ""
+    diffusion_provider: str = "auto"
     status: SimulationStatus = SimulationStatus.CREATED
     entities_count: int = 0
     profiles_count: int = 0
@@ -81,6 +87,12 @@ class SimulationState:
             "engine_mode": self.engine_mode,
             "scenario_mode": self.scenario_mode,
             "diffusion_template": self.diffusion_template,
+            "search_mode": self.search_mode,
+            "temporal_preset": self.temporal_preset,
+            "configured_total_rounds": self.configured_total_rounds,
+            "configured_minutes_per_round": self.configured_minutes_per_round,
+            "reference_time": self.reference_time,
+            "diffusion_provider": self.diffusion_provider,
             "status": self.status.value,
             "entities_count": self.entities_count,
             "profiles_count": self.profiles_count,
@@ -109,6 +121,12 @@ class SimulationState:
             "engine_mode": self.engine_mode,
             "scenario_mode": self.scenario_mode,
             "diffusion_template": self.diffusion_template,
+            "search_mode": self.search_mode,
+            "temporal_preset": self.temporal_preset,
+            "configured_total_rounds": self.configured_total_rounds,
+            "configured_minutes_per_round": self.configured_minutes_per_round,
+            "reference_time": self.reference_time,
+            "diffusion_provider": self.diffusion_provider,
             "status": self.status.value,
             "entities_count": self.entities_count,
             "profiles_count": self.profiles_count,
@@ -162,6 +180,12 @@ class SimulationManager:
             engine_mode=data.get("engine_mode", ENVFISH_ENGINE_MODE),
             scenario_mode=data.get("scenario_mode", "baseline_mode"),
             diffusion_template=data.get("diffusion_template", "marine"),
+            search_mode=normalize_search_mode(data.get("search_mode", "fast")),
+            temporal_preset=data.get("temporal_preset", "standard"),
+            configured_total_rounds=data.get("configured_total_rounds", 12),
+            configured_minutes_per_round=data.get("configured_minutes_per_round", 60),
+            reference_time=data.get("reference_time", ""),
+            diffusion_provider=data.get("diffusion_provider", "auto"),
             status=SimulationStatus(data.get("status", "created")),
             entities_count=data.get("entities_count", 0),
             profiles_count=data.get("profiles_count", 0),
@@ -193,6 +217,12 @@ class SimulationManager:
         engine_mode: str = ENVFISH_ENGINE_MODE,
         scenario_mode: str = "baseline_mode",
         diffusion_template: str = "marine",
+        search_mode: str = "fast",
+        temporal_preset: str = "standard",
+        configured_total_rounds: int = 12,
+        configured_minutes_per_round: int = 60,
+        reference_time: str = "",
+        diffusion_provider: str = "auto",
         source_mode: str = "graph",
         map_seed_id: Optional[str] = None,
     ) -> SimulationState:
@@ -208,6 +238,12 @@ class SimulationManager:
             engine_mode=engine_mode or ENVFISH_ENGINE_MODE,
             scenario_mode=scenario_mode or "baseline_mode",
             diffusion_template=diffusion_template or "marine",
+            search_mode=normalize_search_mode(search_mode),
+            temporal_preset=temporal_preset or "standard",
+            configured_total_rounds=max(4, int(configured_total_rounds or 12)),
+            configured_minutes_per_round=max(10, int(configured_minutes_per_round or 60)),
+            reference_time=str(reference_time or ""),
+            diffusion_provider=diffusion_provider or "auto",
             source_mode=source_mode or "graph",
             map_seed_id=map_seed_id,
         )
@@ -226,6 +262,10 @@ class SimulationManager:
         parallel_profile_count: int = 3,
         scenario_mode: str = "baseline_mode",
         diffusion_template: str = "marine",
+        search_mode: str = "fast",
+        temporal_profile: Optional[Dict[str, Any]] = None,
+        reference_time: str = "",
+        diffusion_provider: str = "auto",
         injected_variables: Optional[List[Dict[str, Any]]] = None,
     ) -> SimulationState:
         state = self._load_simulation_state(simulation_id)
@@ -235,6 +275,13 @@ class SimulationManager:
         state.status = SimulationStatus.PREPARING
         state.scenario_mode = scenario_mode or state.scenario_mode
         state.diffusion_template = diffusion_template or state.diffusion_template
+        state.search_mode = normalize_search_mode(search_mode or state.search_mode)
+        state.temporal_preset = str((temporal_profile or {}).get("preset") or state.temporal_preset or "standard")
+        if temporal_profile:
+            state.configured_total_rounds = max(4, int(temporal_profile.get("total_rounds") or state.configured_total_rounds or 12))
+            state.configured_minutes_per_round = max(10, int(temporal_profile.get("minutes_per_round") or state.configured_minutes_per_round or 60))
+        state.reference_time = str(reference_time or state.reference_time or "")
+        state.diffusion_provider = str(diffusion_provider or state.diffusion_provider or "auto")
         state.error = None
         self._save_simulation_state(state)
 
@@ -283,6 +330,8 @@ class SimulationManager:
                 document_text=document_text,
                 scenario_mode=state.scenario_mode,
                 diffusion_template=state.diffusion_template,
+                reference_time=state.reference_time,
+                diffusion_provider=state.diffusion_provider,
                 use_llm=use_llm_for_profiles,
                 progress_callback=profile_progress,
                 parallel_count=parallel_profile_count,
@@ -292,8 +341,14 @@ class SimulationManager:
             state.region_count = len(result.regions)
 
             dump_json(os.path.join(sim_dir, "region_graph_snapshot.json"), [region.to_dict() for region in result.regions])
+            dump_json(os.path.join(sim_dir, "subregion_graph_snapshot.json"), [region.to_dict() for region in result.subregions])
             dump_json(os.path.join(sim_dir, "grounding_summary.json"), result.grounding_summary)
+            dump_json(os.path.join(sim_dir, "transport_edges.json"), [edge.to_dict() for edge in result.transport_edges])
+            dump_json(os.path.join(sim_dir, "diffusion_context.json"), result.diffusion_context)
             dump_json(os.path.join(sim_dir, "profiles_full.json"), [profile.to_dict() for profile in result.profiles])
+            dump_json(os.path.join(sim_dir, "agent_relationship_graph.json"), [edge.to_dict() for edge in result.agent_relationships])
+            dump_json(os.path.join(sim_dir, "region_agent_index.json"), result.region_agent_index)
+            dump_json(os.path.join(sim_dir, "agent_generation_summary.json"), result.generation_summary)
 
             reddit_profiles = [profile.to_reddit_format() for profile in result.profiles]
             twitter_profiles = [profile.to_twitter_format() for profile in result.profiles]
@@ -331,9 +386,21 @@ class SimulationManager:
                 simulation_requirement=simulation_requirement,
                 document_text=document_text,
                 regions=result.regions,
+                subregions=result.subregions,
+                transport_edges=result.transport_edges,
                 profiles=result.profiles,
+                agent_relationships=result.agent_relationships,
+                region_agent_index=result.region_agent_index,
                 scenario_mode=state.scenario_mode,
                 diffusion_template=state.diffusion_template,
+                search_mode=state.search_mode,
+                temporal_profile={
+                    "preset": state.temporal_preset,
+                    "total_rounds": state.configured_total_rounds,
+                    "minutes_per_round": state.configured_minutes_per_round,
+                },
+                reference_time=state.reference_time,
+                diffusion_context=result.diffusion_context,
                 injected_variables=variables,
                 data_grounding_summary=result.grounding_summary,
                 risk_objects=risk_result.risk_objects,
@@ -348,6 +415,9 @@ class SimulationManager:
 
             state.config_generated = True
             state.config_reasoning = config.generation_reasoning
+            state.temporal_preset = config.temporal_profile.get("preset", state.temporal_preset)
+            state.configured_total_rounds = int(config.temporal_profile.get("total_rounds", state.configured_total_rounds))
+            state.configured_minutes_per_round = int(config.temporal_profile.get("minutes_per_round", state.configured_minutes_per_round))
             state.status = SimulationStatus.READY
             state.error = None
 
@@ -465,6 +535,12 @@ class SimulationManager:
             raise ValueError(f"Simulation not found: {simulation_id}")
 
         sim_dir = self._get_simulation_dir(simulation_id)
+        if platform == "envfish":
+            json_path = os.path.join(sim_dir, "profiles_full.json")
+            if not os.path.exists(json_path):
+                return []
+            with open(json_path, "r", encoding="utf-8") as handle:
+                return json.load(handle)
         if platform == "twitter":
             csv_path = os.path.join(sim_dir, "twitter_profiles.csv")
             if not os.path.exists(csv_path):

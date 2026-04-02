@@ -161,13 +161,16 @@ const renderLayers = () => {
     if (!geoJson) return
 
     L.geoJSON(geoJson, {
-      style: () => ({
-        color,
-        weight,
-        opacity,
-        fillColor: layer?.fillColor || color,
-        fillOpacity: layer?.fillOpacity ?? 0.25
-      }),
+      style: (feature) => {
+        const featureColor = feature?.properties?.color || color
+        return {
+          color: featureColor,
+          weight,
+          opacity,
+          fillColor: feature?.properties?.fillColor || layer?.fillColor || featureColor,
+          fillOpacity: feature?.properties?.fillOpacity ?? layer?.fillOpacity ?? 0.25
+        }
+      },
       pointToLayer: (feature, latlng) => {
         const featureColor = feature?.properties?.color || color
         return L.circleMarker(latlng, {

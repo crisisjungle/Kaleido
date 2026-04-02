@@ -1021,16 +1021,20 @@ class SimulationRunner:
         artifacts: Dict[str, Any] = {
             "engine_mode": "envfish",
             "region_graph": [],
+            "subregion_graph": [],
             "risk_objects": [],
             "primary_risk_object": None,
             "latest_snapshot": None,
             "round_snapshots": [],
             "spread_events": [],
+            "agent_interactions": [],
+            "dynamic_edge_events": [],
             "interventions": [],
             "interviews": [],
         }
 
         region_graph_path = os.path.join(sim_dir, "region_graph_snapshot.json")
+        subregion_graph_path = os.path.join(sim_dir, "subregion_graph_snapshot.json")
         risk_objects_path = os.path.join(sim_dir, "risk_objects.json")
         risk_object_summary_path = os.path.join(sim_dir, "risk_object_summary.json")
         latest_snapshot_path = os.path.join(sim_dir, "latest_round_snapshot.json")
@@ -1039,6 +1043,13 @@ class SimulationRunner:
             try:
                 with open(region_graph_path, "r", encoding="utf-8") as handle:
                     artifacts["region_graph"] = json.load(handle)
+            except Exception:
+                pass
+
+        if os.path.exists(subregion_graph_path):
+            try:
+                with open(subregion_graph_path, "r", encoding="utf-8") as handle:
+                    artifacts["subregion_graph"] = json.load(handle)
             except Exception:
                 pass
 
@@ -1070,6 +1081,12 @@ class SimulationRunner:
         )
         artifacts["spread_events"] = cls._read_jsonl_file(
             os.path.join(sim_dir, "spread_event_ledger.jsonl"), limit=64
+        )
+        artifacts["agent_interactions"] = cls._read_jsonl_file(
+            os.path.join(sim_dir, "agent_interaction_ledger.jsonl"), limit=96
+        )
+        artifacts["dynamic_edge_events"] = cls._read_jsonl_file(
+            os.path.join(sim_dir, "dynamic_edge_ledger.jsonl"), limit=160
         )
         artifacts["interventions"] = cls._read_jsonl_file(
             os.path.join(sim_dir, "intervention_log.jsonl"), limit=32

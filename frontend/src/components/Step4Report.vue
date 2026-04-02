@@ -128,7 +128,7 @@
           </div>
 
           <!-- Next Step Button - 在完成后显示 -->
-          <button v-if="isComplete" class="next-step-btn" @click="goToInteraction">
+          <button v-if="showNextStep && isComplete" class="next-step-btn" @click="goToInteraction">
             <span>进入深度互动</span>
             <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">
               <line x1="5" y1="12" x2="19" y2="12"></line>
@@ -399,7 +399,11 @@ const router = useRouter()
 const props = defineProps({
   reportId: String,
   simulationId: String,
-  systemLogs: Array
+  systemLogs: Array,
+  showNextStep: {
+    type: Boolean,
+    default: true
+  }
 })
 
 const emit = defineEmits(['add-log', 'update-status'])
@@ -407,7 +411,7 @@ const emit = defineEmits(['add-log', 'update-status'])
 // Navigation
 const goToInteraction = () => {
   if (props.reportId) {
-    router.push({ name: 'Interaction', params: { reportId: props.reportId } })
+    router.push({ name: 'Analysis', params: { reportId: props.reportId }, query: { tab: 'node-explore' } })
   }
 }
 

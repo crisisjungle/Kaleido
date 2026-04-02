@@ -17,6 +17,7 @@ ENVFISH_ENGINE_MODE = "envfish"
 SCENARIO_MODES = {"baseline_mode", "crisis_mode"}
 DIFFUSION_TEMPLATES = {"air", "inland_water", "marine", "generic"}
 VARIABLE_TYPES = {"disaster", "policy"}
+TEMPORAL_PRESETS = {"rapid", "standard", "slow"}
 POLICY_MODES = {
     "restrict",
     "relocate",
@@ -124,6 +125,34 @@ DEFAULT_TEMPLATE_RULES = {
     },
 }
 
+TEMPORAL_PRESET_DEFAULTS = {
+    "rapid": {
+        "label": "Rapid",
+        "minutes_per_round": 20,
+        "recommended_templates": ["air"],
+        "description": "Short response windows for fast-moving atmospheric or immediate-response scenarios.",
+    },
+    "standard": {
+        "label": "Standard",
+        "minutes_per_round": 60,
+        "recommended_templates": ["air", "inland_water", "marine"],
+        "description": "Balanced hour-scale stepping for most region-level simulations.",
+    },
+    "slow": {
+        "label": "Slow",
+        "minutes_per_round": 180,
+        "recommended_templates": ["marine"],
+        "description": "Longer steps for slower hydrological and coastal propagation.",
+    },
+}
+
+DIFFUSION_PROVIDER_DEFAULTS = {
+    "air": "open_meteo",
+    "inland_water": "topology",
+    "marine": "open_meteo",
+    "generic": "heuristic",
+}
+
 NODE_FAMILY_KEYWORDS = {
     "Region": ("region", "city", "county", "district", "province", "coast", "bay", "port", "island"),
     "EnvironmentalCarrier": ("current", "river", "air", "wind", "soil", "water", "ocean", "stream"),
@@ -159,6 +188,30 @@ def normalize_state_vector(values: Optional[Dict[str, Any]] = None) -> Dict[str,
     for field_name in STATE_VECTOR_SCHEMA:
         normalized[field_name] = clamp_score(values.get(field_name, BASELINE_STATE_VECTOR[field_name]))
     return normalized
+
+
+def normalize_temporal_profile(
+    profile: Optional[Dict[str, Any]] = None,
+    total_rounds: Optional[int] = None,
+) -> Dict[str, Any]:
+    profile = dict(profile or {})
+    preset = str(profile.get("preset") or "standard").strip().lower()
+    if preset not in TEMPORAL_PRESETS:
+        preset = "standard"
+    defaults = TEMPORAL_PRESET_DEFAULTS[preset]
+    minutes_per_round = max(10, int(profile.get("minutes_per_round") or defaults["minutes_per_round"]))
+    resolved_total_rounds = total_rounds if total_rounds is not None else profile.get("total_rounds")
+    resolved_total_rounds = max(4, int(resolved_total_rounds or 12))
+    total_hours = round(resolved_total_rounds * minutes_per_round / 60, 1)
+    return {
+        "preset": preset,
+        "label": defaults["label"],
+        "description": defaults["description"],
+        "minutes_per_round": minutes_per_round,
+        "total_rounds": resolved_total_rounds,
+        "total_simulation_hours": total_hours,
+        "recommended_templates": list(defaults["recommended_templates"]),
+    }
 
 
 def merge_state_vectors(base: Dict[str, Any], delta: Optional[Dict[str, Any]]) -> Dict[str, float]:
@@ -245,9 +298,23 @@ class RegionNode:
     name: str
     region_type: str = "region"
     description: str = ""
+    parent_region_id: Optional[str] = None
+    layer: str = "macro"
+    land_use_class: str = ""
+    distance_band: str = ""
     neighbors: List[str] = field(default_factory=list)
     carriers: List[str] = field(default_factory=list)
     tags: List[str] = field(default_factory=list)
+    ecology_assets: List[str] = field(default_factory=list)
+    industry_tags: List[str] = field(default_factory=list)
+    resident_agent_ids: List[int] = field(default_factory=list)
+    organization_agent_ids: List[int] = field(default_factory=list)
+    ecology_agent_ids: List[int] = field(default_factory=list)
+    region_constraints: List[str] = field(default_factory=list)
+    exposure_channels: List[str] = field(default_factory=list)
+    population_capacity: int = 0
+    lat: Optional[float] = None
+    lon: Optional[float] = None
     state_vector: Dict[str, float] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
@@ -256,7 +323,55 @@ class RegionNode:
         payload["neighbors"] = sorted(set(self.neighbors))
         payload["carriers"] = sorted(set(self.carriers))
         payload["tags"] = sorted(set(self.tags))
+        payload["ecology_assets"] = sorted(set(self.ecology_assets))
+        payload["industry_tags"] = sorted(set(self.industry_tags))
+        payload["resident_agent_ids"] = sorted(set(self.resident_agent_ids))
+        payload["organization_agent_ids"] = sorted(set(self.organization_agent_ids))
+        payload["ecology_agent_ids"] = sorted(set(self.ecology_agent_ids))
+        payload["region_constraints"] = sorted(set(self.region_constraints))
+        payload["exposure_channels"] = sorted(set(self.exposure_channels))
+        payload["population_capacity"] = max(0, int(self.population_capacity or 0))
+        payload["lat"] = round(float(self.lat), 6) if self.lat is not None else None
+        payload["lon"] = round(float(self.lon), 6) if self.lon is not None else None
         return payload
+
+
+@dataclass
+class TransportEdge:
+    edge_id: str
+    source_region_id: str
+    target_region_id: str
+    channel_type: str = "environmental_link"
+    directionality: str = "directed"
+    origin: str = "rule_inferred"
+    travel_time_rounds: int = 1
+    attenuation_rate: float = 0.15
+    retention_factor: float = 0.0
+    barrier_factor: float = 0.0
+    strength: float = 0.6
+    confidence: float = 0.6
+    evidence: Dict[str, Any] = field(default_factory=dict)
+    rationale: str = ""
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "edge_id": self.edge_id,
+            "source_region_id": self.source_region_id,
+            "target_region_id": self.target_region_id,
+            "channel_type": self.channel_type or "environmental_link",
+            "directionality": self.directionality or "directed",
+            "origin": self.origin or "rule_inferred",
+            "travel_time_rounds": max(0, int(self.travel_time_rounds or 0)),
+            "attenuation_rate": clamp_probability(self.attenuation_rate),
+            "retention_factor": clamp_probability(self.retention_factor),
+            "barrier_factor": clamp_probability(self.barrier_factor),
+            "strength": clamp_probability(self.strength),
+            "confidence": clamp_probability(self.confidence),
+            "evidence": dict(self.evidence or {}),
+            "rationale": self.rationale or "",
+            "metadata": dict(self.metadata or {}),
+        }
 
 
 @dataclass
@@ -316,9 +431,28 @@ class EnvAgentProfile:
     persona: str
     profession: str
     primary_region: str
+    agent_type: str = "human"
+    agent_subtype: str = ""
+    archetype_key: str = ""
+    home_region_id: str = ""
+    home_subregion_id: str = ""
     influenced_regions: List[str] = field(default_factory=list)
     goals: List[str] = field(default_factory=list)
     sensitivities: List[str] = field(default_factory=list)
+    motivation_stack: List[str] = field(default_factory=list)
+    capabilities: List[str] = field(default_factory=list)
+    constraints: List[str] = field(default_factory=list)
+    action_space: List[str] = field(default_factory=list)
+    decision_policy: Dict[str, Any] = field(default_factory=dict)
+    impact_profile: Dict[str, float] = field(default_factory=dict)
+    stance_profile: Dict[str, float] = field(default_factory=dict)
+    resource_budget: Dict[str, float] = field(default_factory=dict)
+    counterpart_agent_ids: List[int] = field(default_factory=list)
+    social_links: List[int] = field(default_factory=list)
+    ecology_links: List[int] = field(default_factory=list)
+    organization_id: Optional[int] = None
+    spawn_weight: float = 1.0
+    is_synthesized: bool = False
     state_vector: Dict[str, float] = field(default_factory=dict)
     source_entity_uuid: Optional[str] = None
     source_entity_type: Optional[str] = None
@@ -327,7 +461,19 @@ class EnvAgentProfile:
     def to_dict(self) -> Dict[str, Any]:
         payload = asdict(self)
         payload["state_vector"] = normalize_state_vector(self.state_vector)
-        payload["influenced_regions"] = list(dict.fromkeys(self.influenced_regions or [self.primary_region]))
+        primary_region = self.primary_region or self.home_region_id
+        payload["influenced_regions"] = list(dict.fromkeys(self.influenced_regions or [primary_region]))
+        payload["home_region_id"] = self.home_region_id or primary_region
+        payload["counterpart_agent_ids"] = sorted(set(self.counterpart_agent_ids))
+        payload["social_links"] = sorted(set(self.social_links))
+        payload["ecology_links"] = sorted(set(self.ecology_links))
+        payload["motivation_stack"] = list(dict.fromkeys(self.motivation_stack))
+        payload["capabilities"] = list(dict.fromkeys(self.capabilities))
+        payload["constraints"] = list(dict.fromkeys(self.constraints))
+        payload["action_space"] = list(dict.fromkeys(self.action_space))
+        payload["goals"] = list(dict.fromkeys(self.goals))
+        payload["sensitivities"] = list(dict.fromkeys(self.sensitivities))
+        payload["spawn_weight"] = clamp_probability(self.spawn_weight)
         return payload
 
     def to_agent_config(self) -> Dict[str, Any]:
@@ -337,11 +483,30 @@ class EnvAgentProfile:
             "name": self.name,
             "node_family": self.node_family,
             "role_type": self.role_type,
+            "agent_type": self.agent_type,
+            "agent_subtype": self.agent_subtype,
+            "archetype_key": self.archetype_key,
             "profession": self.profession,
             "primary_region": self.primary_region,
+            "home_region_id": self.home_region_id or self.primary_region,
+            "home_subregion_id": self.home_subregion_id,
             "influenced_regions": list(dict.fromkeys(self.influenced_regions or [self.primary_region])),
             "goals": self.goals,
             "sensitivities": self.sensitivities,
+            "motivation_stack": self.motivation_stack,
+            "capabilities": self.capabilities,
+            "constraints": self.constraints,
+            "action_space": self.action_space,
+            "decision_policy": self.decision_policy,
+            "impact_profile": self.impact_profile,
+            "stance_profile": self.stance_profile,
+            "resource_budget": self.resource_budget,
+            "counterpart_agent_ids": sorted(set(self.counterpart_agent_ids)),
+            "social_links": sorted(set(self.social_links)),
+            "ecology_links": sorted(set(self.ecology_links)),
+            "organization_id": self.organization_id,
+            "spawn_weight": clamp_probability(self.spawn_weight),
+            "is_synthesized": bool(self.is_synthesized),
             "state_vector": normalize_state_vector(self.state_vector),
             "bio": self.bio,
             "persona": self.persona,
@@ -360,6 +525,9 @@ class EnvAgentProfile:
             "primary_region": self.primary_region,
             "node_family": self.node_family,
             "role_type": self.role_type,
+            "agent_type": self.agent_type,
+            "agent_subtype": self.agent_subtype,
+            "home_subregion_id": self.home_subregion_id,
             "interested_topics": self.goals[:6],
             "created_at": self.created_at,
         }
@@ -377,6 +545,9 @@ class EnvAgentProfile:
             "primary_region": self.primary_region,
             "node_family": self.node_family,
             "role_type": self.role_type,
+            "agent_type": self.agent_type,
+            "agent_subtype": self.agent_subtype,
+            "home_subregion_id": self.home_subregion_id,
             "friend_count": 80 + self.agent_id * 3,
             "follower_count": 120 + self.agent_id * 5,
             "statuses_count": 40 + self.agent_id * 4,
@@ -387,18 +558,56 @@ class EnvAgentProfile:
 
 
 @dataclass
+class AgentRelationshipEdge:
+    edge_id: str
+    source_agent_id: int
+    target_agent_id: int
+    relation_type: str
+    strength: float = 0.5
+    interaction_channel: str = "social"
+    rationale: str = ""
+    source_region_id: str = ""
+    target_region_id: str = ""
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "edge_id": self.edge_id,
+            "source_agent_id": int(self.source_agent_id),
+            "target_agent_id": int(self.target_agent_id),
+            "relation_type": self.relation_type,
+            "strength": clamp_probability(self.strength),
+            "interaction_channel": self.interaction_channel,
+            "rationale": self.rationale,
+            "source_region_id": self.source_region_id,
+            "target_region_id": self.target_region_id,
+        }
+
+
+@dataclass
 class EnvProfileGenerationResult:
     regions: List[RegionNode]
+    subregions: List[RegionNode]
     profiles: List[EnvAgentProfile]
+    agent_relationships: List[AgentRelationshipEdge]
+    transport_edges: List[TransportEdge]
+    region_agent_index: Dict[str, Any]
     grounding_summary: Dict[str, Any]
+    diffusion_context: Dict[str, Any] = field(default_factory=dict)
     generation_notes: List[str] = field(default_factory=list)
+    generation_summary: Dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
         return {
             "regions": [region.to_dict() for region in self.regions],
+            "subregions": [region.to_dict() for region in self.subregions],
             "profiles": [profile.to_dict() for profile in self.profiles],
+            "agent_relationships": [edge.to_dict() for edge in self.agent_relationships],
+            "transport_edges": [edge.to_dict() for edge in self.transport_edges],
+            "region_agent_index": self.region_agent_index,
             "grounding_summary": self.grounding_summary,
+            "diffusion_context": self.diffusion_context,
             "generation_notes": self.generation_notes,
+            "generation_summary": self.generation_summary,
         }
 
 

@@ -58,6 +58,7 @@
           :systemLogs="systemLogs"
           :initialScenarioMode="route.query.scenario_mode"
           :initialDiffusionTemplate="route.query.diffusion_template"
+          :initialSearchMode="route.query.search_mode"
           @go-back="handleGoBack"
           @next-step="handleNextStep"
           @add-log="addLog"
@@ -94,7 +95,7 @@ const projectData = ref(null)
 const graphData = ref(null)
 const graphLoading = ref(false)
 const systemLogs = ref([])
-const currentStatus = ref('processing') // processing | completed | error
+const currentStatus = ref('idle') // idle | processing | completed | error
 const graphHighlight = ref({ nodeIds: [], nodeNames: [], label: '' })
 
 // --- Computed Layout Styles ---
@@ -118,6 +119,7 @@ const statusClass = computed(() => {
 const statusText = computed(() => {
   if (currentStatus.value === 'error') return 'Error'
   if (currentStatus.value === 'completed') return 'Ready'
+  if (currentStatus.value === 'idle') return 'Idle'
   return 'Preparing'
 })
 
@@ -171,6 +173,22 @@ const handleNextStep = (params = {}) => {
     addLog(`扩散模板: ${params.diffusionTemplate}`)
   }
 
+  if (params.searchMode) {
+    addLog(`搜索模式: ${params.searchMode}`)
+  }
+
+  if (params.temporalPreset) {
+    addLog(`时间尺度: ${params.temporalPreset}`)
+  }
+
+  if (params.minutesPerRound) {
+    addLog(`每轮时长: ${params.minutesPerRound} 分钟`)
+  }
+
+  if (params.referenceTime) {
+    addLog(`参考时间: ${params.referenceTime}`)
+  }
+
   if (params.variableCount !== undefined) {
     addLog(`中途变量数: ${params.variableCount}`)
   }
@@ -192,6 +210,9 @@ const handleNextStep = (params = {}) => {
   if (params.maxRounds) query.maxRounds = params.maxRounds
   if (params.scenarioMode) query.scenario_mode = params.scenarioMode
   if (params.diffusionTemplate) query.diffusion_template = params.diffusionTemplate
+  if (params.searchMode) query.search_mode = params.searchMode
+  if (params.temporalPreset) query.temporal_preset = params.temporalPreset
+  if (params.referenceTime) query.reference_time = params.referenceTime
   if (params.variableCount !== undefined) query.variable_count = params.variableCount
   if (Object.keys(query).length > 0) routeParams.query = query
   
@@ -468,6 +489,7 @@ onMounted(async () => {
   background: #CCC;
 }
 
+.status-indicator.idle .dot { background: #B0B8C7; }
 .status-indicator.processing .dot { background: #FF5722; animation: pulse 1s infinite; }
 .status-indicator.completed .dot { background: #4CAF50; }
 .status-indicator.error .dot { background: #F44336; }

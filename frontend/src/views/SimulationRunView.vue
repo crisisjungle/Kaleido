@@ -61,6 +61,7 @@
           :systemLogs="systemLogs"
           :initialScenarioMode="route.query.scenario_mode"
           :initialDiffusionTemplate="route.query.diffusion_template"
+          :initialSearchMode="route.query.search_mode"
           @go-back="handleGoBack"
           @next-step="handleNextStep"
           @add-log="addLog"
@@ -207,6 +208,9 @@ const handleGoBack = async () => {
   const query = {}
   if (route.query.scenario_mode) query.scenario_mode = route.query.scenario_mode
   if (route.query.diffusion_template) query.diffusion_template = route.query.diffusion_template
+  if (route.query.search_mode) query.search_mode = route.query.search_mode
+  if (route.query.temporal_preset) query.temporal_preset = route.query.temporal_preset
+  if (route.query.reference_time) query.reference_time = route.query.reference_time
   if (route.query.maxRounds) query.maxRounds = route.query.maxRounds
   router.push({ name: 'Simulation', params: { simulationId: currentSimulationId.value }, query })
 }
@@ -361,6 +365,15 @@ onMounted(() => {
   }
   if (route.query.diffusion_template) {
     addLog(`扩散模板: ${route.query.diffusion_template}`)
+  }
+  if (route.query.search_mode) {
+    addLog(`搜索模式: ${route.query.search_mode}`)
+  }
+  if (route.query.temporal_preset) {
+    addLog(`时间尺度: ${route.query.temporal_preset}`)
+  }
+  if (route.query.reference_time) {
+    addLog(`参考时间: ${route.query.reference_time}`)
   }
 
   // 记录 maxRounds 配置（值已在初始化时从 query 参数获取）

@@ -278,8 +278,19 @@ class RiskObjectBuilder:
 
     def _select_profiles(self, profiles: List[EnvAgentProfile], selected_regions: List[RegionNode]) -> List[EnvAgentProfile]:
         allowed_regions = {region.region_id for region in selected_regions}
-        selected = [profile for profile in profiles if profile.primary_region in allowed_regions]
-        return selected[:10] if selected else profiles[:10]
+        scoped = [profile for profile in profiles if profile.primary_region in allowed_regions]
+        selected = scoped or list(profiles)
+        grouped: Dict[str, List[EnvAgentProfile]] = defaultdict(list)
+        for profile in selected:
+            grouped[profile.agent_type or profile.node_family].append(profile)
+
+        ordered: List[EnvAgentProfile] = []
+        max_group = max((len(items) for items in grouped.values()), default=0)
+        for index in range(max_group):
+            for items in grouped.values():
+                if index < len(items):
+                    ordered.append(items[index])
+        return ordered[:18]
 
     def _compose_title(self, title_hint: str, selected_regions: List[RegionNode], diffusion_template: str) -> str:
         if selected_regions:

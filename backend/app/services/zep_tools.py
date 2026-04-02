@@ -395,10 +395,12 @@ class EnvFishArtifactBundle:
     simulation_config: Dict[str, Any] = field(default_factory=dict)
     env_status: Dict[str, Any] = field(default_factory=dict)
     grounding_summary: Dict[str, Any] = field(default_factory=dict)
-    region_graph: Dict[str, Any] = field(default_factory=dict)
+    region_graph: Any = field(default_factory=dict)
+    subregion_graph: Any = field(default_factory=dict)
     risk_objects: List[Dict[str, Any]] = field(default_factory=list)
     risk_object_summary: Dict[str, Any] = field(default_factory=dict)
     regional_state_matrix: Any = field(default_factory=dict)
+    latest_round_snapshot: Dict[str, Any] = field(default_factory=dict)
     spread_events: List[Dict[str, Any]] = field(default_factory=list)
     intervention_log: List[Dict[str, Any]] = field(default_factory=list)
     feedback_loops: List[Dict[str, Any]] = field(default_factory=list)
@@ -418,9 +420,11 @@ class EnvFishArtifactBundle:
             "env_status": self.env_status,
             "grounding_summary": self.grounding_summary,
             "region_graph": self.region_graph,
+            "subregion_graph": self.subregion_graph,
             "risk_objects": self.risk_objects,
             "risk_object_summary": self.risk_object_summary,
             "regional_state_matrix": self.regional_state_matrix,
+            "latest_round_snapshot": self.latest_round_snapshot,
             "spread_events": self.spread_events,
             "intervention_log": self.intervention_log,
             "feedback_loops": self.feedback_loops,
@@ -447,8 +451,28 @@ class EnvFishArtifactBundle:
             return list(value.values())
         return [value]
 
-    def _extract_region_state_records(self) -> List[Dict[str, Any]]:
+    def _get_latest_snapshot(self) -> Dict[str, Any]:
+        snapshot = self.latest_round_snapshot
+        if isinstance(snapshot, dict) and snapshot:
+            return snapshot
+
         source = self.regional_state_matrix
+        if isinstance(source, list):
+            for item in reversed(source):
+                if isinstance(item, dict) and any(
+                    key in item for key in ("regions", "top_regions", "diffusion", "feedback", "vulnerability_ranking")
+                ):
+                    return item
+
+        if isinstance(source, dict) and any(
+            key in source for key in ("regions", "top_regions", "diffusion", "feedback", "vulnerability_ranking")
+        ):
+            return source
+
+        return {}
+
+    def _extract_region_state_records(self) -> List[Dict[str, Any]]:
+        source = self.regional_state_matrix or self._get_latest_snapshot()
         records: List[Dict[str, Any]] = []
 
         if isinstance(source, list):
@@ -556,7 +580,11 @@ class EnvFishArtifactBundle:
                     topic=_normalize_name(item.get("topic") or item.get("interest"), "")
                 )
 
-        graph_entities = self.region_graph.get("entities") or self.region_graph.get("nodes") or []
+        graph_entities: List[Any] = []
+        if isinstance(self.region_graph, dict):
+            graph_entities = self.region_graph.get("entities") or self.region_graph.get("nodes") or []
+        elif isinstance(self.region_graph, list):
+            graph_entities = self.region_graph
         if isinstance(graph_entities, list):
             for item in graph_entities:
                 if not isinstance(item, dict):
@@ -697,6 +725,39 @@ class EnvFishArtifactBundle:
         spread_events = self._extract_event_records(self.spread_events)
         intervention_events = self._extract_event_records(self.intervention_log)
         feedback_events = self._extract_event_records(self.feedback_loops)
+        latest_snapshot = self._get_latest_snapshot()
+
+        diffusion = latest_snapshot.get("diffusion") if isinstance(latest_snapshot.get("diffusion"), dict) else {}
+        if not spread_events and diffusion:
+            region_ranking = diffusion.get("region_ranking") or []
+            likely_next = diffusion.get("likely_next_impacted_regions") or []
+            for item in region_ranking:
+                if not isinstance(item, dict):
+                    continue
+                spread_events.append({
+                    "region_name": item.get("name") or item.get("region_name") or item.get("region") or item.get("region_id"),
+                    "intensity": item.get("transfer_intensity")
+                    or item.get("intensity")
+                    or item.get("exposure_score")
+                    or item.get("spread_pressure")
+                    or item.get("severity")
+                    or item.get("score")
+                    or 0,
+                    "severity_band": item.get("severity_band"),
+                })
+            if not spread_events:
+                for region_name in likely_next:
+                    spread_events.append({
+                        "region_name": region_name,
+                        "intensity": 0,
+                    })
+
+        feedback = latest_snapshot.get("feedback") if isinstance(latest_snapshot.get("feedback"), dict) else {}
+        if not feedback_events and feedback:
+            propagation = feedback.get("feedback_propagation") or []
+            for item in propagation:
+                if isinstance(item, dict):
+                    feedback_events.append(dict(item))
 
         spread_rank: Dict[str, float] = {}
         for event in spread_events:
@@ -726,10 +787,16 @@ class EnvFishArtifactBundle:
         feedback_chains: List[str] = []
         for event in feedback_events[:20]:
             chain = _normalize_name(
-                event.get("chain") or event.get("path") or event.get("summary") or event.get("description"),
+                event.get("loop") or event.get("chain") or event.get("path") or event.get("summary") or event.get("description"),
                 ""
             )
             if chain:
+                region_name = _normalize_name(
+                    event.get("region_name") or event.get("region") or event.get("region_id"),
+                    "",
+                )
+                if region_name:
+                    chain = f"{region_name}: {chain}"
                 feedback_chains.append(chain)
 
         return {
@@ -1177,6 +1244,13 @@ class ZepToolsService:
                 "env_graph.json",
             ],
         )
+        subregion_graph_path = _find_first_existing(
+            sim_dir,
+            [
+                "subregion_graph.json",
+                "subregion_graph_snapshot.json",
+            ],
+        )
         risk_objects_path = _find_first_existing(
             sim_dir,
             [
@@ -1194,6 +1268,7 @@ class ZepToolsService:
             [
                 "regional_state_matrix.json",
                 "regional_states.json",
+                "round_state_matrix.json",
                 "state_matrix.json",
                 "state_history.json",
             ],
@@ -1203,7 +1278,15 @@ class ZepToolsService:
             [
                 "regional_state_matrix.jsonl",
                 "regional_states.jsonl",
+                "round_state_matrix.jsonl",
                 "state_history.jsonl",
+            ],
+        )
+        latest_round_snapshot_path = _find_first_existing(
+            sim_dir,
+            [
+                "latest_round_snapshot.json",
+                "round_snapshot_latest.json",
             ],
         )
         spread_events_jsonl = _find_first_existing(
@@ -1272,10 +1355,14 @@ class ZepToolsService:
         bundle.env_status = _safe_read_json(status_path, {}) or {}
         bundle.grounding_summary = _safe_read_json(summary_path, {}) or {}
         bundle.region_graph = _safe_read_json(region_graph_path, {}) or {}
+        bundle.subregion_graph = _safe_read_json(subregion_graph_path, {}) or {}
         risk_objects_data = _safe_read_json(risk_objects_path, []) or []
         bundle.risk_objects = risk_objects_data if isinstance(risk_objects_data, list) else []
         bundle.risk_object_summary = _safe_read_json(risk_object_summary_path, {}) or {}
+        bundle.latest_round_snapshot = _safe_read_json(latest_round_snapshot_path, {}) or {}
         bundle.regional_state_matrix = _safe_read_json(regional_state_path, {}) or _safe_read_jsonl(regional_state_jsonl)
+        if not bundle.regional_state_matrix and bundle.latest_round_snapshot:
+            bundle.regional_state_matrix = bundle.latest_round_snapshot
         bundle.spread_events = _safe_read_jsonl(spread_events_jsonl)
         if not bundle.spread_events:
             spread_json = _safe_read_json(spread_events_json, [])
@@ -1329,8 +1416,10 @@ class ZepToolsService:
         artifact_signals = any([
             bool(bundle.grounding_summary),
             bool(bundle.region_graph),
+            bool(bundle.subregion_graph),
             bool(bundle.risk_objects),
             bool(bundle.regional_state_matrix),
+            bool(bundle.latest_round_snapshot),
             bool(bundle.spread_events),
             bool(bundle.intervention_log),
             bool(bundle.feedback_loops),
@@ -1357,10 +1446,12 @@ class ZepToolsService:
             status_path,
             summary_path,
             region_graph_path,
+            subregion_graph_path,
             risk_objects_path,
             risk_object_summary_path,
             regional_state_path,
             regional_state_jsonl,
+            latest_round_snapshot_path,
             spread_events_jsonl,
             spread_events_json,
             intervention_jsonl,

@@ -10,7 +10,7 @@ export const createSimulation = (data) => {
 
 /**
  * 准备模拟环境（异步任务）
- * @param {Object} data - { simulation_id, engine_mode?, scenario_mode?, diffusion_template?, injected_variables?, max_rounds? }
+ * @param {Object} data - { simulation_id, engine_mode?, scenario_mode?, diffusion_template?, temporal_profile?, reference_time?, diffusion_provider?, injected_variables?, max_rounds? }
  */
 export const prepareSimulation = (data) => {
   return requestWithRetry(() => service.post('/api/simulation/prepare', data), 3, 1000)

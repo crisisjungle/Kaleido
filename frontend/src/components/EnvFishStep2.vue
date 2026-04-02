@@ -29,10 +29,42 @@
       </div>
     </div>
 
-    <div class="workspace">
-      <section class="panel scenic">
+    <section class="workspace-shell">
+      <div class="workspace-topbar">
+        <div class="workspace-copy">
+          <div class="eyebrow workspace-eyebrow">SCENARIO WORKBENCH</div>
+          <h3>区域划分、Agent 配置与交互关系</h3>
+          <p>通过顶部标签在区域划分、Agent 配置、交互关系和变量注入之间切换。区域层负责纳入，Agent 层负责交互，变量层负责干预。</p>
+        </div>
+
+        <div class="workspace-tabs" role="tablist" aria-label="Step2 工作台标签页">
+          <button
+            v-for="tab in workspaceTabs"
+            :key="tab.value"
+            type="button"
+            :id="`workspace-tab-${tab.value}`"
+            role="tab"
+            class="workspace-tab"
+            :class="{ active: activeWorkspaceTab === tab.value }"
+            :aria-selected="activeWorkspaceTab === tab.value"
+            :aria-controls="`workspace-panel-${tab.value}`"
+            @click="activeWorkspaceTab = tab.value"
+          >
+            <span class="workspace-tab-label">{{ tab.label }}</span>
+            <span class="workspace-tab-meta">{{ tab.meta }}</span>
+          </button>
+        </div>
+      </div>
+
+      <section
+        v-show="activeWorkspaceTab === 'region'"
+        id="workspace-panel-region"
+        role="tabpanel"
+        aria-labelledby="workspace-tab-region"
+        class="panel workspace-panel region"
+      >
         <div class="panel-title-row">
-          <h3>场景模式</h3>
+          <h3>区域划分</h3>
           <span class="hint">基线 / 灾难态</span>
         </div>
         <div class="mode-grid">
@@ -70,6 +102,37 @@
         </div>
 
         <div class="panel-title-row">
+          <h3>时间尺度</h3>
+          <span class="hint mono">{{ configuredMinutesPerRound }} min / round</span>
+        </div>
+        <div class="template-grid">
+          <button
+            v-for="profile in temporalProfiles"
+            :key="profile.value"
+            class="template-card"
+            :class="{ active: temporalPreset === profile.value }"
+            @click="temporalPreset = profile.value"
+          >
+            <div class="template-head">
+              <span class="template-name">{{ profile.label }}</span>
+              <span class="template-badge">{{ profile.badge }}</span>
+            </div>
+            <p>{{ profile.description }}</p>
+          </button>
+        </div>
+
+        <div class="catalog">
+          <div class="panel-title-row">
+            <h3>参考时间</h3>
+            <span class="hint">{{ referenceTimeLocal ? '历史/指定时间场景' : '留空即实时场景' }}</span>
+          </div>
+          <label>
+            <span>用于解释大气与海洋方向场的时间锚点</span>
+            <input v-model="referenceTimeLocal" type="datetime-local" />
+          </label>
+        </div>
+
+        <div class="panel-title-row">
           <h3>扩散模板</h3>
           <span class="hint">模板只定义传播语法，不接真实物理场</span>
         </div>
@@ -88,9 +151,257 @@
             <p>{{ template.description }}</p>
           </button>
         </div>
+
+        <div class="panel-title-row">
+          <h3>关系搜索模式</h3>
+          <span class="hint">Fast 控预算，Deep Search 放大跨区关系发现</span>
+        </div>
+        <div class="template-grid">
+          <button
+            v-for="mode in searchModes"
+            :key="mode.value"
+            class="template-card"
+            :class="{ active: searchMode === mode.value }"
+            @click="searchMode = mode.value"
+          >
+            <div class="template-head">
+              <span class="template-name">{{ mode.label }}</span>
+              <span class="template-badge">{{ mode.badge }}</span>
+            </div>
+            <p>{{ mode.description }}</p>
+          </button>
+        </div>
+
+        <div class="catalog">
+        <div class="panel-title-row">
+          <h3>细分区域预览</h3>
+          <span class="hint">{{ regionSourceLabel }}</span>
+        </div>
+
+          <div class="summary-grid">
+            <div class="summary-card">
+              <span>Region layers</span>
+              <strong>{{ regionRecords.length }}</strong>
+            </div>
+            <div class="summary-card">
+              <span>Agent anchors</span>
+              <strong>{{ regionAnchorTotal }}</strong>
+            </div>
+            <div class="summary-card">
+              <span>Adjacency links</span>
+              <strong>{{ regionNeighborLinks }}</strong>
+            </div>
+            <div class="summary-card">
+              <span>Coverage</span>
+              <strong>{{ regionCoverageLabel }}</strong>
+            </div>
+          </div>
+
+          <div v-if="regionAnchorMatrix.length > 0" class="region-grid">
+            <article v-for="(region, index) in regionAnchorMatrix" :key="region.regionKey" class="region-card">
+              <div class="region-card-head">
+                <div>
+                  <div class="region-card-index mono">R{{ String(index + 1).padStart(2, '0') }}</div>
+                  <strong>{{ region.displayName }}</strong>
+                </div>
+                <span class="region-card-type">{{ region.regionTypeLabel }}</span>
+              </div>
+              <p>{{ region.summary }}</p>
+              <div class="region-card-meta">
+                <span>{{ region.layerLabel }}</span>
+                <span>{{ region.subregionLabel }}</span>
+                <span>{{ region.neighborCount }} neighbors</span>
+                <span>{{ region.agentCount }} agents</span>
+              </div>
+              <div class="chip-wrap">
+                <span v-for="tag in region.tags.slice(0, 4)" :key="tag" class="chip">{{ tag }}</span>
+                <span v-for="neighbor in region.neighbors.slice(0, 2)" :key="neighbor" class="chip chip-soft">{{ neighbor }}</span>
+              </div>
+            </article>
+          </div>
+          <div v-else class="empty-state">
+            当前没有可用的区域配置，系统会使用图谱节点作为降级区域骨架。
+          </div>
+        </div>
       </section>
 
-      <section class="panel variables">
+      <section
+        v-show="activeWorkspaceTab === 'agents'"
+        id="workspace-panel-agents"
+        role="tabpanel"
+        aria-labelledby="workspace-tab-agents"
+        class="panel workspace-panel agents"
+      >
+        <div class="panel-title-row">
+          <h3>Agent 配置</h3>
+          <span class="hint">{{ agentSourceLabel }}</span>
+        </div>
+
+        <div class="summary-grid">
+          <div class="summary-card">
+            <span>Total agents</span>
+            <strong>{{ agentCards.length }}</strong>
+          </div>
+          <div class="summary-card">
+            <span>Human / Org</span>
+            <strong>{{ agentCategorySummary.human + agentCategorySummary.organization }}</strong>
+          </div>
+          <div class="summary-card">
+            <span>Eco / Gov</span>
+            <strong>{{ agentCategorySummary.ecology + agentCategorySummary.governance }}</strong>
+          </div>
+          <div class="summary-card">
+            <span>Fallback</span>
+            <strong>{{ agentSourceMode === 'graph' ? 'ON' : 'OFF' }}</strong>
+          </div>
+        </div>
+
+        <div class="catalog">
+          <div class="catalog-title">分类摘要</div>
+          <div class="chip-wrap">
+            <span v-for="group in agentCategoryGroups" :key="group.key" class="chip agent-group-chip">
+              {{ group.label }} · {{ group.count }}
+            </span>
+          </div>
+        </div>
+
+        <div class="catalog">
+          <div class="catalog-title">Agent 卡片总览</div>
+          <div v-if="agentCards.length > 0" class="agent-grid">
+            <AgentCard
+              v-for="(agent, index) in agentCards"
+              :key="agent.agentKey"
+              :agent="agent"
+              :index="index + 1"
+            />
+          </div>
+          <div v-else class="empty-state">
+            当前配置里还没有可展示的 agent，系统会在后续用图谱节点自动降级生成。
+          </div>
+        </div>
+
+        <div class="catalog" v-if="agentSourceMode === 'graph'">
+          <div class="catalog-title">降级说明</div>
+          <div class="grounding-box">
+            <p>这里展示的是图谱预览，不是最终 Agent 档案。系统会自动生成正式 Agent 配置，完成后这里会切换成每个 Agent 的主区域、影响范围、初始状态、倾向、动机和敏感项。</p>
+          </div>
+        </div>
+      </section>
+
+      <section
+        v-show="activeWorkspaceTab === 'relations'"
+        id="workspace-panel-relations"
+        role="tabpanel"
+        aria-labelledby="workspace-tab-relations"
+        class="panel workspace-panel relations"
+      >
+        <div class="panel-title-row">
+          <h3>{{ relationSectionTitle }}</h3>
+          <span class="hint">{{ relationSourceLabel }}</span>
+        </div>
+
+        <div class="summary-grid">
+          <div class="summary-card">
+            <span>Interaction edges</span>
+            <strong>{{ relationSummary.total }}</strong>
+          </div>
+          <div class="summary-card">
+            <span>Cross-region</span>
+            <strong>{{ relationSummary.crossRegionCount }}</strong>
+          </div>
+          <div class="summary-card">
+            <span>Channels</span>
+            <strong>{{ relationSummary.channels.length }}</strong>
+          </div>
+          <div class="summary-card">
+            <span>Relation types</span>
+            <strong>{{ relationSummary.types.length }}</strong>
+          </div>
+        </div>
+
+        <div class="catalog">
+          <div class="catalog-title">关系类型</div>
+          <div class="chip-wrap">
+            <span
+              v-for="item in relationSummary.types.slice(0, 12)"
+              :key="item.label"
+              class="chip relation-chip"
+            >
+              {{ item.displayLabel }} · {{ item.count }}
+            </span>
+            <span v-if="relationSummary.types.length === 0" class="empty-chip">
+              当前没有可识别的关系标签。
+            </span>
+          </div>
+        </div>
+
+        <div class="catalog" v-if="relationSummary.channels.length > 0">
+          <div class="catalog-title">互动渠道</div>
+          <div class="chip-wrap">
+            <span
+              v-for="item in relationSummary.channels.slice(0, 8)"
+              :key="item.label"
+              class="chip relation-chip"
+            >
+              {{ item.displayLabel }} · {{ item.count }}
+            </span>
+          </div>
+        </div>
+
+        <div class="catalog">
+          <div class="catalog-title">这部分在看什么</div>
+          <div class="grounding-box">
+            <p>{{ relationPanelExplanation }}</p>
+          </div>
+        </div>
+
+        <div class="catalog">
+          <div class="panel-title-row">
+            <h3>区域与 Agent 归属</h3>
+            <span class="hint">按主区域汇总正式 Agent；未生成前仅显示区域骨架</span>
+          </div>
+          <div v-if="regionAnchorMatrix.length > 0" class="relation-grid">
+            <article v-for="region in regionAnchorMatrix" :key="region.regionKey" class="relation-card">
+              <div class="region-card-head">
+                <div>
+                  <div class="region-card-index mono">R{{ region.rank }}</div>
+                  <strong>{{ region.displayName }}</strong>
+                </div>
+                <span class="region-card-type">{{ region.agentCount }} agents</span>
+              </div>
+              <p>{{ region.summary }}</p>
+              <div class="chip-wrap">
+                <span v-for="family in region.topFamilies" :key="family" class="chip">{{ family }}</span>
+                <span v-if="region.topFamilies.length === 0" class="empty-chip">暂无分类聚合</span>
+              </div>
+            </article>
+          </div>
+          <div v-else class="empty-state">
+            当前还没有可用的区域锚点，系统会在配置完成后补全关系矩阵。
+          </div>
+        </div>
+
+        <div class="catalog" v-if="relationSummary.sampleEdges.length > 0">
+          <div class="catalog-title">关系样例</div>
+          <div class="grounding-box">
+            <div class="relation-edge-list">
+              <div v-for="edge in relationSummary.sampleEdges" :key="edge.key" class="relation-edge-row">
+                <strong>{{ edge.displayLabel }}</strong>
+                <span>{{ edge.summary }}</span>
+                <small>{{ edge.rationale || edge.hint }}<template v-if="edge.channelLabel || edge.strengthLabel"> · {{ [edge.channelLabel, edge.strengthLabel && `强度 ${edge.strengthLabel}`].filter(Boolean).join(' · ') }}</template></small>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section
+        v-show="activeWorkspaceTab === 'variables'"
+        id="workspace-panel-variables"
+        role="tabpanel"
+        aria-labelledby="workspace-tab-variables"
+        class="panel workspace-panel variables"
+      >
         <div class="panel-title-row">
           <h3>中途变量</h3>
           <button class="ghost-btn" @click="addVariable('disaster')">+ 灾难变量</button>
@@ -164,56 +475,7 @@
           </article>
         </div>
       </section>
-
-      <section class="panel summary">
-        <div class="panel-title-row">
-          <h3>图谱概览</h3>
-          <span class="hint">来自知识图谱的区域/角色骨架</span>
-        </div>
-
-        <div class="summary-grid">
-          <div class="summary-card">
-            <span>Region nodes</span>
-            <strong>{{ graphStats.regions }}</strong>
-          </div>
-          <div class="summary-card">
-            <span>Human actors</span>
-            <strong>{{ graphStats.humanActors }}</strong>
-          </div>
-          <div class="summary-card">
-            <span>Eco receptors</span>
-            <strong>{{ graphStats.ecologyActors }}</strong>
-          </div>
-          <div class="summary-card">
-            <span>Gov / Infra</span>
-            <strong>{{ graphStats.governanceActors + graphStats.infrastructureActors }}</strong>
-          </div>
-        </div>
-
-        <div class="catalog">
-          <div class="catalog-title">候选区域</div>
-          <div class="chip-wrap">
-            <span v-for="region in regionCandidates.slice(0, 10)" :key="region" class="chip">{{ region }}</span>
-            <span v-if="regionCandidates.length === 0" class="empty-chip">系统将自动从 Seed 中解析区域骨架</span>
-          </div>
-        </div>
-
-        <div class="catalog">
-          <div class="catalog-title">数据地基</div>
-          <div class="grounding-box">
-            <p>{{ groundingSummary }}</p>
-            <div class="grounding-list">
-              <span v-for="item in groundingHints" :key="item" class="grounding-item">{{ item }}</span>
-            </div>
-          </div>
-        </div>
-
-        <div class="payload-box">
-          <div class="catalog-title">待提交配置</div>
-          <pre>{{ payloadPreview }}</pre>
-        </div>
-      </section>
-    </div>
+    </section>
 
     <section class="risk-preview-shell">
       <div class="panel-title-row">
@@ -385,6 +647,7 @@
 <script setup>
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { getPrepareStatus, getSimulationConfig, getSimulationConfigRealtime, prepareSimulation, getSimulation } from '../api/simulation'
+import AgentCard from './step2/AgentCard.vue'
 
 const props = defineProps({
   simulationId: String,
@@ -392,7 +655,8 @@ const props = defineProps({
   graphData: Object,
   systemLogs: Array,
   initialScenarioMode: String,
-  initialDiffusionTemplate: String
+  initialDiffusionTemplate: String,
+  initialSearchMode: String
 })
 
 const emit = defineEmits(['go-back', 'next-step', 'add-log', 'update-status', 'risk-object-focus'])
@@ -433,6 +697,45 @@ const diffusionTemplates = [
   }
 ]
 
+const searchModes = [
+  {
+    value: 'fast',
+    label: 'FAST',
+    badge: '默认',
+    description: '更少跨区候选和新边，优先稳定、快速和解释性。'
+  },
+  {
+    value: 'deep_search',
+    label: 'DEEP SEARCH',
+    badge: '探索',
+    description: '更高跨区候选预算和更长 TTL，更容易发现隐藏桥接关系。'
+  }
+]
+
+const temporalProfiles = [
+  {
+    value: 'rapid',
+    label: 'RAPID',
+    badge: '20 min',
+    minutes: 20,
+    description: '更短轮次，适合突发扩散、预警窗口和快速干预评估。'
+  },
+  {
+    value: 'standard',
+    label: 'STANDARD',
+    badge: '60 min',
+    minutes: 60,
+    description: '默认时标，适合大多数区域级生态社会推演。'
+  },
+  {
+    value: 'slow',
+    label: 'SLOW',
+    badge: '180 min',
+    minutes: 180,
+    description: '更长轮次，适合海洋、慢变量和恢复期传播。'
+  }
+]
+
 const policyModes = [
   { value: 'restrict', label: 'restrict' },
   { value: 'relocate', label: 'relocate' },
@@ -446,7 +749,12 @@ const policyModes = [
 
 const scenarioMode = ref(props.initialScenarioMode || 'baseline_mode')
 const diffusionTemplate = ref(props.initialDiffusionTemplate || 'marine')
+const searchMode = ref(props.initialSearchMode || 'fast')
+const temporalPreset = ref('standard')
+const configuredMinutesPerRound = ref(60)
+const referenceTimeLocal = ref('')
 const maxRounds = ref(36)
+const activeWorkspaceTab = ref('region')
 const injectedVariables = ref([createVariable('disaster')])
 const phase = ref('idle')
 const prepareProgress = ref(0)
@@ -457,12 +765,21 @@ const isPreparing = ref(false)
 const configSnapshot = ref(null)
 const configRealtime = ref(null)
 const simulationSnapshot = ref(null)
+const autoPrepareAttempted = ref(false)
 
 let progressTimer = null
 let configTimer = null
 
 const graphNodes = computed(() => collectGraphNodes(props.graphData))
 const graphEdges = computed(() => collectGraphEdges(props.graphData))
+
+const diffusionTemplateLabel = computed(() => {
+  return diffusionTemplates.find(template => template.value === diffusionTemplate.value)?.label || '未设置模板'
+})
+
+const temporalProfileLabel = computed(() => {
+  return temporalProfiles.find(profile => profile.value === temporalPreset.value)?.label || 'STANDARD'
+})
 
 const graphStats = computed(() => {
   const nodes = graphNodes.value
@@ -471,17 +788,180 @@ const graphStats = computed(() => {
   return {
     regions: families.regions.length,
     humanActors: families.human.length,
+    organizationActors: families.organization.length,
     ecologyActors: families.ecology.length,
     governanceActors: families.governance.length,
     infrastructureActors: families.infrastructure.length,
-    actors: families.human.length + families.ecology.length + families.governance.length + families.infrastructure.length,
+    actors:
+      families.human.length +
+      families.organization.length +
+      families.ecology.length +
+      families.governance.length +
+      families.infrastructure.length,
     edges: edges.length
   }
 })
 
-const regionCandidates = computed(() => {
-  const families = categorizeNodes(graphNodes.value)
-  return families.regions.map(node => node.label).filter(Boolean)
+const resolvedConfig = computed(() => {
+  return configRealtime.value?.config || configSnapshot.value || {}
+})
+
+const agentSourceMode = computed(() => {
+  if (Array.isArray(resolvedConfig.value.agent_configs) && resolvedConfig.value.agent_configs.length > 0) {
+    return 'agent_configs'
+  }
+  if (Array.isArray(resolvedConfig.value.actor_profiles) && resolvedConfig.value.actor_profiles.length > 0) {
+    return 'actor_profiles'
+  }
+  if (graphStats.value.actors > 0) {
+    return 'graph'
+  }
+  return 'empty'
+})
+
+const regionRecords = computed(() => {
+  const regions = normalizeRegionRecords(resolvedConfig.value.region_graph)
+  if (regions.length > 0) {
+    return regions
+  }
+  return normalizeRegionRecordsFromGraph(graphNodes.value)
+})
+
+const agentCards = computed(() => {
+  const configAgents = normalizeAgentRecords(resolvedConfig.value, regionRecords.value)
+  if (configAgents.length > 0) {
+    return configAgents
+  }
+  return normalizeAgentRecordsFromGraph(graphNodes.value, regionRecords.value)
+})
+
+const agentCategorySummary = computed(() => summarizeAgentCategories(agentCards.value))
+
+const agentCategoryGroups = computed(() => {
+  return [
+    { key: 'human', label: '个体', count: agentCategorySummary.value.human },
+    { key: 'organization', label: '组织', count: agentCategorySummary.value.organization },
+    { key: 'ecology', label: '生态', count: agentCategorySummary.value.ecology },
+    { key: 'governance', label: '治理', count: agentCategorySummary.value.governance },
+    { key: 'infrastructure', label: '基础设施', count: agentCategorySummary.value.infrastructure },
+    { key: 'other', label: '其他', count: agentCategorySummary.value.other }
+  ].filter(item => item.count > 0 || item.key === 'other')
+})
+
+const regionAgentMap = computed(() => buildRegionAgentMap(regionRecords.value, agentCards.value))
+
+const regionSourceLabel = computed(() => {
+  if (resolvedConfig.value.region_graph?.length) {
+    return `${resolvedConfig.value.region_graph.length} 个配置区域`
+  }
+  if (regionRecords.value.length > 0) {
+    return '图谱降级区域'
+  }
+  return '暂无区域来源'
+})
+
+const agentSourceLabel = computed(() => {
+  if (agentSourceMode.value === 'agent_configs') {
+    return 'agent_configs / 配置'
+  }
+  if (agentSourceMode.value === 'actor_profiles') {
+    return 'actor_profiles / 配置'
+  }
+  if (agentSourceMode.value === 'graph') {
+    if (phase.value === 'preparing') return '自动生成正式配置中 · 当前为图谱预览'
+    if (phase.value === 'idle') return '图谱预览 · 尚未生成正式 Agent 配置'
+    return '图谱预览'
+  }
+  return '暂无 agent 来源'
+})
+
+const relationGraphEdges = computed(() => {
+  const configured = resolvedConfig.value?.agent_relationship_graph
+  if (Array.isArray(configured) && configured.length > 0) {
+    return configured
+  }
+  return graphEdges.value
+})
+
+const relationSourceMode = computed(() => {
+  const configured = resolvedConfig.value?.agent_relationship_graph
+  if (Array.isArray(configured) && configured.length > 0) {
+    return 'agent_graph'
+  }
+  return 'graph'
+})
+
+const relationSummary = computed(() => summarizeRelations(relationGraphEdges.value))
+
+const relationSectionTitle = computed(() => {
+  return relationSourceMode.value === 'agent_graph' ? 'Agent 关系图' : '图谱关系骨架'
+})
+
+const relationPanelExplanation = computed(() => {
+  if (relationSourceMode.value === 'agent_graph') {
+    return '这里展示的是正式生成的 Agent 关系图，表示谁会影响谁、依赖谁、受谁约束。它会作为后续推演里 Agent 互动的基础网络。'
+  }
+  return '这里展示的是原始图谱里的关系骨架，不是最终 Agent 互动网络。当前这些关系表示节点之间已有的事实连接，比如监管、依赖、影响、连接、位于某区域等，用来给后续正式 Agent 配置和风险链路提供底稿。'
+})
+
+const relationSourceLabel = computed(() => {
+  if (relationSourceMode.value === 'agent_graph') {
+    return `${relationSummary.value.total} 条正式 Agent 关系`
+  }
+  if (relationSummary.value.total > 0) {
+    return `${relationSummary.value.total} 条图谱关系骨架`
+  }
+  return '暂无关系来源'
+})
+
+const regionNeighborLinks = computed(() => {
+  return regionRecords.value.reduce((sum, region) => sum + region.neighborCount, 0)
+})
+
+const regionAnchorTotal = computed(() => {
+  return regionAnchorMatrix.value.reduce((sum, region) => sum + region.agentCount, 0)
+})
+
+const regionCoverageLabel = computed(() => {
+  if (regionAnchorMatrix.value.length === 0) return '0%'
+  const activeRegions = regionAnchorMatrix.value.filter((region) => region.agentCount > 0).length
+  const percentage = Math.round((activeRegions / Math.max(regionAnchorMatrix.value.length, 1)) * 100)
+  return `${percentage}%`
+})
+
+const regionAnchorMatrix = computed(() => {
+  return regionAgentMap.value
+    .slice()
+    .sort((left, right) => right.agentCount - left.agentCount)
+    .map((item, index) => ({
+      ...item,
+      rank: index + 1
+    }))
+})
+
+const workspaceTabs = computed(() => {
+  return [
+    {
+      value: 'region',
+      label: '区域划分',
+      meta: `${regionRecords.value.length} 个区域 · ${diffusionTemplateLabel.value}`
+    },
+    {
+      value: 'agents',
+      label: 'Agent配置',
+      meta: `${agentCards.value.length} 个 · ${agentSourceLabel.value}`
+    },
+    {
+      value: 'relations',
+      label: '关系骨架',
+      meta: `${relationSummary.value.total} 条 · ${relationSummary.value.types.length} 类`
+    },
+    {
+      value: 'variables',
+      label: '变量注入',
+      meta: `${injectedVariables.value.length} 项变量`
+    }
+  ]
 })
 
 const groundingSummary = computed(() => {
@@ -507,6 +987,7 @@ const selectedRiskObjectId = ref('')
 
 const riskObjects = computed(() => {
   const candidates = [
+    resolvedConfig.value?.risk_objects,
     configRealtime.value?.risk_objects,
     configSnapshot.value?.risk_objects,
     simulationSnapshot.value?.risk_objects
@@ -523,6 +1004,7 @@ const riskObjects = computed(() => {
 
 const primaryRiskObjectId = computed(() => {
   return (
+    resolvedConfig.value?.primary_risk_object_id ||
     configRealtime.value?.primary_risk_object_id ||
     configSnapshot.value?.primary_risk_object_id ||
     simulationSnapshot.value?.primary_risk_object?.risk_object_id ||
@@ -644,11 +1126,87 @@ const payloadPreview = computed(() => {
     engine_mode: 'envfish',
     scenario_mode: scenarioMode.value,
     diffusion_template: diffusionTemplate.value,
+    search_mode: searchMode.value,
+    temporal_profile: {
+      preset: temporalPreset.value,
+      total_rounds: maxRounds.value,
+      minutes_per_round: configuredMinutesPerRound.value
+    },
+    reference_time: toIsoFromLocal(referenceTimeLocal.value),
+    diffusion_provider: 'auto',
     max_rounds: maxRounds.value,
     spatial_grain: 'region',
     injected_variables: injectedVariables.value.map(serializeVariable)
   }, null, 2)
 })
+
+function resolvePhaseFromSnapshots() {
+  const simulationStatus = String(simulationSnapshot.value?.status || '').toLowerCase()
+  const realtimeMeta = configRealtime.value || {}
+  const hasConfig = Boolean(configSnapshot.value) || Boolean(realtimeMeta.config) || Boolean(realtimeMeta.config_generated)
+
+  if (hasConfig || ['ready', 'running', 'paused', 'stopped', 'completed'].includes(simulationStatus)) {
+    return 'ready'
+  }
+
+  if (simulationStatus === 'failed') {
+    return 'error'
+  }
+
+  if (realtimeMeta.is_generating || simulationStatus === 'preparing') {
+    return 'preparing'
+  }
+
+  return 'idle'
+}
+
+function syncPhaseFromSnapshots() {
+  phase.value = resolvePhaseFromSnapshots()
+
+  if (phase.value === 'ready') {
+    prepareProgress.value = 100
+    if (!prepareMessage.value) {
+      prepareMessage.value = '已存在可复用的场景配置'
+    }
+    return
+  }
+
+  if (phase.value === 'error') {
+    prepareProgress.value = clamp(Number(prepareProgress.value) || 0, 0, 100)
+    if (!prepareMessage.value) {
+      prepareMessage.value = simulationSnapshot.value?.error || '场景配置生成失败'
+    }
+    return
+  }
+
+  if (phase.value === 'preparing') {
+    prepareProgress.value = clamp(Number(prepareProgress.value) || 0, 0, 100)
+    if (!prepareMessage.value) {
+      prepareMessage.value = '正在准备场景配置'
+    }
+    return
+  }
+
+  prepareProgress.value = 0
+  prepareStage.value = ''
+  prepareMessage.value = '尚未开始生成场景配置'
+}
+
+function emitPhaseStatus(nextPhase = phase.value) {
+  if (nextPhase === 'ready') {
+    emit('update-status', 'completed')
+    return
+  }
+  if (nextPhase === 'error') {
+    emit('update-status', 'error')
+    return
+  }
+  if (nextPhase === 'preparing') {
+    emit('update-status', 'processing')
+    return
+  }
+  emit('update-status', 'idle')
+}
 
 const addLog = (msg) => {
   emit('add-log', msg)
@@ -681,6 +1239,25 @@ function serializeVariable(variable) {
     intensity: clamp(Number(variable.intensity) || 0, 0, 100),
     policy_mode: variable.type === 'policy' ? variable.policyMode : undefined
   }
+}
+
+function toIsoFromLocal(value) {
+  if (!value) return ''
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return ''
+  return date.toISOString()
+}
+
+function toDateTimeLocal(value) {
+  if (!value) return ''
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return ''
+  const pad = (num) => String(num).padStart(2, '0')
+  return [
+    date.getFullYear(),
+    pad(date.getMonth() + 1),
+    pad(date.getDate())
+  ].join('-') + `T${pad(date.getHours())}:${pad(date.getMinutes())}`
 }
 
 function splitList(value) {
@@ -748,49 +1325,739 @@ function getNodeLabel(node, fallback = '') {
 }
 
 function getNodeType(node) {
-  return String(node?.type || node?.entity_type || node?.category || node?.node_type || '').toLowerCase()
+  const directType = node?.type || node?.entity_type || node?.category || node?.node_type
+  const labelType = Array.isArray(node?.labels)
+    ? node.labels.find(label => label && label !== 'Entity' && label !== 'Node')
+    : ''
+  const attrType =
+    node?.attributes?.entity_type ||
+    node?.attributes?.type ||
+    node?.attributes?.category ||
+    node?.attributes?.scene_type
+
+  return String(directType || labelType || attrType || '').toLowerCase()
 }
 
 function categorizeNodes(nodes) {
   const grouped = {
     regions: [],
     human: [],
+    organization: [],
     ecology: [],
     governance: [],
     infrastructure: []
   }
 
   nodes.forEach((node, index) => {
+    const labels = Array.isArray(node?.labels) ? node.labels.map(label => String(label).toLowerCase()) : []
     const type = getNodeType(node)
+    const rawType = [type, ...labels, node?.name, node?.label, node?.entity_type]
+      .filter(Boolean)
+      .join(' ')
+      .toLowerCase()
     const label = getNodeLabel(node, `node_${index}`)
     const normalized = { ...node, label }
 
-    if (type.includes('region') || type.includes('city') || type.includes('district') || type.includes('zone') || type.includes('bay') || type.includes('coast') || type.includes('basin')) {
+    if (
+      rawType.includes('region') ||
+      rawType.includes('city') ||
+      rawType.includes('district') ||
+      rawType.includes('zone') ||
+      rawType.includes('bay') ||
+      rawType.includes('coast') ||
+      rawType.includes('basin')
+    ) {
       grouped.regions.push(normalized)
       return
     }
 
-    if (type.includes('resident') || type.includes('fisher') || type.includes('farmer') || type.includes('consumer') || type.includes('tourist') || type.includes('human') || type.includes('actor')) {
-      grouped.human.push(normalized)
-      return
-    }
-
-    if (type.includes('fish') || type.includes('bird') || type.includes('crop') || type.includes('species') || type.includes('eco') || type.includes('receptor')) {
-      grouped.ecology.push(normalized)
-      return
-    }
-
-    if (type.includes('gov') || type.includes('agency') || type.includes('office') || type.includes('authority') || type.includes('ngo') || type.includes('media') || type.includes('school') || type.includes('hospital')) {
+    if (
+      rawType.includes('governmentactor') ||
+      rawType.includes('regulator') ||
+      rawType.includes('bureau') ||
+      rawType.includes('authority') ||
+      rawType.includes('agency') ||
+      rawType.includes('office') ||
+      rawType.includes('committee')
+    ) {
       grouped.governance.push(normalized)
       return
     }
 
-    if (type.includes('port') || type.includes('market') || type.includes('plant') || type.includes('transport') || type.includes('infra')) {
+    if (
+      rawType.includes('organizationactor') ||
+      rawType.includes('ngo') ||
+      rawType.includes('media') ||
+      rawType.includes('school') ||
+      rawType.includes('hospital') ||
+      rawType.includes('company') ||
+      rawType.includes('enterprise') ||
+      rawType.includes('association') ||
+      rawType.includes('organization')
+    ) {
+      grouped.organization.push(normalized)
+      return
+    }
+
+    if (
+      rawType.includes('resident') ||
+      rawType.includes('fisher') ||
+      rawType.includes('farmer') ||
+      rawType.includes('consumer') ||
+      rawType.includes('tourist') ||
+      rawType.includes('humanactor') ||
+      rawType.includes('residentgroup') ||
+      rawType.includes('human')
+    ) {
+      grouped.human.push(normalized)
+      return
+    }
+
+    if (
+      rawType.includes('fish') ||
+      rawType.includes('bird') ||
+      rawType.includes('crop') ||
+      rawType.includes('species') ||
+      rawType.includes('eco') ||
+      rawType.includes('receptor') ||
+      rawType.includes('wetland') ||
+      rawType.includes('mangrove')
+    ) {
+      grouped.ecology.push(normalized)
+      return
+    }
+
+    if (
+      rawType.includes('port') ||
+      rawType.includes('market') ||
+      rawType.includes('plant') ||
+      rawType.includes('transport') ||
+      rawType.includes('infra') ||
+      rawType.includes('carrier') ||
+      rawType.includes('current') ||
+      rawType.includes('pipeline')
+    ) {
       grouped.infrastructure.push(normalized)
+      return
     }
   })
 
   return grouped
+}
+
+function normalizeKey(value) {
+  return String(value || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[\s_-]+/g, '')
+}
+
+function toList(value) {
+  if (Array.isArray(value)) return value.filter(Boolean)
+  if (!value) return []
+  return [value]
+}
+
+function toDisplayString(value, fallback = '') {
+  if (value === null || value === undefined) return fallback
+  const text = String(value).trim()
+  return text || fallback
+}
+
+function buildRegionLookup(records) {
+  const map = new Map()
+  ;(records || []).forEach((record) => {
+    const keys = [
+      record.regionKey,
+      record.region_id,
+      record.regionId,
+      record.name,
+      record.displayName,
+      record.label
+    ]
+    keys.forEach((key) => {
+      const normalized = normalizeKey(key)
+      if (normalized) {
+        map.set(normalized, record)
+      }
+    })
+  })
+  return map
+}
+
+function buildEntityLookup(nodes, agents = []) {
+  const map = new Map()
+  ;(nodes || []).forEach((node, index) => {
+    const label = toDisplayString(getNodeLabel(node, `node_${index}`), `node_${index}`)
+    const keys = [
+      node?.id,
+      node?.uuid,
+      node?.node_id,
+      node?.entity_uuid,
+      node?.entity_id,
+      node?.name,
+      node?.label,
+      node?.entity_name
+    ]
+    keys.forEach((key) => {
+      const normalized = normalizeKey(key)
+      if (normalized && !map.has(normalized)) {
+        map.set(normalized, label)
+      }
+    })
+  })
+  ;(agents || []).forEach((agent, index) => {
+    const label = toDisplayString(agent?.displayName || agent?.username || agent?.handle || `agent_${index}`, `agent_${index}`)
+    const keys = [
+      agent?.agentId,
+      agent?.agent_id,
+      agent?.agentKey,
+      agent?.sourceEntityUuid,
+      agent?.displayName,
+      agent?.username,
+      agent?.handle
+    ]
+    keys.forEach((key) => {
+      const normalized = normalizeKey(key)
+      if (normalized && !map.has(normalized)) {
+        map.set(normalized, label)
+      }
+    })
+  })
+  return map
+}
+
+function resolveRegionLabel(value, lookup) {
+  const normalized = normalizeKey(value)
+  if (!normalized) return toDisplayString(value, 'Unknown region')
+  const found = lookup.get(normalized)
+  return found?.displayName || found?.name || found?.label || toDisplayString(value, 'Unknown region')
+}
+
+function resolveRegionKey(value, lookup) {
+  const normalized = normalizeKey(value)
+  if (!normalized) return ''
+  const found = lookup.get(normalized)
+  return found?.regionKey || found?.region_id || found?.regionId || normalized
+}
+
+function humanizeSnakeCase(value, fallback = '') {
+  const text = toDisplayString(value, fallback)
+  if (!text) return fallback
+  return text
+    .replace(/[_-]+/g, ' ')
+    .replace(/\b\w/g, (char) => char.toUpperCase())
+}
+
+function relationDisplayMeta(label) {
+  const normalized = normalizeKey(label)
+  const relationMap = {
+    connects: {
+      displayLabel: '连接',
+      hint: '表示两者存在连接、流通或协作通道。'
+    },
+    dependson: {
+      displayLabel: '依赖',
+      hint: '表示前者的状态或活动依赖后者。'
+    },
+    regulates: {
+      displayLabel: '监管',
+      hint: '表示前者会对后者进行规制、约束或治理。'
+    },
+    affects: {
+      displayLabel: '影响',
+      hint: '表示前者会对后者造成影响。'
+    },
+    directlyaffects: {
+      displayLabel: '直接影响',
+      hint: '表示前者会直接改变后者状态。'
+    },
+    impactsorobserves: {
+      displayLabel: '影响 / 观测',
+      hint: '表示前者会影响后者，或持续观测后者状态。'
+    },
+    isatypeof: {
+      displayLabel: '类型归属',
+      hint: '表示前者属于后者这一类型。'
+    },
+    communitylink: {
+      displayLabel: '同社区联动',
+      hint: '表示同一区域内会互相传递观察、情绪和行动建议。'
+    },
+    trusts: {
+      displayLabel: '信任',
+      hint: '表示前者在信息或判断上依赖后者。'
+    },
+    overseenby: {
+      displayLabel: '受监管',
+      hint: '表示前者受后者监管或监督。'
+    },
+    locatedin: {
+      displayLabel: '位于',
+      hint: '表示前者处于后者区域或空间范围内。'
+    },
+    transmitsto: {
+      displayLabel: '传导到',
+      hint: '表示风险、信息或影响会从前者传到后者。'
+    },
+    flowsto: {
+      displayLabel: '流向',
+      hint: '表示物质、流体或影响从前者流向后者。'
+    },
+    carriessubstanceto: {
+      displayLabel: '携带至',
+      hint: '表示前者把物质或污染带到后者。'
+    },
+    regulatesoralters: {
+      displayLabel: '调节 / 改变',
+      hint: '表示前者的行动会直接改变后者的环境或状态。'
+    },
+    hasnormalcapacitywith: {
+      displayLabel: '常态供给',
+      hint: '表示前者在正常状态下与后者存在供给或容量联系。'
+    },
+    reportsto: {
+      displayLabel: '上报 / 汇报',
+      hint: '表示前者会向后者汇报情况或传递信息。'
+    }
+  }
+
+  return relationMap[normalized] || {
+    displayLabel: humanizeSnakeCase(label, '关系'),
+    hint: '表示两个节点之间存在一条已知关系。'
+  }
+}
+
+function bandFromScore(value) {
+  const number = Number(value)
+  if (Number.isNaN(number)) return 'neutral'
+  if (number >= 80) return 'critical'
+  if (number >= 60) return 'watch'
+  if (number >= 35) return 'stable'
+  return 'calm'
+}
+
+function familyKeyFromText(value) {
+  const text = String(value || '').toLowerCase()
+  if (text.includes('government') || text.includes('gov') || text.includes('agency') || text.includes('bureau') || text.includes('authority') || text.includes('regulator') || text.includes('committee')) {
+    return 'governance'
+  }
+  if (text.includes('organization') || text.includes('company') || text.includes('enterprise') || text.includes('media') || text.includes('ngo') || text.includes('school') || text.includes('hospital') || text.includes('association')) {
+    return 'organization'
+  }
+  if (text.includes('eco') || text.includes('species') || text.includes('bird') || text.includes('fish') || text.includes('mangrove') || text.includes('seagull') || text.includes('reef') || text.includes('forest') || text.includes('wetland') || text.includes('carrier') || text.includes('river') || text.includes('air') || text.includes('ocean')) {
+    return 'ecology'
+  }
+  if (text.includes('infra') || text.includes('port') || text.includes('road') || text.includes('plant') || text.includes('pipeline') || text.includes('transport') || text.includes('market')) {
+    return 'infrastructure'
+  }
+  if (text.includes('region') || text.includes('district') || text.includes('coast') || text.includes('bay') || text.includes('zone')) {
+    return 'region'
+  }
+  return 'human'
+}
+
+function familyLabel(key) {
+  const labels = {
+    human: '个体',
+    organization: '组织',
+    ecology: '生态',
+    governance: '治理',
+    infrastructure: '基础设施',
+    region: '区域',
+    other: '其他'
+  }
+  return labels[key] || labels.other
+}
+
+function pickArrayValue(...values) {
+  for (const value of values) {
+    if (Array.isArray(value) && value.length > 0) return value
+  }
+  return []
+}
+
+function summarizeStateVector(stateVector) {
+  if (!stateVector || typeof stateVector !== 'object') return 'state n/a'
+  const exposure = normalizeScore(stateVector.exposure_score)
+  const trust = normalizeScore(stateVector.public_trust)
+  const stress = normalizeScore(stateVector.economic_stress || stateVector.vulnerability_score)
+  if (!exposure && !trust && !stress) return 'state n/a'
+  return `E${exposure} · T${trust} · S${stress}`
+}
+
+function deriveStanceLabel(agent = {}) {
+  const rawStance = toDisplayString(agent.stance_label || agent.stance || agent.stance_profile?.stance || agent.position, '').toLowerCase()
+  if (rawStance) {
+    if (rawStance.includes('opp')) return 'opposing'
+    if (rawStance.includes('supp')) return 'supporting'
+    if (rawStance.includes('obs')) return 'observer'
+    if (rawStance.includes('neutral')) return 'neutral'
+  }
+  const bias = Number(agent.sentiment_bias ?? agent.stance_profile?.sentiment_bias ?? 0)
+  if (Number.isFinite(bias)) {
+    if (bias > 0.15) return 'supporting'
+    if (bias < -0.15) return 'opposing'
+  }
+  return 'neutral'
+}
+
+function normalizeRegionRecords(rawRegions) {
+  const source = Array.isArray(rawRegions) ? rawRegions : []
+  if (source.length === 0) return []
+
+  const baseRecords = source.map((region, index) => {
+    const regionKey = normalizeKey(region?.region_id || region?.regionId || region?.id || region?.name || `region-${index}`)
+    return {
+      regionKey,
+      region_id: toDisplayString(region?.region_id || region?.regionId || region?.id || regionKey, regionKey),
+      displayName: toDisplayString(region?.name || region?.label || region?.title || regionKey, `Region ${index + 1}`),
+      name: toDisplayString(region?.name || region?.label || region?.title || regionKey, `Region ${index + 1}`),
+      regionTypeLabel: humanizeSnakeCase(region?.region_type || region?.subregion_type || region?.layer || 'region', 'Region'),
+      layerLabel: region?.layer ? `Layer ${region.layer}` : 'Layer 1',
+      subregionLabel: humanizeSnakeCase(region?.subregion_type || region?.land_use_class || region?.distance_band || region?.region_type || 'general', 'General'),
+      summary: toDisplayString(region?.description || region?.summary || region?.notes || region?.tags?.[0], '暂无区域描述'),
+      tags: uniqueList([
+        ...(region?.tags || []),
+        region?.land_use_class,
+        region?.distance_band
+      ]),
+      carriers: uniqueList(region?.carriers || []),
+      neighbors: uniqueList(region?.neighbors || []),
+      stateVector: region?.state_vector || {},
+      populationCapacity: region?.population_capacity ?? region?.populationCapacity ?? null,
+      ecologyAssets: uniqueList(region?.ecology_assets || []),
+      industryTags: uniqueList(region?.industry_tags || []),
+      agentCount: Number(region?.agentCount || 0)
+    }
+  })
+
+  const lookup = buildRegionLookup(baseRecords)
+
+  return baseRecords.map((region) => ({
+    ...region,
+    neighbors: region.neighbors.map((item) => resolveRegionLabel(item, lookup)).filter(Boolean),
+    neighborCount: region.neighbors.length
+  }))
+}
+
+function normalizeRegionRecordsFromGraph(nodes) {
+  const grouped = categorizeNodes(nodes)
+  const regionNodes = grouped.regions || []
+  if (regionNodes.length === 0) return []
+
+  return regionNodes.map((node, index) => {
+    const regionKey = normalizeKey(node?.uuid || node?.id || node?.name || node?.label || `graph-region-${index}`)
+    return {
+      regionKey,
+      region_id: regionKey,
+      displayName: toDisplayString(node?.label || node?.name || `Region ${index + 1}`, `Region ${index + 1}`),
+      name: toDisplayString(node?.label || node?.name || `Region ${index + 1}`, `Region ${index + 1}`),
+      regionTypeLabel: humanizeSnakeCase(node?.type || node?.entity_type || node?.category || 'region', 'Region'),
+      layerLabel: 'Layer 1',
+      subregionLabel: 'Graph node',
+      summary: toDisplayString(node?.description || node?.summary || node?.label, '来自图谱的区域骨架'),
+      tags: uniqueList(node?.tags || []),
+      carriers: uniqueList(node?.carriers || []),
+      neighbors: [],
+      stateVector: node?.state_vector || {},
+      populationCapacity: node?.population_capacity ?? null,
+      ecologyAssets: uniqueList(node?.ecology_assets || []),
+      industryTags: uniqueList(node?.industry_tags || []),
+      agentCount: 0,
+      neighborCount: 0
+    }
+  })
+}
+
+function inferAgentFamily(agent = {}) {
+  const raw = [
+    agent.agent_type,
+    agent.node_family,
+    agent.role_type,
+    agent.profession,
+    agent.entity_type,
+    agent.name,
+    agent.username
+  ]
+    .filter(Boolean)
+    .join(' ')
+  return familyKeyFromText(raw)
+}
+
+function resolvePrimaryRegion(agent = {}, regionLookup) {
+  const candidates = toList(agent.primary_region || agent.home_region_id || agent.region_id || agent.region || agent.location)
+  for (const candidate of candidates) {
+    const normalized = normalizeKey(candidate)
+    if (!normalized) continue
+    const matched = regionLookup.get(normalized)
+    if (matched) {
+      return {
+        key: matched.regionKey,
+        label: matched.displayName
+      }
+    }
+  }
+
+  const fallbackValue = toDisplayString(candidates[0] || '', '')
+  return {
+    key: normalizeKey(fallbackValue),
+    label: fallbackValue || 'Unknown region'
+  }
+}
+
+function normalizeAgentRecords(config, regions) {
+  const regionLookup = buildRegionLookup(regions)
+  const sourceAgents = pickArrayValue(config?.agent_configs, config?.actor_profiles)
+  if (sourceAgents.length === 0) return []
+
+  return sourceAgents.map((agent, index) => {
+    const family = inferAgentFamily(agent)
+    const primaryRegion = resolvePrimaryRegion(agent, regionLookup)
+    const influencedRegions = uniqueList(
+      pickArrayValue(agent?.influenced_regions, agent?.influencedRegions).map((item) => resolveRegionLabel(item, regionLookup))
+    )
+    const goals = uniqueList(agent?.goals || [])
+    const sensitivities = uniqueList(agent?.sensitivities || [])
+    const displayName = toDisplayString(agent?.name || agent?.username || agent?.agent_name || agent?.entity_name || `Agent ${index + 1}`, `Agent ${index + 1}`)
+    const agentKey = normalizeKey(agent?.agent_id || agent?.user_id || agent?.uuid || agent?.source_entity_uuid || agent?.username || displayName || `agent-${index}`)
+    return {
+      agentKey: agentKey || `agent-${index}`,
+      agentId: agent?.agent_id ?? agent?.user_id ?? index,
+      displayName,
+      username: toDisplayString(agent?.username || agent?.agent_name || displayName, displayName),
+      handle: agent?.username ? `@${agent.username}` : `@${normalizeKey(displayName) || `agent_${index + 1}`}`,
+      agentTypeLabel: toDisplayString(agent?.agent_type || agent?.node_family || agent?.role_type || familyLabel(family), familyLabel(family)),
+      familyKey: family,
+      familyLabel: familyLabel(family),
+      familyClass: family,
+      roleTypeLabel: toDisplayString(agent?.role_type || agent?.profession || agent?.node_family || 'profile', 'profile'),
+      sourceLabel: 'simulation config / 配置',
+      summary: toDisplayString(agent?.bio || agent?.persona || agent?.summary, `${displayName} anchored in ${primaryRegion.label}`),
+      bio: toDisplayString(agent?.bio || '', ''),
+      persona: toDisplayString(agent?.persona || '', ''),
+      profession: toDisplayString(agent?.profession || agent?.role_type || agent?.node_family || familyLabel(family), familyLabel(family)),
+      primaryRegionKey: primaryRegion.key,
+      primaryRegionLabel: primaryRegion.label,
+      primaryRegionText: primaryRegion.label,
+      influencedRegionKeys: uniqueList(agent?.influenced_regions || []).map((item) => normalizeKey(item)),
+      influencedRegionLabels: influencedRegions,
+      influencedRegionsCount: influencedRegions.length,
+      goals,
+      sensitivities,
+      stateVector: agent?.state_vector || {},
+      stateSignal: summarizeStateVector(agent?.state_vector || {}),
+      stateBand: bandFromScore(agent?.state_vector?.vulnerability_score || agent?.state_vector?.exposure_score),
+      stanceLabel: deriveStanceLabel(agent),
+      sourceEntityUuid: agent?.source_entity_uuid || '',
+      sourceEntityType: toDisplayString(agent?.source_entity_type || '', ''),
+      isFallback: false
+    }
+  })
+}
+
+function normalizeAgentRecordsFromGraph(nodes, regions) {
+  const grouped = categorizeNodes(nodes)
+  const regionLookup = buildRegionLookup(regions)
+  const categoryMap = [
+    { key: 'human', items: grouped.human || [] },
+    { key: 'organization', items: grouped.organization || [] },
+    { key: 'ecology', items: grouped.ecology || [] },
+    { key: 'governance', items: grouped.governance || [] },
+    { key: 'infrastructure', items: grouped.infrastructure || [] }
+  ]
+
+  return categoryMap.flatMap(({ key, items }) => {
+    return items.map((node, index) => {
+      const displayName = toDisplayString(node?.label || node?.name || `Node ${index + 1}`, `Node ${index + 1}`)
+      const regionSource = toDisplayString(node?.primary_region || node?.region || node?.location || '', '')
+      const resolvedRegion = resolvePrimaryRegion({ primary_region: regionSource }, regionLookup)
+      return {
+        agentKey: normalizeKey(node?.uuid || node?.id || node?.name || displayName || `graph-agent-${key}-${index}`),
+        agentId: index,
+        displayName,
+        username: toDisplayString(node?.username || node?.label || displayName, displayName),
+        handle: `@${normalizeKey(displayName) || `graph_${index + 1}`}`,
+        agentTypeLabel: familyLabel(key),
+        familyKey: key,
+        familyLabel: familyLabel(key),
+        familyClass: key,
+        roleTypeLabel: toDisplayString(node?.type || node?.entity_type || key, familyLabel(key)),
+        sourceLabel: 'graph fallback / 图谱降级',
+        summary: toDisplayString(node?.description || node?.summary || node?.label, `${displayName} synthesized from graph`),
+        bio: toDisplayString(node?.description || node?.summary || '', ''),
+        persona: '',
+        profession: toDisplayString(node?.entity_type || node?.type || familyLabel(key), familyLabel(key)),
+        primaryRegionKey: resolvedRegion.key,
+        primaryRegionLabel: resolvedRegion.label,
+        primaryRegionText: resolvedRegion.label,
+        influencedRegionKeys: [],
+        influencedRegionLabels: [],
+        influencedRegionsCount: 0,
+        goals: uniqueList(node?.tags || []).slice(0, 3),
+        sensitivities: uniqueList(node?.labels || []).slice(0, 2),
+        stateVector: node?.state_vector || {},
+        stateSignal: summarizeStateVector(node?.state_vector || {}),
+        stateBand: bandFromScore(node?.state_vector?.vulnerability_score || node?.state_vector?.exposure_score),
+        stanceLabel: 'neutral',
+        sourceEntityUuid: node?.uuid || node?.id || '',
+        sourceEntityType: toDisplayString(node?.entity_type || node?.type || '', ''),
+        isFallback: true
+      }
+    })
+  })
+}
+
+function summarizeAgentCategories(agents) {
+  return (agents || []).reduce((acc, agent) => {
+    const key = agent?.familyKey || 'other'
+    if (key in acc) {
+      acc[key] += 1
+    } else {
+      acc.other += 1
+    }
+    return acc
+  }, {
+    human: 0,
+    organization: 0,
+    ecology: 0,
+    governance: 0,
+    infrastructure: 0,
+    region: 0,
+    other: 0
+  })
+}
+
+function buildRegionAgentMap(regions, agents) {
+  const regionLookup = buildRegionLookup(regions)
+  return (regions || []).map((region) => {
+    const regionKey = normalizeKey(region.regionKey || region.region_id || region.name || region.displayName)
+    const matchingAgents = (agents || []).filter((agent) => {
+      const primaryMatch = normalizeKey(agent.primaryRegionKey) === regionKey || normalizeKey(agent.primaryRegionLabel) === regionKey
+      const influencedMatch = (agent.influencedRegionKeys || []).some((key) => key === regionKey)
+      return primaryMatch || influencedMatch
+    })
+    const categorySummary = summarizeAgentCategories(matchingAgents)
+    const topFamilies = [
+      categorySummary.human ? familyLabel('human') : '',
+      categorySummary.organization ? familyLabel('organization') : '',
+      categorySummary.ecology ? familyLabel('ecology') : '',
+      categorySummary.governance ? familyLabel('governance') : '',
+      categorySummary.infrastructure ? familyLabel('infrastructure') : ''
+    ].filter(Boolean).slice(0, 3)
+
+    return {
+      regionKey: region.regionKey,
+      displayName: region.displayName,
+      summary: matchingAgents.length > 0
+        ? `${matchingAgents.length} agents anchored here`
+        : region.summary,
+      agentCount: matchingAgents.length,
+      topFamilies,
+      neighbors: region.neighbors,
+      neighborCount: region.neighborCount,
+      regionTypeLabel: region.regionTypeLabel,
+      layerLabel: region.layerLabel,
+      subregionLabel: region.subregionLabel,
+      tags: region.tags,
+      carriers: region.carriers,
+      stateVector: region.stateVector,
+      primaryRegionLabel: resolveRegionLabel(region.regionKey, regionLookup)
+    }
+  })
+}
+
+function getEdgeLabel(edge) {
+  return toDisplayString(
+    edge?.relation_type || edge?.label || edge?.relation || edge?.relationship || edge?.type || edge?.name || edge?.kind,
+    'unlabeled'
+  )
+}
+
+function getEdgeEndpoint(edge, prefixes, lookup) {
+  for (const prefix of prefixes) {
+    const candidates = [
+      edge?.[`${prefix}_name`],
+      edge?.[`${prefix}Name`],
+      edge?.[`${prefix}_label`],
+      edge?.[`${prefix}Label`],
+      edge?.[`${prefix}_title`],
+      edge?.[`${prefix}Title`],
+      edge?.[`${prefix}_entity_name`],
+      edge?.[`${prefix}EntityName`],
+      edge?.[`${prefix}_agent_name`],
+      edge?.[`${prefix}AgentName`],
+      edge?.[`${prefix}_agent_id`],
+      edge?.[`${prefix}AgentId`],
+      edge?.[`${prefix}_id`],
+      edge?.[`${prefix}Id`]
+    ]
+    for (const candidate of candidates) {
+      const normalized = normalizeKey(candidate)
+      if (!normalized) continue
+      const lookupValue = lookup.get(normalized)
+      return lookupValue || toDisplayString(candidate, '')
+    }
+  }
+  return ''
+}
+
+function summarizeRelations(edges) {
+  const lookup = buildEntityLookup(graphNodes.value, agentCards.value)
+  const labelCounts = new Map()
+  const channelCounts = new Map()
+  const sampleEdges = []
+  let crossRegionCount = 0
+
+  ;(edges || []).forEach((edge, index) => {
+    const label = getEdgeLabel(edge)
+    const relationMeta = relationDisplayMeta(label)
+    labelCounts.set(label, (labelCounts.get(label) || 0) + 1)
+    const channel = toDisplayString(edge?.interaction_channel || edge?.channel || edge?.interactionChannel, '')
+    if (channel) {
+      channelCounts.set(channel, (channelCounts.get(channel) || 0) + 1)
+    }
+    if (
+      edge?.source_region_id &&
+      edge?.target_region_id &&
+      normalizeKey(edge.source_region_id) !== normalizeKey(edge.target_region_id)
+    ) {
+      crossRegionCount += 1
+    }
+    if (sampleEdges.length < 6) {
+      const source = getEdgeEndpoint(edge, ['source', 'from', 'head'], lookup)
+      const target = getEdgeEndpoint(edge, ['target', 'to', 'tail'], lookup)
+      const channelLabel = humanizeSnakeCase(channel, 'general')
+      sampleEdges.push({
+        key: `${label}-${index}`,
+        label,
+        displayLabel: relationMeta.displayLabel,
+        hint: relationMeta.hint,
+        summary: source && target
+          ? `${source} ${relationMeta.displayLabel} ${target}`
+          : source || target || '关系边',
+        rationale: toDisplayString(edge?.rationale || '', ''),
+        channelLabel,
+        strengthLabel: Number.isFinite(Number(edge?.strength)) ? Number(edge.strength).toFixed(2) : ''
+      })
+    }
+  })
+
+  return {
+    total: (edges || []).length,
+    crossRegionCount,
+    channels: Array.from(channelCounts.entries())
+      .map(([label, count]) => ({ label, count, displayLabel: humanizeSnakeCase(label, 'General') }))
+      .sort((left, right) => right.count - left.count),
+    types: Array.from(labelCounts.entries())
+      .map(([label, count]) => ({
+        label,
+        count,
+        ...relationDisplayMeta(label)
+      }))
+      .sort((left, right) => right.count - left.count),
+    sampleEdges
+  }
 }
 
 function addVariable(type = 'disaster') {
@@ -814,13 +2081,32 @@ async function bootstrapSimulation() {
 
     if (simulationRes.status === 'fulfilled' && simulationRes.value?.success) {
       simulationSnapshot.value = simulationRes.value.data || null
+      if (simulationSnapshot.value?.scenario_mode) scenarioMode.value = simulationSnapshot.value.scenario_mode
+      if (simulationSnapshot.value?.diffusion_template) diffusionTemplate.value = simulationSnapshot.value.diffusion_template
+      if (simulationSnapshot.value?.search_mode) searchMode.value = simulationSnapshot.value.search_mode
+      if (simulationSnapshot.value?.temporal_preset) temporalPreset.value = simulationSnapshot.value.temporal_preset
+      if (simulationSnapshot.value?.configured_minutes_per_round) {
+        configuredMinutesPerRound.value = Number(simulationSnapshot.value.configured_minutes_per_round) || configuredMinutesPerRound.value
+      }
+      if (simulationSnapshot.value?.configured_total_rounds) {
+        maxRounds.value = Number(simulationSnapshot.value.configured_total_rounds) || maxRounds.value
+      }
+      if (simulationSnapshot.value?.reference_time) referenceTimeLocal.value = toDateTimeLocal(simulationSnapshot.value.reference_time)
     }
 
     if (configRes.status === 'fulfilled' && configRes.value?.success && configRes.value.data) {
       configSnapshot.value = configRes.value.data
-      phase.value = 'ready'
-      prepareProgress.value = 100
-      prepareMessage.value = '已存在可复用的场景配置'
+      if (configRes.value.data.scenario_mode) scenarioMode.value = configRes.value.data.scenario_mode
+      if (configRes.value.data.diffusion_template) diffusionTemplate.value = configRes.value.data.diffusion_template
+      if (configRes.value.data.search_mode) searchMode.value = configRes.value.data.search_mode
+      if (configRes.value.data.temporal_profile?.preset) temporalPreset.value = configRes.value.data.temporal_profile.preset
+      if (configRes.value.data.temporal_profile?.minutes_per_round) {
+        configuredMinutesPerRound.value = Number(configRes.value.data.temporal_profile.minutes_per_round) || configuredMinutesPerRound.value
+      }
+      if (configRes.value.data.temporal_profile?.total_rounds) {
+        maxRounds.value = Number(configRes.value.data.temporal_profile.total_rounds) || maxRounds.value
+      }
+      if (configRes.value.data.reference_time) referenceTimeLocal.value = toDateTimeLocal(configRes.value.data.reference_time)
     }
 
     if (realtimeRes.status === 'fulfilled' && realtimeRes.value?.success && realtimeRes.value.data) {
@@ -831,6 +2117,22 @@ async function bootstrapSimulation() {
       if (realtimeRes.value.data.progress !== undefined) {
         prepareProgress.value = realtimeRes.value.data.progress
       }
+      if (realtimeRes.value.data.search_mode) {
+        searchMode.value = realtimeRes.value.data.search_mode
+      }
+      if (realtimeRes.value.data.temporal_profile?.preset) temporalPreset.value = realtimeRes.value.data.temporal_profile.preset
+      if (realtimeRes.value.data.temporal_profile?.minutes_per_round) {
+        configuredMinutesPerRound.value = Number(realtimeRes.value.data.temporal_profile.minutes_per_round) || configuredMinutesPerRound.value
+      }
+      if (realtimeRes.value.data.temporal_profile?.total_rounds) {
+        maxRounds.value = Number(realtimeRes.value.data.temporal_profile.total_rounds) || maxRounds.value
+      }
+      if (realtimeRes.value.data.reference_time) referenceTimeLocal.value = toDateTimeLocal(realtimeRes.value.data.reference_time)
+    }
+
+    syncPhaseFromSnapshots()
+    if (phase.value === 'preparing') {
+      startTimers()
     }
   } catch (err) {
     addLog(`加载场景上下文失败: ${err.message}`)
@@ -855,15 +2157,19 @@ function stopTimers() {
   }
 }
 
-async function handlePrepare() {
+async function handlePrepare(options = {}) {
   if (!props.simulationId || isPreparing.value) return
+
+  const autoTriggered = Boolean(options.auto)
 
   isPreparing.value = true
   phase.value = 'preparing'
   prepareProgress.value = 0
-  prepareMessage.value = '正在提交 EnvFish 场景配置'
+  prepareMessage.value = autoTriggered ? '正在自动生成正式 Agent 配置' : '正在提交 EnvFish 场景配置'
   emit('update-status', 'processing')
-  addLog(`提交 EnvFish 场景配置: ${scenarioMode.value} / ${diffusionTemplate.value}`)
+  addLog(
+    `${autoTriggered ? '自动' : '手动'}提交 EnvFish 场景配置: ${scenarioMode.value} / ${diffusionTemplate.value} / ${searchMode.value} / ${temporalProfileLabel.value}`
+  )
 
   try {
     const res = await prepareSimulation({
@@ -871,12 +2177,25 @@ async function handlePrepare() {
       engine_mode: 'envfish',
       scenario_mode: scenarioMode.value,
       diffusion_template: diffusionTemplate.value,
+      search_mode: searchMode.value,
+      temporal_preset: temporalPreset.value,
+      temporal_profile: {
+        preset: temporalPreset.value,
+        total_rounds: maxRounds.value,
+        minutes_per_round: configuredMinutesPerRound.value
+      },
+      reference_time: toIsoFromLocal(referenceTimeLocal.value),
+      diffusion_provider: 'auto',
+      minutes_per_round: configuredMinutesPerRound.value,
       max_rounds: maxRounds.value,
       region_granularity: 'region',
       injected_variables: injectedVariables.value.map(serializeVariable)
     })
 
     if (res.success && res.data) {
+      if (res.data.temporal_profile?.minutes_per_round) {
+        configuredMinutesPerRound.value = Number(res.data.temporal_profile.minutes_per_round) || configuredMinutesPerRound.value
+      }
       if (res.data.already_prepared) {
         phase.value = 'ready'
         prepareProgress.value = 100
@@ -938,6 +2257,12 @@ async function pollPrepareStatus() {
         emit('update-status', 'error')
         addLog(`✗ 场景配置失败: ${data.error || '未知错误'}`)
         stopTimers()
+      } else if (data.status === 'not_started') {
+        phase.value = 'idle'
+        prepareProgress.value = 0
+        prepareMessage.value = data.message || '尚未开始生成场景配置'
+        prepareStage.value = ''
+        stopTimers()
       }
     }
   } catch (err) {
@@ -957,6 +2282,16 @@ async function fetchConfigRealtime() {
       if (res.data.message) prepareMessage.value = res.data.message
       if (res.data.scenario_mode) scenarioMode.value = res.data.scenario_mode
       if (res.data.diffusion_template) diffusionTemplate.value = res.data.diffusion_template
+      if (res.data.search_mode) searchMode.value = res.data.search_mode
+      if (res.data.temporal_profile?.preset) temporalPreset.value = res.data.temporal_profile.preset
+      if (res.data.temporal_profile?.minutes_per_round) {
+        configuredMinutesPerRound.value = Number(res.data.temporal_profile.minutes_per_round) || configuredMinutesPerRound.value
+      }
+      if (res.data.temporal_profile?.total_rounds) {
+        maxRounds.value = Number(res.data.temporal_profile.total_rounds) || maxRounds.value
+      }
+      if (res.data.reference_time) referenceTimeLocal.value = toDateTimeLocal(res.data.reference_time)
+      syncPhaseFromSnapshots()
     }
   } catch (err) {
     console.warn('fetch config realtime failed', err)
@@ -967,6 +2302,10 @@ function handleNextStep() {
   emit('next-step', {
     scenarioMode: scenarioMode.value,
     diffusionTemplate: diffusionTemplate.value,
+    searchMode: searchMode.value,
+    temporalPreset: temporalPreset.value,
+    minutesPerRound: configuredMinutesPerRound.value,
+    referenceTime: toIsoFromLocal(referenceTimeLocal.value),
     maxRounds: maxRounds.value,
     variableCount: injectedVariables.value.length,
     injectedVariables: injectedVariables.value.map(serializeVariable)
@@ -985,6 +2324,24 @@ watch(
   (value) => {
     if (value) diffusionTemplate.value = value
   }
+)
+
+watch(
+  () => props.initialSearchMode,
+  (value) => {
+    if (value) searchMode.value = value
+  }
+)
+
+watch(
+  temporalPreset,
+  (value) => {
+    const matched = temporalProfiles.find(profile => profile.value === value)
+    if (matched) {
+      configuredMinutesPerRound.value = matched.minutes
+    }
+  },
+  { immediate: true }
 )
 
 watch(
@@ -1015,11 +2372,20 @@ watch(
   { immediate: true, deep: true }
 )
 
+watch(
+  phase,
+  (value) => {
+    emitPhaseStatus(value)
+  }
+)
+
 onMounted(async () => {
   addLog('EnvFish Step2 初始化')
   await bootstrapSimulation()
-  if (props.simulationId) {
-    emit('update-status', phase.value === 'ready' ? 'completed' : 'processing')
+  if (props.simulationId) emitPhaseStatus()
+  if (props.simulationId && phase.value === 'idle' && !autoPrepareAttempted.value) {
+    autoPrepareAttempted.value = true
+    handlePrepare({ auto: true })
   }
 })
 
@@ -1035,7 +2401,7 @@ onUnmounted(() => {
   flex-direction: column;
   gap: 16px;
   padding: 18px;
-  overflow: hidden;
+  overflow: auto;
   background:
     radial-gradient(circle at top left, rgba(88, 159, 255, 0.18), transparent 32%),
     radial-gradient(circle at top right, rgba(28, 196, 135, 0.16), transparent 30%),
@@ -1044,7 +2410,7 @@ onUnmounted(() => {
 }
 
 .hero,
-.panel,
+.workspace-shell,
 .progress-shell,
 .log-shell {
   border: 1px solid rgba(20, 33, 61, 0.08);
@@ -1113,18 +2479,102 @@ onUnmounted(() => {
   color: #183058;
 }
 
-.workspace {
-  display: grid;
-  grid-template-columns: 1.05fr 1fr 0.8fr;
+.workspace-shell {
+  display: flex;
+  flex-direction: column;
   gap: 16px;
-  min-height: 0;
-  flex: 1;
+  flex: none;
+  border-radius: 24px;
+  padding: 18px;
+  overflow: visible;
+}
+
+.workspace-topbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 16px;
+}
+
+.workspace-copy {
+  max-width: 560px;
+}
+
+.workspace-eyebrow {
+  margin-bottom: 8px;
+}
+
+.workspace-copy h3 {
+  margin: 0;
+  font-size: 22px;
+  color: #183058;
+}
+
+.workspace-copy p {
+  margin: 8px 0 0;
+  color: #5d687f;
+  line-height: 1.5;
+  font-size: 13px;
+}
+
+.workspace-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 10px;
+}
+
+.workspace-tab {
+  min-width: 150px;
+  text-align: left;
+  border-radius: 18px;
+  border: 1px solid rgba(20, 33, 61, 0.08);
+  background: linear-gradient(180deg, rgba(248, 250, 255, 0.96), rgba(239, 244, 255, 0.92));
+  padding: 12px 14px;
+  cursor: pointer;
+  transition: transform 0.18s ease, box-shadow 0.18s ease, border-color 0.18s ease, background 0.18s ease;
+}
+
+.workspace-tab:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 8px 20px rgba(31, 57, 98, 0.08);
+}
+
+.workspace-tab.active {
+  border-color: rgba(47, 110, 255, 0.36);
+  background: linear-gradient(180deg, rgba(238, 244, 255, 1), rgba(224, 235, 255, 0.96));
+  box-shadow: 0 10px 24px rgba(31, 57, 98, 0.1);
+}
+
+.workspace-tab-label,
+.workspace-tab-meta {
+  display: block;
+}
+
+.workspace-tab-label {
+  font-size: 14px;
+  font-weight: 800;
+  color: #183058;
+}
+
+.workspace-tab-meta {
+  margin-top: 6px;
+  font-size: 11px;
+  color: #7382a3;
+  letter-spacing: 0.04em;
 }
 
 .panel {
-  border-radius: 24px;
+  border-radius: 22px;
   padding: 18px;
   overflow: auto;
+  border: 1px solid rgba(20, 33, 61, 0.08);
+  background: linear-gradient(180deg, rgba(250, 252, 255, 0.96), rgba(239, 245, 255, 0.82));
+}
+
+.workspace-panel {
+  flex: none;
+  min-height: 360px;
 }
 
 .panel-title-row {
@@ -1140,10 +2590,15 @@ onUnmounted(() => {
   font-size: 16px;
 }
 
-.mode-grid,
+.mode-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 12px;
+}
+
 .template-grid {
   display: grid;
-  grid-template-columns: 1fr;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
   gap: 12px;
 }
 
@@ -1225,7 +2680,7 @@ onUnmounted(() => {
 
 .field-row {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
   gap: 10px;
   margin-bottom: 10px;
 }
@@ -1310,7 +2765,7 @@ textarea {
 
 .summary-grid {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
   gap: 10px;
   margin-bottom: 14px;
 }
@@ -1363,6 +2818,136 @@ textarea {
   line-height: 1.5;
   color: #24314a;
   white-space: pre-wrap;
+}
+
+.region-grid,
+.agent-grid,
+.relation-grid {
+  display: grid;
+  gap: 12px;
+}
+
+.region-grid,
+.relation-grid {
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+}
+
+.agent-grid {
+  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+}
+
+.region-card,
+.relation-card {
+  border-radius: 18px;
+  padding: 14px;
+  background: rgba(255, 255, 255, 0.88);
+  border: 1px solid rgba(20, 33, 61, 0.08);
+  box-shadow: 0 8px 20px rgba(17, 31, 59, 0.04);
+}
+
+.region-card p,
+.relation-card p {
+  margin: 8px 0 0;
+  color: #5e6782;
+  line-height: 1.5;
+  font-size: 13px;
+}
+
+.region-card-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  align-items: flex-start;
+}
+
+.region-card-index {
+  display: inline-flex;
+  margin-bottom: 6px;
+  padding: 4px 8px;
+  border-radius: 999px;
+  background: rgba(47, 110, 255, 0.08);
+  color: #2d5be3;
+  font-size: 10px;
+  font-weight: 800;
+}
+
+.region-card-type {
+  display: inline-flex;
+  align-items: center;
+  border-radius: 999px;
+  padding: 4px 8px;
+  background: rgba(24, 48, 88, 0.06);
+  color: #5d687f;
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.region-card strong,
+.relation-card strong {
+  color: #16315a;
+  font-size: 15px;
+}
+
+.region-card-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 12px 0 10px;
+}
+
+.region-card-meta span {
+  display: inline-flex;
+  align-items: center;
+  border-radius: 999px;
+  padding: 5px 8px;
+  background: rgba(47, 110, 255, 0.08);
+  color: #3357a8;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.chip-soft {
+  background: rgba(28, 196, 135, 0.08);
+  color: #13805c;
+}
+
+.agent-group-chip {
+  background: rgba(24, 48, 88, 0.06);
+  color: #213553;
+}
+
+.relation-edge-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.relation-edge-row {
+  display: grid;
+  grid-template-columns: minmax(160px, auto) 1fr;
+  gap: 10px;
+  align-items: center;
+  padding: 10px 12px;
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.76);
+  border: 1px solid rgba(20, 33, 61, 0.06);
+}
+
+.relation-edge-row strong {
+  color: #16315a;
+  font-size: 12px;
+}
+
+.relation-edge-row span {
+  color: #5d687f;
+  font-size: 12px;
+}
+
+.relation-edge-row small {
+  grid-column: 2;
+  color: #7b86a0;
+  font-size: 11px;
+  line-height: 1.4;
 }
 
 .risk-preview-shell {
@@ -1647,17 +3232,27 @@ textarea {
 }
 
 @media (max-width: 1280px) {
-  .workspace {
-    grid-template-columns: 1fr;
-  }
-
   .risk-preview-grid,
   .risk-node-grid {
     grid-template-columns: 1fr;
   }
 
-  .hero {
+  .hero,
+  .workspace-topbar {
     flex-direction: column;
+  }
+
+  .workspace-tabs {
+    width: 100%;
+    justify-content: flex-start;
+  }
+
+  .workspace-tab {
+    flex: 1 1 180px;
+  }
+
+  .workspace-panel {
+    min-height: 300px;
   }
 }
 </style>

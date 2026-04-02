@@ -1325,24 +1325,102 @@ class ReportAgent:
         "envfish_intervention_comparison",
     }
 
+    def _coerce_tool_parameter_value(self, raw_value: str) -> Any:
+        """将 XML 文本参数尽量还原为 Python 标量。"""
+        value = raw_value.strip()
+        if not value:
+            return ""
+
+        if value.startswith("{") or value.startswith("["):
+            try:
+                return json.loads(value)
+            except json.JSONDecodeError:
+                pass
+
+        lowered = value.lower()
+        if lowered == "true":
+            return True
+        if lowered == "false":
+            return False
+        if lowered in {"null", "none"}:
+            return None
+
+        try:
+            if "." not in value:
+                return int(value)
+            return float(value)
+        except ValueError:
+            return value
+
+    def _parse_tool_parameters(self, raw_parameters: str) -> Dict[str, Any]:
+        """兼容 JSON 和简单 XML 两种 parameters 表达方式。"""
+        payload = raw_parameters.strip()
+        if not payload:
+            return {}
+
+        if payload.startswith("{") or payload.startswith("["):
+            try:
+                parsed = json.loads(payload)
+                return parsed if isinstance(parsed, dict) else {"value": parsed}
+            except json.JSONDecodeError:
+                pass
+
+        params: Dict[str, Any] = {}
+        for match in re.finditer(r"<([a-zA-Z_][\w-]*)>\s*(.*?)\s*</\1>", payload, re.DOTALL):
+            key = match.group(1)
+            value = match.group(2)
+            params[key] = self._coerce_tool_parameter_value(value)
+
+        return params
+
+    def _parse_tool_call_block(self, block: str) -> Optional[Dict[str, Any]]:
+        """解析单个 <tool_call> ... </tool_call> 块。"""
+        payload = block.strip()
+        if not payload:
+            return None
+
+        if payload.startswith("{") and payload.endswith("}"):
+            try:
+                call_data = json.loads(payload)
+                return call_data if self._is_valid_tool_call(call_data) else None
+            except json.JSONDecodeError:
+                pass
+
+        name_match = re.search(r"<(?:name|tool)>\s*([^<]+?)\s*</(?:name|tool)>", payload, re.DOTALL)
+        if not name_match:
+            return None
+
+        parameters: Dict[str, Any] = {}
+        params_match = re.search(r"<(?:parameters|params)>\s*(.*?)\s*</(?:parameters|params)>", payload, re.DOTALL)
+        if params_match:
+            parsed_params = self._parse_tool_parameters(params_match.group(1))
+            if isinstance(parsed_params, dict):
+                parameters = parsed_params
+
+        call_data = {
+            "name": name_match.group(1).strip(),
+            "parameters": parameters,
+        }
+        return call_data if self._is_valid_tool_call(call_data) else None
+
     def _parse_tool_calls(self, response: str) -> List[Dict[str, Any]]:
         """
         从LLM响应中解析工具调用
 
         支持的格式（按优先级）：
         1. <tool_call>{"name": "tool_name", "parameters": {...}}</tool_call>
+        2. <tool_call><name>tool_name</name><parameters>{"limit": 8}</parameters></tool_call>
+        3. <tool_call><name>tool_name</name><parameters><limit>8</limit></parameters></tool_call>
         2. 裸 JSON（响应整体或单行就是一个工具调用 JSON）
         """
         tool_calls = []
 
-        # 格式1: XML风格（标准格式）
-        xml_pattern = r'<tool_call>\s*(\{.*?\})\s*</tool_call>'
-        for match in re.finditer(xml_pattern, response, re.DOTALL):
-            try:
-                call_data = json.loads(match.group(1))
+        # 格式1-3: tool_call 包裹的 JSON / XML 结构
+        block_pattern = r"<tool_call>\s*(.*?)\s*</tool_call>"
+        for match in re.finditer(block_pattern, response, re.DOTALL | re.IGNORECASE):
+            call_data = self._parse_tool_call_block(match.group(1))
+            if call_data:
                 tool_calls.append(call_data)
-            except json.JSONDecodeError:
-                pass
 
         if tool_calls:
             return tool_calls
