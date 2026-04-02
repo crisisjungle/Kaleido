@@ -21,6 +21,7 @@ from ..config import Config
 from ..utils.logger import get_logger
 from ..utils.llm_client import LLMClient
 from ..utils.zep_paging import fetch_all_nodes, fetch_all_edges
+from .risk_projection import build_legacy_risk_summary, project_legacy_risk_objects
 
 logger = get_logger('envfish.zep_tools')
 
@@ -397,6 +398,10 @@ class EnvFishArtifactBundle:
     grounding_summary: Dict[str, Any] = field(default_factory=dict)
     region_graph: Any = field(default_factory=dict)
     subregion_graph: Any = field(default_factory=dict)
+    risk_definitions: List[Dict[str, Any]] = field(default_factory=list)
+    latest_risk_runtime_state: Dict[str, Any] = field(default_factory=dict)
+    risk_runtime_state: List[Dict[str, Any]] = field(default_factory=list)
+    risk_events: List[Dict[str, Any]] = field(default_factory=list)
     risk_objects: List[Dict[str, Any]] = field(default_factory=list)
     risk_object_summary: Dict[str, Any] = field(default_factory=dict)
     regional_state_matrix: Any = field(default_factory=dict)
@@ -421,6 +426,10 @@ class EnvFishArtifactBundle:
             "grounding_summary": self.grounding_summary,
             "region_graph": self.region_graph,
             "subregion_graph": self.subregion_graph,
+            "risk_definitions": self.risk_definitions,
+            "latest_risk_runtime_state": self.latest_risk_runtime_state,
+            "risk_runtime_state": self.risk_runtime_state,
+            "risk_events": self.risk_events,
             "risk_objects": self.risk_objects,
             "risk_object_summary": self.risk_object_summary,
             "regional_state_matrix": self.regional_state_matrix,
@@ -470,6 +479,70 @@ class EnvFishArtifactBundle:
             return source
 
         return {}
+
+    def _preferred_risk_definitions(self) -> List[Dict[str, Any]]:
+        if isinstance(self.risk_definitions, list) and self.risk_definitions:
+            return [item for item in self.risk_definitions if isinstance(item, dict)]
+        config_defs = self.simulation_config.get("risk_definitions") if isinstance(self.simulation_config, dict) else []
+        if isinstance(config_defs, list):
+            return [item for item in config_defs if isinstance(item, dict)]
+        return []
+
+    def _preferred_runtime_state(self) -> Dict[str, Any]:
+        if isinstance(self.latest_risk_runtime_state, dict) and self.latest_risk_runtime_state:
+            return self.latest_risk_runtime_state
+        config_runtime = self.simulation_config.get("latest_risk_runtime_state") if isinstance(self.simulation_config, dict) else {}
+        if isinstance(config_runtime, dict):
+            return config_runtime
+        return {}
+
+    def _preferred_risk_events(self) -> List[Dict[str, Any]]:
+        if isinstance(self.risk_events, list) and self.risk_events:
+            return [item for item in self.risk_events if isinstance(item, dict)]
+        config_events = self.simulation_config.get("risk_events") if isinstance(self.simulation_config, dict) else []
+        if isinstance(config_events, list):
+            return [item for item in config_events if isinstance(item, dict)]
+        return []
+
+    def _preferred_risk_objects(self) -> List[Dict[str, Any]]:
+        definitions = self._preferred_risk_definitions()
+        if definitions:
+            projected = project_legacy_risk_objects(definitions, self._preferred_runtime_state())
+            if projected:
+                return projected
+        if isinstance(self.risk_objects, list):
+            return [item for item in self.risk_objects if isinstance(item, dict)]
+        config_risks = self.simulation_config.get("risk_objects") if isinstance(self.simulation_config, dict) else []
+        if isinstance(config_risks, list):
+            return [item for item in config_risks if isinstance(item, dict)]
+        return []
+
+    def _preferred_risk_summary(self) -> Dict[str, Any]:
+        runtime_state = self._preferred_runtime_state()
+        summary = build_legacy_risk_summary(
+            self._preferred_risk_objects(),
+            primary_risk_object_id=str(self.risk_object_summary.get("primary_risk_object_id") or ""),
+            generation_notes=list(self.risk_object_summary.get("generation_notes") or []),
+            primary_active_risk_id=str(runtime_state.get("primary_active_risk_id") or ""),
+            pinned_risk_ids=list(runtime_state.get("pinned_risk_ids") or []),
+        )
+        summary["risk_definition_count"] = len(self._preferred_risk_definitions())
+        summary["risk_runtime_state_count"] = len(self.risk_runtime_state or [])
+        summary["risk_event_count"] = len(self._preferred_risk_events())
+        summary["risk_object_count"] = summary.get("risk_objects_count", 0)
+        return summary
+
+    def _latest_risk_runtime_state_label(self) -> str:
+        runtime_state = self._preferred_runtime_state()
+        if not runtime_state:
+            return ""
+        primary = runtime_state.get("primary_active_risk") or {}
+        if isinstance(primary, dict):
+            return _normalize_name(primary.get("title") or primary.get("risk_id"), "")
+        primary_id = runtime_state.get("primary_active_risk_id")
+        if primary_id:
+            return _normalize_name(primary_id, "")
+        return ""
 
     def _extract_region_state_records(self) -> List[Dict[str, Any]]:
         source = self.regional_state_matrix or self._get_latest_snapshot()
@@ -829,12 +902,18 @@ class EnvFishArtifactBundle:
             injected_variables = self.simulation_config.get("injected_variables") or []
             if injected_variables:
                 lines.append(f"- 注入变量数: {len(injected_variables)}")
-            risk_objects = self.simulation_config.get("risk_objects") or self.risk_objects
-            if risk_objects:
-                lines.append(f"- 风险对象数: {len(risk_objects)}")
-            primary_risk_object_id = self.simulation_config.get("primary_risk_object_id") or self.risk_object_summary.get("primary_risk_object_id")
-            if primary_risk_object_id:
-                lines.append(f"- 主风险对象: {primary_risk_object_id}")
+            risk_summary = self._preferred_risk_summary()
+            if risk_summary.get("risk_definition_count"):
+                lines.append(f"- 风险定义数: {risk_summary['risk_definition_count']}")
+            if risk_summary.get("risk_objects_count"):
+                lines.append(f"- 风险对象数: {risk_summary['risk_objects_count']}")
+            primary_active_risk_id = risk_summary.get("primary_active_risk_id") or ""
+            if primary_active_risk_id:
+                lines.append(f"- 主活跃风险: {primary_active_risk_id}")
+            elif risk_summary.get("primary_risk_object_id"):
+                lines.append(f"- 主风险对象: {risk_summary['primary_risk_object_id']}")
+            if risk_summary.get("risk_event_count"):
+                lines.append(f"- 风险事件数: {risk_summary['risk_event_count']}")
             grounding = self.simulation_config.get("data_grounding_summary") or {}
             if grounding:
                 lines.append(f"- 数据基线来源: {', '.join([k for k, v in grounding.items() if v]) or '未提供'}")
@@ -872,9 +951,10 @@ class EnvFishArtifactBundle:
             for i, chain in enumerate(event_summary["feedback_chains"][:limit], 1):
                 lines.append(f"{i}. {chain}")
 
-        if self.risk_objects:
+        preferred_risk_objects = self._preferred_risk_objects()
+        if preferred_risk_objects:
             lines.extend(["", "### 风险对象概览"])
-            for i, item in enumerate(self.risk_objects[:limit], 1):
+            for i, item in enumerate(preferred_risk_objects[:limit], 1):
                 title = _normalize_name(item.get("title"), f"风险对象 {i}")
                 status = _normalize_name(item.get("status"), "unknown")
                 severity = item.get("severity_score")
@@ -900,8 +980,9 @@ class EnvFishArtifactBundle:
             f"扩散模板: {self.diffusion_template or 'unknown'}",
             f"引擎模式: {self.engine_mode or 'unknown'}",
         ]
-        if self.risk_objects:
-            primary = self.risk_object_summary.get("primary_risk_object") or self.risk_objects[0]
+        preferred_risk_objects = self._preferred_risk_objects()
+        if preferred_risk_objects:
+            primary = self._preferred_risk_summary().get("primary_risk_object") or preferred_risk_objects[0]
             title = _normalize_name(primary.get("title"), "主风险对象")
             severity = primary.get("severity_score")
             bullets.append(
@@ -1263,6 +1344,30 @@ class ZepToolsService:
                 "risk_object_summary.json",
             ],
         )
+        risk_definitions_path = _find_first_existing(
+            sim_dir,
+            [
+                "risk_definitions.json",
+            ],
+        )
+        latest_risk_runtime_state_path = _find_first_existing(
+            sim_dir,
+            [
+                "latest_risk_runtime_state.json",
+            ],
+        )
+        risk_runtime_state_jsonl = _find_first_existing(
+            sim_dir,
+            [
+                "risk_runtime_state.jsonl",
+            ],
+        )
+        risk_events_jsonl = _find_first_existing(
+            sim_dir,
+            [
+                "risk_events.jsonl",
+            ],
+        )
         regional_state_path = _find_first_existing(
             sim_dir,
             [
@@ -1356,9 +1461,24 @@ class ZepToolsService:
         bundle.grounding_summary = _safe_read_json(summary_path, {}) or {}
         bundle.region_graph = _safe_read_json(region_graph_path, {}) or {}
         bundle.subregion_graph = _safe_read_json(subregion_graph_path, {}) or {}
+        bundle.risk_definitions = _safe_read_json(risk_definitions_path, []) or []
+        bundle.latest_risk_runtime_state = _safe_read_json(latest_risk_runtime_state_path, {}) or {}
+        bundle.risk_runtime_state = _safe_read_jsonl(risk_runtime_state_jsonl)
+        bundle.risk_events = _safe_read_jsonl(risk_events_jsonl)
         risk_objects_data = _safe_read_json(risk_objects_path, []) or []
         bundle.risk_objects = risk_objects_data if isinstance(risk_objects_data, list) else []
         bundle.risk_object_summary = _safe_read_json(risk_object_summary_path, {}) or {}
+        if bundle.risk_definitions:
+            projected_risk_objects = project_legacy_risk_objects(bundle.risk_definitions, bundle.latest_risk_runtime_state)
+            if projected_risk_objects:
+                bundle.risk_objects = projected_risk_objects
+                bundle.risk_object_summary = build_legacy_risk_summary(
+                    projected_risk_objects,
+                    primary_risk_object_id=str(bundle.risk_object_summary.get("primary_risk_object_id") or ""),
+                    generation_notes=list(bundle.risk_object_summary.get("generation_notes") or []),
+                    primary_active_risk_id=str(bundle.latest_risk_runtime_state.get("primary_active_risk_id") or ""),
+                    pinned_risk_ids=list(bundle.latest_risk_runtime_state.get("pinned_risk_ids") or []),
+                )
         bundle.latest_round_snapshot = _safe_read_json(latest_round_snapshot_path, {}) or {}
         bundle.regional_state_matrix = _safe_read_json(regional_state_path, {}) or _safe_read_jsonl(regional_state_jsonl)
         if not bundle.regional_state_matrix and bundle.latest_round_snapshot:
@@ -1417,6 +1537,10 @@ class ZepToolsService:
             bool(bundle.grounding_summary),
             bool(bundle.region_graph),
             bool(bundle.subregion_graph),
+            bool(bundle.risk_definitions),
+            bool(bundle.latest_risk_runtime_state),
+            bool(bundle.risk_runtime_state),
+            bool(bundle.risk_events),
             bool(bundle.risk_objects),
             bool(bundle.regional_state_matrix),
             bool(bundle.latest_round_snapshot),
@@ -1449,6 +1573,10 @@ class ZepToolsService:
             subregion_graph_path,
             risk_objects_path,
             risk_object_summary_path,
+            risk_definitions_path,
+            latest_risk_runtime_state_path,
+            risk_runtime_state_jsonl,
+            risk_events_jsonl,
             regional_state_path,
             regional_state_jsonl,
             latest_round_snapshot_path,

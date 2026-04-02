@@ -71,6 +71,7 @@ class EnvProfileGenerator:
         diffusion_provider: str = "auto",
         use_llm: bool = True,
         progress_callback: Optional[Callable[[int, int, str], None]] = None,
+        profile_created_callback: Optional[Callable[[EnvAgentProfile, int, int, str], None]] = None,
         parallel_count: int = 3,
     ) -> EnvProfileGenerationResult:
         prepared_entities = [self._prepare_entity(entity) for entity in entities]
@@ -108,6 +109,19 @@ class EnvProfileGenerator:
 
         anchor_profiles: List[EnvAgentProfile] = []
         total = len(prepared_entities)
+        target_count = self._target_agent_count(
+            prepared_entities=prepared_entities,
+            regions=regions,
+            subregions=subregions,
+        )
+        generated_count = 0
+
+        def emit_profile(profile: EnvAgentProfile, stage: str) -> None:
+            nonlocal generated_count
+            generated_count += 1
+            if profile_created_callback:
+                profile_created_callback(profile, generated_count, target_count, stage)
+
         if progress_callback:
             progress_callback(0, max(total, 1), "开始生成 EnvFish 基础角色")
 
@@ -131,22 +145,21 @@ class EnvProfileGenerator:
                 completed = 0
                 ordered: Dict[int, EnvAgentProfile] = {}
                 for future in as_completed(future_map):
-                    ordered[future_map[future]] = future.result()
+                    profile = future.result()
+                    ordered[future_map[future]] = profile
                     completed += 1
+                    emit_profile(profile, "anchor")
                     if progress_callback:
                         progress_callback(completed, total, f"已生成 {completed}/{total} 个基础角色")
                 anchor_profiles = [ordered[index] for index in sorted(ordered.keys())]
         else:
             for index, prepared in enumerate(prepared_entities):
-                anchor_profiles.append(build_profile((index, prepared)))
+                profile = build_profile((index, prepared))
+                anchor_profiles.append(profile)
+                emit_profile(profile, "anchor")
                 if progress_callback:
                     progress_callback(index + 1, total, f"已生成 {index + 1}/{total} 个基础角色")
 
-        target_count = self._target_agent_count(
-            prepared_entities=prepared_entities,
-            regions=regions,
-            subregions=subregions,
-        )
         synthesized_profiles = self._expand_synthetic_agents(
             regions=regions,
             subregions=subregions,
@@ -154,6 +167,7 @@ class EnvProfileGenerator:
             target_count=target_count,
             scenario_mode=scenario_mode,
             diffusion_template=diffusion_template,
+            profile_created_callback=lambda profile: emit_profile(profile, "synthesized"),
         )
         profiles = anchor_profiles + synthesized_profiles
         relationships = self._build_agent_relationships(
@@ -907,6 +921,7 @@ class EnvProfileGenerator:
         target_count: int,
         scenario_mode: str,
         diffusion_template: str,
+        profile_created_callback: Optional[Callable[[EnvAgentProfile], None]] = None,
     ) -> List[EnvAgentProfile]:
         region_lookup = {region.region_id: region for region in regions}
         profiles: List[EnvAgentProfile] = []
@@ -927,6 +942,8 @@ class EnvProfileGenerator:
                         scenario_mode=scenario_mode,
                     )
                 )
+                if profile_created_callback:
+                    profile_created_callback(profiles[-1])
                 next_index += 1
             if len(profiles) >= desired:
                 break

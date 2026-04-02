@@ -163,12 +163,16 @@ const renderLayers = () => {
     L.geoJSON(geoJson, {
       style: (feature) => {
         const featureColor = feature?.properties?.color || color
+        const geometryType = String(feature?.geometry?.type || '')
+        const isPolygon = geometryType.includes('Polygon')
         return {
           color: featureColor,
-          weight,
-          opacity,
+          weight: feature?.properties?.weight ?? weight,
+          opacity: feature?.properties?.opacity ?? opacity,
           fillColor: feature?.properties?.fillColor || layer?.fillColor || featureColor,
-          fillOpacity: feature?.properties?.fillOpacity ?? layer?.fillOpacity ?? 0.25
+          fillOpacity: isPolygon
+            ? (feature?.properties?.fillOpacity ?? layer?.fillOpacity ?? 0.25)
+            : 0
         }
       },
       pointToLayer: (feature, latlng) => {
@@ -237,6 +241,18 @@ watch(
 watch(
   () => props.selectedPoint,
   () => renderSelection(true),
+  { deep: true }
+)
+
+watch(
+  () => props.center,
+  (value) => {
+    if (!map || !Array.isArray(value) || value.length < 2) return
+    const lat = Number(value[0])
+    const lon = Number(value[1])
+    if (!Number.isFinite(lat) || !Number.isFinite(lon)) return
+    map.setView([lat, lon], map.getZoom(), { animate: false })
+  },
   { deep: true }
 )
 

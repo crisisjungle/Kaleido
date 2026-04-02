@@ -7,6 +7,24 @@
       </div>
       <!-- 顶部工具栏 (Internal Top Right) -->
       <div class="header-tools">
+        <div class="mode-switch">
+          <button
+            class="mode-btn"
+            :class="{ active: graphMode === '2d' }"
+            @click="setGraphMode('2d')"
+            title="2D 图谱"
+          >
+            2D
+          </button>
+          <button
+            class="mode-btn"
+            :class="{ active: graphMode === '3d' }"
+            @click="setGraphMode('3d')"
+            title="3D 球形图谱"
+          >
+            3D
+          </button>
+        </div>
         <button class="tool-btn" @click="$emit('refresh')" :disabled="loading" title="刷新图谱">
           <span class="icon-refresh" :class="{ 'spinning': loading }">↻</span>
           <span class="btn-text">Refresh</span>
@@ -20,7 +38,8 @@
     <div class="graph-container" ref="graphContainer">
       <!-- 图谱可视化 -->
       <div v-if="hasGraphContent" class="graph-view">
-        <svg ref="graphSvg" class="graph-svg"></svg>
+        <svg v-show="graphMode === '2d'" ref="graphSvg" class="graph-svg"></svg>
+        <div v-show="graphMode === '3d'" ref="graph3dContainer" class="graph-3d-view"></div>
         
         <!-- 构建中/模拟中提示 -->
         <div v-if="currentPhase === 1 || isSimulating" class="graph-building-hint">
@@ -237,7 +256,7 @@
     </div>
     
     <!-- 显示边标签开关 -->
-    <div v-if="hasGraphContent" class="edge-labels-toggle">
+    <div v-if="hasGraphContent && graphMode === '2d'" class="edge-labels-toggle">
       <label class="toggle-switch">
         <input type="checkbox" v-model="showEdgeLabels" />
         <span class="slider"></span>
@@ -264,7 +283,15 @@ const props = defineProps({
     type: Array,
     default: () => []
   },
+  highlightEdgeIds: {
+    type: Array,
+    default: () => []
+  },
   highlightLabel: {
+    type: String,
+    default: ''
+  },
+  highlightMode: {
     type: String,
     default: ''
   },
@@ -278,11 +305,62 @@ const emit = defineEmits(['refresh', 'toggle-maximize', 'node-select', 'node-act
 
 const graphContainer = ref(null)
 const graphSvg = ref(null)
+const graph3dContainer = ref(null)
 const selectedItem = ref(null)
 const showEdgeLabels = ref(true) // 默认显示边标签
+const graphMode = ref('2d')
 const expandedSelfLoops = ref(new Set()) // 展开的自环项
 const showSimulationFinishedHint = ref(false) // 模拟结束后的提示
 const wasSimulating = ref(false) // 追踪之前是否在模拟中
+
+const setGraphMode = (mode) => {
+  graphMode.value = mode === '3d' ? '3d' : '2d'
+}
+
+const normalizeHighlightToken = (value) => String(value || '').trim().toLowerCase()
+
+const uniqueTokens = (items) => Array.from(
+  new Set(
+    (items || [])
+      .map(item => normalizeHighlightToken(item))
+      .filter(Boolean)
+  )
+)
+
+const buildEdgeHighlightKeys = (edge, fallbackSource = '', fallbackTarget = '', fallbackType = '', fallbackIndex = 0) => {
+  const source = normalizeHighlightToken(fallbackSource || edge?.source_node_uuid || edge?.source || edge?.from)
+  const target = normalizeHighlightToken(fallbackTarget || edge?.target_node_uuid || edge?.target || edge?.to)
+  const type = normalizeHighlightToken(fallbackType || edge?.fact_type || edge?.name || edge?.type || 'related')
+  const pairKey = source && target ? `${source}::${target}` : ''
+  const reversePairKey = source && target ? `${target}::${source}` : ''
+  const labeledPairKey = pairKey && type ? `${pairKey}::${type}` : ''
+  const reverseLabeledPairKey = reversePairKey && type ? `${reversePairKey}::${type}` : ''
+  return uniqueTokens([
+    edge?.edge_id,
+    edge?.edgeId,
+    edge?.uuid,
+    edge?.id,
+    edge?.fact_id,
+    edge?.factId,
+    edge?.relationship_id,
+    edge?.relationshipId,
+    edge?.link_id,
+    edge?.linkId,
+    edge?.transport_edge_id,
+    edge?.transportEdgeId,
+    edge?.dynamic_edge_id,
+    edge?.dynamicEdgeId,
+    edge?.source_target_id,
+    edge?.sourceTargetId,
+    pairKey,
+    reversePairKey,
+    labeledPairKey,
+    reverseLabeledPairKey,
+    `${labeledPairKey}::${fallbackIndex}`,
+    `${reverseLabeledPairKey}::${fallbackIndex}`,
+    `${source}::${target}::${fallbackIndex}`,
+  ])
+}
 
 // 关闭模拟结束提示
 const dismissFinishedHint = () => {
@@ -381,6 +459,385 @@ const triggerNodeAction = (action) => {
 let currentSimulation = null
 let linkLabelsRef = null
 let linkLabelBgRef = null
+let graph3DInstance = null
+let forceGraph3DFactory = null
+let THREERef = null
+let SpriteTextClass = null
+
+const load3DDeps = async () => {
+  if (forceGraph3DFactory && THREERef && SpriteTextClass) {
+    return {
+      createGraph3D: forceGraph3DFactory,
+      THREE: THREERef,
+      SpriteText: SpriteTextClass,
+    }
+  }
+
+  const [graphModule, threeModule, spriteTextModule] = await Promise.all([
+    import('3d-force-graph'),
+    import('three'),
+    import('three-spritetext'),
+  ])
+  forceGraph3DFactory = graphModule.default || graphModule
+  THREERef = threeModule
+  SpriteTextClass = spriteTextModule.default || spriteTextModule
+
+  return {
+    createGraph3D: forceGraph3DFactory,
+    THREE: THREERef,
+    SpriteText: SpriteTextClass,
+  }
+}
+
+const stop2DSimulation = () => {
+  if (currentSimulation) {
+    currentSimulation.stop()
+    currentSimulation = null
+  }
+}
+
+const destroy3DGraph = () => {
+  if (!graph3DInstance) return
+  try {
+    graph3DInstance._destructor?.()
+  } catch {
+    // ignore cleanup failures from underlying 3D engine
+  }
+  graph3DInstance = null
+}
+
+const getNodeColorByType = (type) => {
+  const colorMap = {}
+  entityTypes.value.forEach(t => {
+    colorMap[t.name] = t.color
+  })
+  return colorMap[type] || '#999'
+}
+
+const nodeLayerKey = (node) => {
+  const type = String(node.type || '').toLowerCase()
+  const labels = (node.rawData?.labels || []).map(item => String(item || '').toLowerCase())
+  if (type.includes('region') && !labels.includes('subregion')) return 'macro'
+  if (type.includes('subregion') || labels.includes('subregion')) return 'subregion'
+  if (type.includes('actor') || type.includes('receptor') || type.includes('carrier') || type.includes('infrastructure')) return 'agent'
+  return 'agent'
+}
+
+const fibonacciSpherePoint = (index, total, radius) => {
+  if (total <= 0) return { x: 0, y: 0, z: 0 }
+  if (total === 1) return { x: radius, y: 0, z: 0 }
+  const offset = 2 / total
+  const y = ((index * offset) - 1) + (offset / 2)
+  const r = Math.sqrt(Math.max(0, 1 - y * y))
+  const phi = index * Math.PI * (3 - Math.sqrt(5))
+  return {
+    x: Math.cos(phi) * r * radius,
+    y: y * radius,
+    z: Math.sin(phi) * r * radius,
+  }
+}
+
+const applySphereLayout = (nodes) => {
+  const groups = {
+    macro: [],
+    subregion: [],
+    agent: [],
+  }
+  nodes.forEach(node => {
+    const key = nodeLayerKey(node)
+    groups[key].push(node)
+  })
+
+  const radiusByLayer = {
+    macro: 170,
+    subregion: 300,
+    agent: 430,
+  }
+
+  Object.entries(groups).forEach(([layer, list]) => {
+    const radius = radiusByLayer[layer] || 320
+    list.forEach((node, index) => {
+      const point = fibonacciSpherePoint(index, list.length, radius)
+      node.x = point.x
+      node.y = point.y
+      node.z = point.z
+      node.fx = point.x
+      node.fy = point.y
+      node.fz = point.z
+    })
+  })
+}
+
+const formatSurfaceLabel = (name) => {
+  const text = String(name || '').trim()
+  if (!text) return ''
+  return text.length > 8 ? `${text.slice(0, 8)}…` : text
+}
+
+const renderGraph3D = async () => {
+  if (!graph3dContainer.value || !props.graphData) return
+
+  stop2DSimulation()
+  const container = graph3dContainer.value
+  const width = container.clientWidth || 800
+  const height = container.clientHeight || 600
+
+  const nodesData = props.graphData.nodes || []
+  const edgesData = props.graphData.edges || []
+  if (nodesData.length === 0) {
+    destroy3DGraph()
+    return
+  }
+
+  const nodes = nodesData.map(node => ({
+    id: node.uuid,
+    name: node.name || 'Unnamed',
+    type: node.labels?.find(label => label !== 'Entity') || 'Entity',
+    rawData: node,
+  }))
+  nodes.forEach(node => {
+    node.layer = nodeLayerKey(node)
+    node.showSurfaceLabel = node.layer === 'agent'
+    node.surfaceLabel = formatSurfaceLabel(node.name)
+  })
+  const nodeMap = new Map(nodes.map(node => [node.id, node]))
+  const nodeIds = new Set(nodes.map(node => node.id))
+  const highlightedIdSet = new Set(
+    (props.highlightNodeIds || [])
+      .map(item => String(item || '').trim())
+      .filter(Boolean)
+  )
+  const highlightedNameSet = new Set(
+    (props.highlightNodeNames || [])
+      .map(item => String(item || '').trim().toLowerCase())
+      .filter(Boolean)
+  )
+  const highlightedEdgeIdSet = new Set(uniqueTokens(props.highlightEdgeIds || []))
+
+  nodes.forEach(node => {
+    const nodeName = String(node.name || '').trim().toLowerCase()
+    node.externallyHighlighted = highlightedIdSet.has(node.id) || highlightedNameSet.has(nodeName)
+  })
+  const highlightedNodeIds = new Set(
+    nodes
+      .filter(node => node.externallyHighlighted)
+      .map(node => node.id)
+  )
+  const highlightActive = highlightedNodeIds.size > 0 || highlightedEdgeIdSet.size > 0
+
+  const links = edgesData
+    .filter(edge => nodeIds.has(edge.source_node_uuid) && nodeIds.has(edge.target_node_uuid))
+    .map((edge, index) => ({
+      source: edge.source_node_uuid,
+      target: edge.target_node_uuid,
+      name: edge.name || edge.fact_type || 'RELATED',
+      type: edge.fact_type || edge.name || 'RELATED',
+      highlightKeys: buildEdgeHighlightKeys(
+        edge,
+        edge.source_node_uuid,
+        edge.target_node_uuid,
+        edge.fact_type || edge.name || 'RELATED',
+        index
+      ),
+      rawData: {
+        ...edge,
+        source_name: nodeMap.get(edge.source_node_uuid)?.name,
+        target_name: nodeMap.get(edge.target_node_uuid)?.name,
+      },
+    }))
+
+  const isEdgeHighlighted = (linkData) => (linkData.highlightKeys || []).some(token => highlightedEdgeIdSet.has(token))
+  const getNodeId = (nodeRef) => (typeof nodeRef === 'object' ? nodeRef?.id : nodeRef)
+  const isLinkFocused = (linkData) => {
+    if (isEdgeHighlighted(linkData)) return true
+    const sourceId = getNodeId(linkData.source)
+    const targetId = getNodeId(linkData.target)
+    return highlightedNodeIds.has(sourceId) || highlightedNodeIds.has(targetId)
+  }
+
+  const edgeHighlightColor = props.highlightMode === 'risk_runtime'
+    ? '#E04F39'
+    : props.highlightMode === 'risk_definition'
+      ? '#F08A24'
+      : '#E0A25A'
+  const edgeNeighborColor = '#E0A25A'
+
+  let previousCamera = null
+  let previousTarget = null
+  let previousNodePosById = null
+  if (graph3DInstance) {
+    const camera = graph3DInstance.camera?.()
+    if (camera) {
+      previousCamera = { x: camera.position.x, y: camera.position.y, z: camera.position.z }
+    }
+    const controls = graph3DInstance.controls?.()
+    if (controls?.target) {
+      previousTarget = {
+        x: controls.target.x,
+        y: controls.target.y,
+        z: controls.target.z,
+      }
+    }
+    const previousGraph = graph3DInstance.graphData?.()
+    if (previousGraph?.nodes?.length) {
+      previousNodePosById = new Map(
+        previousGraph.nodes.map(node => [
+          String(node.id),
+          { x: Number(node.x) || 0, y: Number(node.y) || 0, z: Number(node.z) || 0 },
+        ])
+      )
+    }
+  }
+
+  applySphereLayout(nodes)
+  if (previousNodePosById) {
+    nodes.forEach(node => {
+      const oldPos = previousNodePosById.get(String(node.id))
+      if (!oldPos) return
+      node.x = oldPos.x
+      node.y = oldPos.y
+      node.z = oldPos.z
+      node.fx = oldPos.x
+      node.fy = oldPos.y
+      node.fz = oldPos.z
+    })
+  }
+
+  const { createGraph3D, THREE, SpriteText } = await load3DDeps()
+  if (graphMode.value !== '3d') return
+
+  const createdNewInstance = !graph3DInstance
+  if (createdNewInstance) {
+    graph3DInstance = createGraph3D()(container)
+  }
+  const createNodeObject = (node) => {
+    const group = new THREE.Group()
+    const baseColor = getNodeColorByType(node.type)
+    const highlighted = Boolean(node.externallyHighlighted)
+    const radius = !highlightActive ? 4 : highlighted ? 6 : 3
+
+    const sphere = new THREE.Mesh(
+      new THREE.SphereGeometry(radius, 18, 18),
+      new THREE.MeshLambertMaterial({
+        color: baseColor,
+        transparent: true,
+        opacity: highlightActive ? (highlighted ? 0.98 : 0.42) : 0.95,
+      })
+    )
+    group.add(sphere)
+
+    if (node.showSurfaceLabel && node.surfaceLabel) {
+      const label = new SpriteText(node.surfaceLabel)
+      label.textHeight = highlighted ? 11 : 9.5
+      label.color = highlighted ? '#111111' : '#1F2933'
+      label.backgroundColor = highlightActive && !highlighted ? 'rgba(255,255,255,0.78)' : 'rgba(255,255,255,0.95)'
+      label.padding = 2.2
+      label.borderWidth = 1.2
+      label.borderColor = 'rgba(55,65,81,0.35)'
+      label.strokeWidth = 1.8
+      label.strokeColor = 'rgba(255,255,255,0.98)'
+      if (label.material) {
+        label.material.depthWrite = false
+        label.material.depthTest = false
+        label.material.transparent = true
+        label.material.opacity = highlightActive && !highlighted ? 0.95 : 1
+      }
+      label.renderOrder = 999
+      const x = Number(node.x) || 0
+      const y = Number(node.y) || 0
+      const z = Number(node.z) || 0
+      const length = Math.sqrt(x * x + y * y + z * z) || 1
+      const outward = radius + 10
+      label.position.set((x / length) * outward, (y / length) * outward, (z / length) * outward)
+      group.add(label)
+    }
+
+    return group
+  }
+
+  graph3DInstance
+    .width(width)
+    .height(height)
+    .backgroundColor('rgba(0,0,0,0)')
+    .graphData({ nodes, links })
+    .nodeId('id')
+    .nodeThreeObject(createNodeObject)
+    .nodeThreeObjectExtend(false)
+    .nodeLabel(node => `${node.name}\n${node.type}`)
+    .nodeVal(node => {
+      if (!highlightActive) return 4
+      return node.externallyHighlighted ? 8 : 3
+    })
+    .nodeColor(node => {
+      const base = getNodeColorByType(node.type)
+      if (!highlightActive) return base
+      return node.externallyHighlighted ? base : '#BDBDBD'
+    })
+    .linkColor(link => {
+      if (!highlightActive) return 'rgba(170,170,170,0.42)'
+      if (isEdgeHighlighted(link)) return edgeHighlightColor
+      if (isLinkFocused(link)) return edgeNeighborColor
+      return 'rgba(170,170,170,0.1)'
+    })
+    .linkWidth(link => {
+      if (!highlightActive) return 0.55
+      if (isEdgeHighlighted(link)) return 1.8
+      if (isLinkFocused(link)) return 1.15
+      return 0.16
+    })
+    .linkOpacity(link => {
+      if (!highlightActive) return 0.26
+      return isLinkFocused(link) ? 0.62 : 0.06
+    })
+    .linkDirectionalParticles(link => (isEdgeHighlighted(link) ? 2 : 0))
+    .linkDirectionalParticleWidth(link => (isEdgeHighlighted(link) ? 2.2 : 0))
+    .onNodeClick((node) => {
+      selectedItem.value = {
+        type: 'node',
+        data: node.rawData,
+        entityType: node.type,
+        color: getNodeColorByType(node.type),
+      }
+      emit('node-select', buildNodePayload(selectedItem.value))
+    })
+    .onLinkClick((link) => {
+      selectedItem.value = {
+        type: 'edge',
+        data: link.rawData,
+      }
+    })
+    .onBackgroundClick(() => {
+      selectedItem.value = null
+    })
+
+  const controls = graph3DInstance.controls?.()
+  if (controls) {
+    controls.enableDamping = true
+    controls.dampingFactor = 0.08
+    controls.rotateSpeed = 0.65
+    controls.zoomSpeed = 0.9
+    controls.panSpeed = 0.45
+  }
+  if (createdNewInstance) {
+    graph3DInstance.cameraPosition({ x: 0, y: 0, z: 1050 })
+  } else if (previousCamera) {
+    graph3DInstance.cameraPosition(previousCamera)
+    const nextControls = graph3DInstance.controls?.()
+    if (nextControls?.target && previousTarget) {
+      nextControls.target.set(previousTarget.x, previousTarget.y, previousTarget.z)
+      nextControls.update?.()
+    }
+  }
+}
+
+const renderActiveGraph = async () => {
+  if (graphMode.value === '3d') {
+    await renderGraph3D()
+  } else {
+    destroy3DGraph()
+    renderGraph()
+  }
+}
 
 const renderGraph = () => {
   if (!graphSvg.value || !props.graphData) return
@@ -441,7 +898,8 @@ const renderGraph = () => {
       .map(item => String(item || '').trim().toLowerCase())
       .filter(Boolean)
   )
-  const highlightActive = highlightedIdSet.size > 0 || highlightedNameSet.size > 0
+  const highlightedEdgeIdSet = new Set(uniqueTokens(props.highlightEdgeIds || []))
+  const highlightActive = highlightedIdSet.size > 0 || highlightedNameSet.size > 0 || highlightedEdgeIdSet.size > 0
 
   nodes.forEach(node => {
     const nodeName = String(node.name || '').trim().toLowerCase()
@@ -498,6 +956,11 @@ const renderGraph = () => {
       
       const allSelfLoops = selfLoopEdges[e.source_node_uuid]
       const nodeName = nodeMap[e.source_node_uuid]?.name || 'Unknown'
+      const highlightKeys = uniqueTokens(
+        allSelfLoops.flatMap((loopEdge, loopIndex) =>
+          buildEdgeHighlightKeys(loopEdge, e.source_node_uuid, e.target_node_uuid, loopEdge.fact_type || loopEdge.name || 'SELF_LOOP', loopIndex)
+        ).concat([`self_loop::${e.source_node_uuid}`])
+      )
       
       edges.push({
         source: e.source_node_uuid,
@@ -506,6 +969,7 @@ const renderGraph = () => {
         name: `Self Relations (${allSelfLoops.length})`,
         curvature: 0,
         isSelfLoop: true,
+        highlightKeys,
         rawData: {
           isSelfLoopGroup: true,
           source_name: nodeName,
@@ -539,6 +1003,7 @@ const renderGraph = () => {
         curvature = -curvature
       }
     }
+    const highlightKeys = buildEdgeHighlightKeys(e, e.source_node_uuid, e.target_node_uuid, e.fact_type || e.name || 'RELATED', currentIndex)
     
     edges.push({
       source: e.source_node_uuid,
@@ -549,6 +1014,7 @@ const renderGraph = () => {
       isSelfLoop: false,
       pairIndex: currentIndex,
       pairTotal: totalCount,
+      highlightKeys,
       rawData: {
         ...e,
         source_name: nodeMap[e.source_node_uuid]?.name,
@@ -561,7 +1027,14 @@ const renderGraph = () => {
   const colorMap = {}
   entityTypes.value.forEach(t => colorMap[t.name] = t.color)
   const getColor = (type) => colorMap[type] || '#999'
-  const isLinkFocused = (linkData) => highlightedNodeIds.has(linkData.source.id) || highlightedNodeIds.has(linkData.target.id)
+  const isEdgeHighlighted = (linkData) => (linkData.highlightKeys || []).some(token => highlightedEdgeIdSet.has(token))
+  const isLinkFocused = (linkData) => isEdgeHighlighted(linkData) || highlightedNodeIds.has(linkData.source.id) || highlightedNodeIds.has(linkData.target.id)
+  const edgeHighlightColor = props.highlightMode === 'risk_runtime'
+    ? '#E04F39'
+    : props.highlightMode === 'risk_definition'
+      ? '#F08A24'
+      : '#E0A25A'
+  const edgeNeighborColor = '#E0A25A'
 
   // Simulation - 根据边数量动态调整节点间距
   const simulation = d3.forceSimulation(nodes)
@@ -842,16 +1315,26 @@ const renderGraph = () => {
       .attr('opacity', d => (highlightActive ? (d.externallyHighlighted ? 1 : 0.32) : 1))
 
     link
-      .attr('stroke', d => (highlightActive && isLinkFocused(d) ? '#E0A25A' : '#C0C0C0'))
-      .attr('stroke-width', d => (highlightActive && isLinkFocused(d) ? 2.2 : 1.5))
-      .attr('opacity', d => (highlightActive ? (isLinkFocused(d) ? 0.96 : 0.12) : 1))
+      .attr('stroke', d => {
+        if (!highlightActive) return '#C0C0C0'
+        if (isEdgeHighlighted(d)) return edgeHighlightColor
+        if (isLinkFocused(d)) return edgeNeighborColor
+        return '#C0C0C0'
+      })
+      .attr('stroke-width', d => {
+        if (!highlightActive) return 1.5
+        if (isEdgeHighlighted(d)) return 3
+        if (isLinkFocused(d)) return 2.2
+        return 1.5
+      })
+      .attr('opacity', d => (highlightActive ? (isLinkFocused(d) ? 0.98 : 0.12) : 1))
 
     linkLabelBg
       .attr('fill', 'rgba(255,255,255,0.95)')
       .attr('opacity', d => (highlightActive ? (isLinkFocused(d) ? 0.96 : 0.12) : 1))
 
     linkLabels
-      .attr('fill', '#666')
+      .attr('fill', d => (highlightActive && isEdgeHighlighted(d) ? edgeHighlightColor : '#666'))
       .attr('opacity', d => (highlightActive ? (isLinkFocused(d) ? 1 : 0.18) : 1))
   }
 
@@ -900,13 +1383,13 @@ const renderGraph = () => {
 }
 
 watch(() => props.graphData, () => {
-  nextTick(renderGraph)
+  nextTick(() => { void renderActiveGraph() })
 }, { deep: true })
 
 watch(
-  () => [props.highlightLabel, props.highlightNodeIds, props.highlightNodeNames],
+  () => [props.highlightLabel, props.highlightNodeIds, props.highlightNodeNames, props.highlightEdgeIds, props.highlightMode, graphMode.value],
   () => {
-    nextTick(renderGraph)
+    nextTick(() => { void renderActiveGraph() })
   },
   { deep: true }
 )
@@ -922,18 +1405,18 @@ watch(showEdgeLabels, (newVal) => {
 })
 
 const handleResize = () => {
-  nextTick(renderGraph)
+  nextTick(() => { void renderActiveGraph() })
 }
 
 onMounted(() => {
   window.addEventListener('resize', handleResize)
+  nextTick(() => { void renderActiveGraph() })
 })
 
 onUnmounted(() => {
   window.removeEventListener('resize', handleResize)
-  if (currentSimulation) {
-    currentSimulation.stop()
-  }
+  stop2DSimulation()
+  destroy3DGraph()
 })
 </script>
 
@@ -999,6 +1482,41 @@ onUnmounted(() => {
   align-items: center;
 }
 
+.mode-switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px;
+  border: 1px solid #E0E0E0;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.96);
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.04);
+}
+
+.mode-btn {
+  min-width: 40px;
+  height: 26px;
+  border: none;
+  border-radius: 999px;
+  background: transparent;
+  color: #666;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.3px;
+  cursor: pointer;
+  transition: all 0.18s ease;
+}
+
+.mode-btn:hover {
+  color: #111;
+  background: rgba(0, 0, 0, 0.04);
+}
+
+.mode-btn.active {
+  background: #111;
+  color: #FFF;
+}
+
 .tool-btn {
   height: 32px;
   padding: 0 12px;
@@ -1038,6 +1556,12 @@ onUnmounted(() => {
 }
 
 .graph-view, .graph-svg {
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+
+.graph-3d-view {
   width: 100%;
   height: 100%;
   display: block;

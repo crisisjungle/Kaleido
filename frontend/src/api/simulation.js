@@ -68,6 +68,15 @@ export const getSimulationConfigRealtime = (simulationId) => {
 }
 
 /**
+ * 实时获取生成中的模拟图谱
+ * @param {string} simulationId
+ * @param {Object} params - { include_map?, key_edges_only? }
+ */
+export const getSimulationGraphRealtime = (simulationId, params = {}) => {
+  return service.get(`/api/simulation/${simulationId}/graph/realtime`, { params })
+}
+
+/**
  * 列出所有模拟
  * @param {string} projectId - 可选，按项目ID过滤
  */
@@ -114,6 +123,26 @@ export const getRunStatusDetail = (simulationId) => {
  */
 export const injectSimulationVariable = (data) => {
   return service.post('/api/simulation/inject', data)
+}
+
+export const getRiskDefinitions = (simulationId) => {
+  return service.get(`/api/simulation/${simulationId}/risk/definitions`)
+}
+
+export const getRiskRuntime = (simulationId, params = {}) => {
+  return service.get(`/api/simulation/${simulationId}/risk/runtime`, { params })
+}
+
+export const getRiskEvents = (simulationId, params = {}) => {
+  return service.get(`/api/simulation/${simulationId}/risk/events`, { params })
+}
+
+export const reframeRisks = (simulationId, data = {}) => {
+  return service.post(`/api/simulation/${simulationId}/risk/reframe`, data)
+}
+
+export const pinRisks = (simulationId, data = {}) => {
+  return service.post(`/api/simulation/${simulationId}/risk/pin`, data)
 }
 
 /**

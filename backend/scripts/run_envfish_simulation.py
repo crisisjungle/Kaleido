@@ -36,6 +36,10 @@ from app.services.envfish_models import (  # noqa: E402
     normalize_state_vector,
     score_band,
 )
+from app.services.risk_artifact_store import load_risk_artifacts, write_risk_artifacts  # noqa: E402
+from app.services.risk_definition_builder import RiskDefinitionBuilder  # noqa: E402
+from app.services.risk_event_engine import RiskEventEngine  # noqa: E402
+from app.services.risk_runtime_tracker import RiskRuntimeTracker  # noqa: E402
 from app.services.simulation_ipc import CommandType, SimulationIPCServer  # noqa: E402
 from app.utils.llm_client import LLMClient  # noqa: E402
 
@@ -81,6 +85,8 @@ class EnvFishRuntime:
         self.interaction_policies = deepcopy(self.config.get("interaction_policies") or {})
         self.runtime_limits = deepcopy(self.config.get("runtime_limits") or {})
         self.risk_objects = deepcopy(self.config.get("risk_objects") or [])
+        self.risk_definitions = deepcopy(self.config.get("risk_definitions") or [])
+        self.latest_risk_runtime_state = deepcopy(self.config.get("latest_risk_runtime_state") or {})
         self.diffusion_context = deepcopy(self.config.get("diffusion_context") or {})
         self.search_mode = normalize_search_mode(
             self.config.get("search_mode") or self.interaction_policies.get("search_mode") or "fast"
@@ -109,10 +115,30 @@ class EnvFishRuntime:
         self.subregion_graph_path = os.path.join(self.sim_dir, "subregion_graph_snapshot.json")
         self.transport_edges_path = os.path.join(self.sim_dir, "transport_edges_snapshot.json")
 
+        self.risk_tracker = RiskRuntimeTracker()
+        self.risk_definition_builder = RiskDefinitionBuilder()
+        self.risk_event_engine = RiskEventEngine()
+        risk_artifacts = load_risk_artifacts(self.sim_dir)
+        if risk_artifacts.get("risk_definitions"):
+            self.risk_definitions = deepcopy(risk_artifacts.get("risk_definitions") or self.risk_definitions)
+        if risk_artifacts.get("latest_risk_runtime_state"):
+            self.latest_risk_runtime_state = deepcopy(
+                risk_artifacts.get("latest_risk_runtime_state") or self.latest_risk_runtime_state
+            )
+        if risk_artifacts.get("risk_objects"):
+            self.risk_objects = deepcopy(risk_artifacts.get("risk_objects") or self.risk_objects)
+        self.risk_events = list(risk_artifacts.get("risk_events") or [])
+        self.risk_generation_notes = list((risk_artifacts.get("risk_objects_summary") or {}).get("generation_notes") or [])
+
         dump_json(self.region_graph_path, self.region_graph)
         dump_json(self.subregion_graph_path, self.subregion_graph)
 
         self.region_lookup = {item["region_id"]: item for item in self.region_graph}
+        self.region_name_lookup = {
+            str(item.get("name") or "").strip().lower(): item["region_id"]
+            for item in self.region_graph
+            if str(item.get("name") or "").strip()
+        }
         self.subregion_lookup = {item["region_id"]: item for item in self.subregion_graph}
         self.transport_edges = self._normalize_transport_edges(self.transport_edges)
         if not self.transport_edges:
@@ -149,31 +175,7 @@ class EnvFishRuntime:
         self.agent_risk_lookup: Dict[int, List[str]] = defaultdict(list)
         self.risk_actor_lookup: Dict[str, List[int]] = defaultdict(list)
         self.risk_region_lookup: Dict[str, List[str]] = defaultdict(list)
-        for risk in self.risk_objects:
-            if not isinstance(risk, dict):
-                continue
-            risk_id = str(risk.get("risk_object_id") or risk.get("title") or "").strip()
-            if not risk_id:
-                continue
-            regions = []
-            for region_id in (risk.get("primary_regions") or []) + (risk.get("region_scope") or []):
-                region_key = str(region_id or "").strip()
-                if region_key and region_key not in regions:
-                    regions.append(region_key)
-            self.risk_region_lookup[risk_id] = regions
-            actor_ids: List[int] = []
-            for cluster in risk.get("affected_clusters") or []:
-                if not isinstance(cluster, dict):
-                    continue
-                for actor_id in cluster.get("actor_ids") or []:
-                    if isinstance(actor_id, int):
-                        actor_ids.append(actor_id)
-                    elif str(actor_id or "").isdigit():
-                        actor_ids.append(int(actor_id))
-            deduped_actor_ids = sorted(set(actor_ids))
-            self.risk_actor_lookup[risk_id] = deduped_actor_ids
-            for actor_id in deduped_actor_ids:
-                self.agent_risk_lookup[actor_id].append(risk_id)
+        self._rebuild_risk_indexes()
 
         self.dynamic_edge_lookup: Dict[str, Dict[str, Any]] = {}
         self.dynamic_edges_by_source: Dict[int, List[Dict[str, Any]]] = defaultdict(list)
@@ -286,11 +288,161 @@ class EnvFishRuntime:
     def _transport_edges_for_source(self, region_id: str) -> List[Dict[str, Any]]:
         return list(self.transport_edges_by_source.get(str(region_id or "").strip(), []))
 
+    def _resolve_region_key(self, value: Any) -> str:
+        token = str(value or "").strip()
+        if not token:
+            return ""
+        if token in self.region_lookup:
+            return token
+        return str(self.region_name_lookup.get(token.lower()) or "")
+
+    def _rebuild_risk_indexes(self) -> None:
+        self.agent_risk_lookup = defaultdict(list)
+        self.risk_actor_lookup = defaultdict(list)
+        self.risk_region_lookup = defaultdict(list)
+
+        if self.risk_definitions:
+            runtime_by_id = {
+                str(item.get("risk_id") or "").strip(): item
+                for item in (self.latest_risk_runtime_state.get("risk_states") or [])
+                if str(item.get("risk_id") or "").strip()
+            }
+            for risk in self.risk_definitions:
+                if not isinstance(risk, dict):
+                    continue
+                risk_id = str(risk.get("risk_id") or risk.get("legacy_risk_object_id") or "").strip()
+                if not risk_id:
+                    continue
+                scope = risk.get("scope") or {}
+                regions: List[str] = []
+                for region_ref in (scope.get("regions") or []) + (runtime_by_id.get(risk_id, {}).get("impacted_regions") or []):
+                    region_key = self._resolve_region_key(
+                        region_ref.get("region_id") or region_ref.get("region_name")
+                    )
+                    if region_key and region_key not in regions:
+                        regions.append(region_key)
+                self.risk_region_lookup[risk_id] = regions
+
+                actor_ids: List[int] = []
+                for actor_ref in scope.get("actors") or []:
+                    if str(actor_ref.get("actor_id") or "").isdigit():
+                        actor_ids.append(int(actor_ref.get("actor_id")))
+                for cluster in risk.get("affected_clusters") or []:
+                    if not isinstance(cluster, dict):
+                        continue
+                    for actor_id in cluster.get("actor_ids") or []:
+                        if str(actor_id or "").isdigit():
+                            actor_ids.append(int(actor_id))
+                for actor_ref in runtime_by_id.get(risk_id, {}).get("impacted_actors") or []:
+                    if str(actor_ref.get("actor_id") or "").isdigit():
+                        actor_ids.append(int(actor_ref.get("actor_id")))
+                deduped_actor_ids = sorted(set(actor_ids))
+                self.risk_actor_lookup[risk_id] = deduped_actor_ids
+                for actor_id in deduped_actor_ids:
+                    self.agent_risk_lookup[actor_id].append(risk_id)
+            return
+
+        for risk in self.risk_objects:
+            if not isinstance(risk, dict):
+                continue
+            risk_id = str(risk.get("risk_object_id") or risk.get("title") or "").strip()
+            if not risk_id:
+                continue
+            regions = []
+            for region_id in (risk.get("primary_regions") or []) + (risk.get("region_scope") or []):
+                region_key = self._resolve_region_key(region_id)
+                if region_key and region_key not in regions:
+                    regions.append(region_key)
+            self.risk_region_lookup[risk_id] = regions
+            actor_ids: List[int] = []
+            for cluster in risk.get("affected_clusters") or []:
+                if not isinstance(cluster, dict):
+                    continue
+                for actor_id in cluster.get("actor_ids") or []:
+                    if str(actor_id or "").isdigit():
+                        actor_ids.append(int(actor_id))
+            deduped_actor_ids = sorted(set(actor_ids))
+            self.risk_actor_lookup[risk_id] = deduped_actor_ids
+            for actor_id in deduped_actor_ids:
+                self.agent_risk_lookup[actor_id].append(risk_id)
+
+    def _persist_runtime_config(self) -> None:
+        self.config["injected_variables"] = deepcopy(self.injections)
+        self.config["risk_definitions"] = deepcopy(self.risk_definitions)
+        self.config["latest_risk_runtime_state"] = deepcopy(self.latest_risk_runtime_state)
+        self.config["risk_objects"] = deepcopy(self.risk_objects)
+        self.config["primary_risk_object_id"] = str(
+            (self.latest_risk_runtime_state.get("primary_active_risk_id") or self.config.get("primary_risk_object_id") or "")
+        )
+        self.config["primary_active_risk_id"] = str(self.latest_risk_runtime_state.get("primary_active_risk_id") or "")
+        dump_json(self.config_path, self.config)
+        dump_json(os.path.join(self.sim_dir, "injected_variables.json"), self.injections)
+
+    def _refresh_risk_runtime(
+        self,
+        round_num: int,
+        snapshot: Optional[Dict[str, Any]] = None,
+        refresh_reason: str = "round_refresh",
+        append_history: bool = True,
+    ) -> Dict[str, Any]:
+        previous_bundle = deepcopy(self.latest_risk_runtime_state or {})
+        if snapshot:
+            next_bundle = self.risk_tracker.refresh(
+                risk_definitions=self.risk_definitions,
+                snapshot=snapshot,
+                previous_bundle=previous_bundle,
+                risk_events=self.risk_events,
+                primary_hint=str(
+                    previous_bundle.get("primary_active_risk_id")
+                    or self.config.get("primary_active_risk_id")
+                    or self.config.get("primary_risk_object_id")
+                    or ""
+                ),
+                pinned_risk_ids=list(previous_bundle.get("pinned_risk_ids") or []),
+                refresh_reason=refresh_reason,
+            )
+        else:
+            next_bundle = self.risk_tracker.build_initial_bundle(
+                risk_definitions=self.risk_definitions,
+                primary_risk_id=str(
+                    self.config.get("primary_active_risk_id")
+                    or self.config.get("primary_risk_object_id")
+                    or ""
+                ),
+                source_risk_objects=self.risk_objects,
+            )
+
+        transition_events = self.risk_event_engine.build_transition_events(previous_bundle, next_bundle)
+        if transition_events:
+            self.risk_events.extend(transition_events)
+
+        artifacts = write_risk_artifacts(
+            sim_dir=self.sim_dir,
+            risk_definitions=self.risk_definitions,
+            latest_runtime_bundle=next_bundle,
+            primary_risk_id=str(
+                self.config.get("primary_risk_object_id")
+                or next_bundle.get("primary_active_risk_id")
+                or ""
+            ),
+            generation_notes=self.risk_generation_notes,
+            risk_events=self.risk_events,
+            append_runtime_history=append_history,
+            runtime_history_entry=next_bundle,
+        )
+        self.latest_risk_runtime_state = deepcopy(artifacts["latest_risk_runtime_state"])
+        self.risk_objects = deepcopy(artifacts["risk_objects"])
+        self._rebuild_risk_indexes()
+        self._persist_runtime_config()
+        return self.latest_risk_runtime_state
+
     def run(self) -> None:
         self._write_platform_event("twitter", {"event_type": "simulation_start", "timestamp": self._now()})
         self._write_platform_event("reddit", {"event_type": "simulation_start", "timestamp": self._now()})
         self.ipc.start()
         self._write_env_status("alive")
+        if not self.latest_risk_runtime_state:
+            self._refresh_risk_runtime(round_num=0, snapshot=None, refresh_reason="runtime_bootstrap", append_history=False)
 
         for round_num in range(1, self.total_rounds + 1):
             self.current_round = round_num
@@ -302,6 +454,13 @@ class EnvFishRuntime:
             interactions = self._agent_interaction_update(round_num, active_variables, diffusion)
             feedback = self._human_nature_feedback_update(round_num, active_variables, diffusion, interactions)
             snapshot = self._build_snapshot(round_num, active_variables, diffusion, interactions, feedback)
+            latest_risk_runtime = self._refresh_risk_runtime(
+                round_num=round_num,
+                snapshot=snapshot,
+                refresh_reason="round_refresh",
+                append_history=True,
+            )
+            snapshot["risk_runtime"] = latest_risk_runtime
             self.latest_summary = snapshot
 
             append_jsonl(self.state_matrix_log, snapshot)
@@ -1907,6 +2066,25 @@ class EnvFishRuntime:
                     if "start_round" not in variable or not variable["start_round"]:
                         variable["start_round"] = self.current_round + 1 if self.current_round else 1
                     self.injections.append(variable)
+                    reframe_result = self.risk_definition_builder.reframe_runtime(
+                        existing_definitions=self.risk_definitions,
+                        regions=self.region_graph,
+                        profiles=self.actor_profiles,
+                        injected_variables=[variable],
+                        current_round=self.current_round or int(variable.get("start_round") or 1),
+                        scenario_mode=str(self.config.get("scenario_mode") or "baseline_mode"),
+                        diffusion_template=self.template,
+                    )
+                    self.risk_definitions = deepcopy(reframe_result.get("risk_definitions") or self.risk_definitions)
+                    variable_events = self.risk_event_engine.build_variable_events(
+                        variable=variable,
+                        round_num=self.current_round or int(variable.get("start_round") or 1),
+                        matched_risk_ids=reframe_result.get("updated_risk_ids") or [],
+                        created_risk_ids=reframe_result.get("created_risk_ids") or [],
+                    )
+                    if variable_events:
+                        self.risk_events.extend(variable_events)
+                    self._rebuild_risk_indexes()
                     append_jsonl(
                         self.intervention_log,
                         {
@@ -1914,11 +2092,41 @@ class EnvFishRuntime:
                             "round": self.current_round,
                             "variable": variable,
                             "status": "accepted",
+                            "risk_refresh": {
+                                "updated_risk_ids": reframe_result.get("updated_risk_ids") or [],
+                                "created_risk_ids": reframe_result.get("created_risk_ids") or [],
+                            },
                         },
                     )
+                    if self.latest_summary:
+                        refreshed = self._refresh_risk_runtime(
+                            round_num=self.current_round or int(variable.get("start_round") or 1),
+                            snapshot=self.latest_summary,
+                            refresh_reason="variable_introduced",
+                            append_history=True,
+                        )
+                        self.latest_summary["risk_runtime"] = refreshed
+                        dump_json(self.latest_snapshot_path, self.latest_summary)
+                    else:
+                        refreshed = self._refresh_risk_runtime(
+                            round_num=self.current_round or int(variable.get("start_round") or 1),
+                            snapshot=None,
+                            refresh_reason="variable_introduced",
+                            append_history=True,
+                        )
                     self.ipc.send_success(
                         command.command_id,
-                        {"message": "variable queued", "variable": variable, "current_round": self.current_round},
+                        {
+                            "message": "variable queued",
+                            "variable": variable,
+                            "current_round": self.current_round,
+                            "risk_refresh": {
+                                "updated_risk_ids": reframe_result.get("updated_risk_ids") or [],
+                                "created_risk_ids": reframe_result.get("created_risk_ids") or [],
+                                "pinned_risk_ids": list(refreshed.get("pinned_risk_ids") or []),
+                                "primary_active_risk_id": refreshed.get("primary_active_risk_id"),
+                            },
+                        },
                     )
                 elif command.command_type == CommandType.INTERVIEW:
                     result = self._interview_single(

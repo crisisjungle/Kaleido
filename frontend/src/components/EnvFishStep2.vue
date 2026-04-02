@@ -598,7 +598,7 @@
       </div>
 
       <div v-else class="empty-state">
-        生成场景配置后，这里会出现风险对象预览，并可联动左侧图谱高亮相关节点。
+        生成场景定义后，这里会出现风险定义预览，并可联动左侧图谱高亮相关节点。
       </div>
     </section>
 
@@ -985,33 +985,326 @@ const groundingHints = computed(() => {
 
 const selectedRiskObjectId = ref('')
 
-const riskObjects = computed(() => {
-  const candidates = [
-    resolvedConfig.value?.risk_objects,
-    configRealtime.value?.risk_objects,
-    configSnapshot.value?.risk_objects,
-    simulationSnapshot.value?.risk_objects
-  ]
+const riskSourceCandidates = computed(() => [
+  resolvedConfig.value,
+  configRealtime.value,
+  configSnapshot.value,
+  simulationSnapshot.value
+].filter(Boolean))
 
-  for (const items of candidates) {
-    if (Array.isArray(items) && items.length > 0) {
-      return items
+function asArray(value) {
+  return Array.isArray(value) ? value : []
+}
+
+function firstNonEmptyString(...values) {
+  for (const value of values) {
+    const text = String(value || '').trim()
+    if (text) return text
+  }
+  return ''
+}
+
+function normalizeRegionRef(value) {
+  if (typeof value === 'string') {
+    const text = value.trim()
+    return text ? { region_id: text, region_name: text } : null
+  }
+  if (!value || typeof value !== 'object') return null
+  const regionId = firstNonEmptyString(value.region_id, value.regionId, value.id, value.key, value.uuid, value.code)
+  const regionName = firstNonEmptyString(value.region_name, value.regionName, value.name, value.label, value.title, regionId)
+  if (!regionId && !regionName) return null
+  return {
+    region_id: regionId || regionName,
+    region_name: regionName || regionId
+  }
+}
+
+function normalizeEntityRef(value) {
+  if (typeof value === 'string') {
+    const text = value.trim()
+    return text ? { entity_uuid: text, entity_name: text } : null
+  }
+  if (!value || typeof value !== 'object') return null
+  const entityUuid = firstNonEmptyString(value.entity_uuid, value.entityUuid, value.uuid, value.id, value.key)
+  const entityName = firstNonEmptyString(value.entity_name, value.entityName, value.name, value.label, value.title, entityUuid)
+  if (!entityUuid && !entityName) return null
+  return {
+    entity_uuid: entityUuid || entityName,
+    entity_name: entityName || entityUuid
+  }
+}
+
+function normalizeClusterRef(value) {
+  if (!value || typeof value !== 'object') return value
+  return {
+    ...value,
+    cluster_id: firstNonEmptyString(value.cluster_id, value.clusterId, value.id, value.key, value.name),
+    name: firstNonEmptyString(value.name, value.label, value.title, value.cluster_id, value.clusterId),
+    primary_regions: uniqueList(asArray(value.primary_regions).map(String)),
+    actor_ids: uniqueList(asArray(value.actor_ids).map(String)).map(item => Number(item) || item),
+    dependency_profile: uniqueList(asArray(value.dependency_profile).map(String)),
+    early_loss_signals: uniqueList(asArray(value.early_loss_signals).map(String))
+  }
+}
+
+function collectRiskEdgeIds(raw, chainTemplate = []) {
+  const templateEdgeIds = chainTemplate.flatMap((step) => {
+    if (!step || typeof step !== 'object') return []
+    return [
+      step.edge_id,
+      step.edgeId,
+      step.edge_ids,
+      step.edgeIds,
+      step.relationship_id,
+      step.relationshipId,
+      step.link_id,
+      step.linkId
+    ]
+  })
+
+  return uniqueList([
+    ...asArray(raw.edge_ids ?? raw.edgeIds),
+    ...asArray(raw.path_edge_ids ?? raw.pathEdgeIds),
+    ...asArray(raw.related_edge_ids ?? raw.relatedEdgeIds),
+    ...asArray(raw.related_dynamic_edge_ids ?? raw.relatedDynamicEdgeIds),
+    ...asArray(raw.highlight_edge_ids ?? raw.highlightEdgeIds),
+    ...templateEdgeIds
+  ].flat().map(item => String(item || '').trim()))
+}
+
+function normalizeRiskDefinition(raw = {}, index = 0) {
+  const scope = raw.scope && typeof raw.scope === 'object' ? raw.scope : {}
+  const scopeRegions = uniqueList([
+    ...asArray(scope.regions),
+    ...asArray(scope.region_refs),
+    ...asArray(raw.regions),
+    ...asArray(raw.region_scope)
+  ].flatMap(item => {
+    const ref = normalizeRegionRef(item)
+    return ref ? [ref] : []
+  }).map(item => JSON.stringify(item)))
+    .map(item => JSON.parse(item))
+
+  const scopeEntities = uniqueList([
+    ...asArray(scope.entities),
+    ...asArray(scope.entity_refs),
+    ...asArray(raw.entities),
+    ...asArray(raw.source_entity_uuids)
+  ].flatMap(item => {
+    const ref = normalizeEntityRef(item)
+    return ref ? [ref] : []
+  }).map(item => JSON.stringify(item)))
+    .map(item => JSON.parse(item))
+
+  const scopeActors = uniqueList([
+    ...asArray(scope.actors),
+    ...asArray(scope.actor_refs),
+    ...asArray(raw.actors),
+    ...asArray(raw.source_actor_ids)
+  ].flatMap(item => {
+    if (typeof item === 'number' || typeof item === 'string') {
+      const text = String(item).trim()
+      return text ? [{ actor_id: text, actor_name: text }] : []
     }
+    if (!item || typeof item !== 'object') return []
+    const actorId = firstNonEmptyString(item.actor_id, item.actorId, item.agent_id, item.agentId, item.id, item.key)
+    const actorName = firstNonEmptyString(item.actor_name, item.actorName, item.agent_name, item.agentName, item.name, item.username, item.label, actorId)
+    if (!actorId && !actorName) return []
+    return [{
+      actor_id: actorId || actorName,
+      actor_name: actorName || actorId
+    }]
+  }).filter(Boolean))
+
+  const chainTemplate = asArray(raw.chain_template)
+  const chainSteps = uniqueList(
+    asArray(raw.chain_steps).flatMap(step => {
+      if (typeof step === 'string') return [step]
+      if (!step || typeof step !== 'object') return []
+      return [firstNonEmptyString(step.label, step.name, step.title, step.step_name, step.step_id)]
+    }).filter(Boolean)
+  )
+  const resolvedChainSteps = chainSteps.length > 0
+    ? chainSteps
+    : uniqueList(chainTemplate.flatMap(step => {
+        if (typeof step === 'string') return [step]
+        if (!step || typeof step !== 'object') return []
+        return [firstNonEmptyString(step.label, step.name, step.title, step.step_name, step.step_id)]
+      }).filter(Boolean))
+
+  const rootPressures = uniqueList([
+    ...asArray(raw.root_pressures),
+    ...asArray(scope.variable_types),
+    ...asArray(raw.trigger_rules?.variable_types),
+    ...asArray(raw.trigger_rules?.policy_modes),
+    firstNonEmptyString(raw.category, raw.risk_type).replace(/[_-]+/g, ' ')
+  ].flat().map(item => String(item || '').trim()).filter(Boolean))
+
+  const turningPoints = uniqueList([
+    ...asArray(raw.turning_points),
+    ...resolvedChainSteps.slice(-1)
+  ])
+
+  const interventionTemplates = asArray(raw.intervention_templates).map(item => {
+    if (!item || typeof item !== 'object') return item
+    return {
+      ...item,
+      target_chain_steps: uniqueList(asArray(item.target_chain_steps).map(String)),
+      benefit_clusters: uniqueList(asArray(item.benefit_clusters).map(String)),
+      hurt_clusters: uniqueList(asArray(item.hurt_clusters).map(String)),
+      friction_points: uniqueList(asArray(item.friction_points).map(String))
+    }
+  })
+
+  const branchTemplates = asArray(raw.branch_templates).map(item => {
+    if (!item || typeof item !== 'object') return item
+    return {
+      ...item,
+      assumptions: uniqueList(asArray(item.assumptions).map(String)),
+      target_interventions: uniqueList(asArray(item.target_interventions).map(String)),
+      comparison_focus: uniqueList(asArray(item.comparison_focus).map(String))
+    }
+  })
+
+  const riskType = firstNonEmptyString(raw.risk_type, raw.category, 'baseline')
+  const mode = raw.mode || (riskType === 'variable_triggered' || riskType === 'emergent' ? 'incident' : 'watch')
+  const prioritySeed = Number(raw.priority_seed ?? raw.prioritySeed ?? raw.severity_score ?? 0.68)
+  const severityScore = Number.isFinite(Number(raw.severity_score))
+    ? Number(raw.severity_score)
+    : Math.round(Math.max(0, Math.min(100, prioritySeed * 100)))
+  const confidenceScore = Number.isFinite(Number(raw.confidence_score))
+    ? Number(raw.confidence_score)
+    : Number.isFinite(Number(raw.confidence))
+      ? Number(raw.confidence)
+      : 0.72
+
+  return {
+    ...raw,
+    risk_object_id: firstNonEmptyString(raw.risk_id, raw.risk_object_id, raw.id, `risk_definition_${index + 1}`),
+    risk_id: firstNonEmptyString(raw.risk_id, raw.risk_object_id, raw.id, `risk_definition_${index + 1}`),
+    title: firstNonEmptyString(raw.title, raw.name, raw.label, raw.summary, `风险定义 ${index + 1}`),
+    summary: firstNonEmptyString(raw.summary, raw.description, raw.summary_text, '场景定义完成后会在此展示风险链路摘要。'),
+    why_now: firstNonEmptyString(raw.why_now, raw.trigger_summary, raw.summary, '当前风险定义已就绪，等待推演运行态刷新。'),
+    risk_type: riskType,
+    mode,
+    status: firstNonEmptyString(raw.status, 'tracked'),
+    time_horizon: firstNonEmptyString(raw.time_horizon, raw.horizon, '30d'),
+    region_scope: uniqueList(scopeRegions.map(item => item.region_name || item.region_id)),
+    primary_regions: uniqueList([
+      ...asArray(raw.primary_regions).map(value => normalizeRegionRef(value)?.region_name).filter(Boolean),
+      ...scopeRegions.slice(0, 2).map(item => item.region_name || item.region_id)
+    ]),
+    severity_score: severityScore,
+    confidence_score: confidenceScore,
+    actionability_score: Number.isFinite(Number(raw.actionability_score))
+      ? Number(raw.actionability_score)
+      : Math.round(Math.max(0, Math.min(100, prioritySeed * 85))),
+    novelty_score: Number.isFinite(Number(raw.novelty_score))
+      ? Number(raw.novelty_score)
+      : 0,
+    root_pressures: rootPressures,
+    chain_steps: resolvedChainSteps,
+    turning_points: turningPoints,
+    amplifiers: uniqueList(asArray(raw.amplifiers).map(String)),
+    buffers: uniqueList(asArray(raw.buffers).map(String)),
+    source_entity_uuids: uniqueList(scopeEntities.map(item => item.entity_uuid)),
+    source_actor_ids: uniqueList(scopeActors.map(item => item.actor_id)),
+    source_actor_names: uniqueList(scopeActors.map(item => item.actor_name)),
+    evidence: asArray(raw.evidence),
+    affected_clusters: asArray(raw.affected_clusters).map(normalizeClusterRef),
+    intervention_options: interventionTemplates,
+    scenario_branches: branchTemplates,
+    edge_ids: collectRiskEdgeIds(raw, chainTemplate),
+    scope_regions: scopeRegions,
+    trigger_rules: raw.trigger_rules || {},
+    priority_seed: prioritySeed,
+    highlight_mode: 'risk_definition',
+    source_kind: 'definition'
+  }
+}
+
+function normalizeLegacyRiskObject(raw = {}, index = 0) {
+  return {
+    ...raw,
+    risk_object_id: firstNonEmptyString(raw.risk_object_id, raw.risk_id, raw.id, `risk_legacy_${index + 1}`),
+    risk_id: firstNonEmptyString(raw.risk_id, raw.risk_object_id, raw.id, `risk_legacy_${index + 1}`),
+    title: firstNonEmptyString(raw.title, raw.name, `风险对象 ${index + 1}`),
+    summary: firstNonEmptyString(raw.summary, raw.description, ''),
+    why_now: firstNonEmptyString(raw.why_now, raw.summary, '等待风险对象摘要。'),
+    risk_type: firstNonEmptyString(raw.risk_type, raw.category, 'legacy'),
+    mode: firstNonEmptyString(raw.mode, 'watch'),
+    status: firstNonEmptyString(raw.status, 'candidate'),
+    time_horizon: firstNonEmptyString(raw.time_horizon, '30d'),
+    region_scope: uniqueList([...asArray(raw.region_scope), ...asArray(raw.primary_regions)].map(String)),
+    primary_regions: uniqueList(asArray(raw.primary_regions).map(String)).slice(0, 2),
+    severity_score: normalizeScore(raw.severity_score),
+    confidence_score: Number(raw.confidence_score || 0),
+    actionability_score: normalizeScore(raw.actionability_score),
+    novelty_score: normalizeScore(raw.novelty_score),
+    root_pressures: uniqueList(asArray(raw.root_pressures).map(String)),
+    chain_steps: uniqueList(asArray(raw.chain_steps).map(String)),
+    turning_points: uniqueList(asArray(raw.turning_points).map(String)),
+    amplifiers: uniqueList(asArray(raw.amplifiers).map(String)),
+    buffers: uniqueList(asArray(raw.buffers).map(String)),
+    source_entity_uuids: uniqueList(asArray(raw.source_entity_uuids).map(String)),
+    source_actor_ids: uniqueList(asArray(raw.source_actor_ids).map(String)),
+    source_actor_names: uniqueList(asArray(raw.source_actor_names).map(String)),
+    evidence: asArray(raw.evidence),
+    affected_clusters: asArray(raw.affected_clusters).map(normalizeClusterRef),
+    intervention_options: asArray(raw.intervention_options),
+    scenario_branches: asArray(raw.scenario_branches),
+    edge_ids: uniqueList([...asArray(raw.edge_ids), ...asArray(raw.edgeIds)].map(String)),
+    scope_regions: uniqueList([...asArray(raw.region_scope), ...asArray(raw.primary_regions)].map(String)).map(name => ({ region_id: name, region_name: name })),
+    highlight_mode: 'legacy',
+    source_kind: 'legacy'
+  }
+}
+
+function resolveRiskDefinitions(source) {
+  const definitions = asArray(source?.risk_definitions ?? source?.risk_definition_list ?? source?.risk_definition_items)
+  if (definitions.length > 0) {
+    return definitions.map((item, index) => normalizeRiskDefinition(item, index))
+  }
+  return []
+}
+
+function resolveLegacyRiskObjects(source) {
+  const legacy = asArray(source?.risk_objects)
+  if (legacy.length > 0) {
+    return legacy.map((item, index) => normalizeLegacyRiskObject(item, index))
+  }
+  return []
+}
+
+const riskObjects = computed(() => {
+  for (const source of riskSourceCandidates.value) {
+    const definitions = resolveRiskDefinitions(source)
+    if (definitions.length > 0) return definitions
+  }
+
+  for (const source of riskSourceCandidates.value) {
+    const legacy = resolveLegacyRiskObjects(source)
+    if (legacy.length > 0) return legacy
   }
 
   return []
 })
 
 const primaryRiskObjectId = computed(() => {
-  return (
-    resolvedConfig.value?.primary_risk_object_id ||
-    configRealtime.value?.primary_risk_object_id ||
-    configSnapshot.value?.primary_risk_object_id ||
-    simulationSnapshot.value?.primary_risk_object?.risk_object_id ||
-    simulationSnapshot.value?.risk_objects_summary?.primary_risk_object_id ||
-    riskObjects.value[0]?.risk_object_id ||
-    ''
-  )
+  for (const source of riskSourceCandidates.value) {
+    const candidate = firstNonEmptyString(
+      source?.primary_risk_definition_id,
+      source?.primary_active_risk_id,
+      source?.primary_risk_object_id,
+      source?.primary_risk_id,
+      source?.risk_definitions_summary?.primary_risk_id,
+      source?.risk_objects_summary?.primary_risk_object_id,
+      source?.primary_risk_object?.risk_object_id
+    )
+    if (candidate) return candidate
+  }
+
+  return riskObjects.value[0]?.risk_object_id || ''
 })
 
 const selectedRiskObject = computed(() => {
@@ -1054,13 +1347,19 @@ const riskObjectEntityNodes = computed(() => {
     })
   })
 
-  return uniqueList(selectedRiskObject.value.source_entity_uuids || []).map((uuid, index) => {
-    const node = graphNodeByUuid.value.get(uuid)
-    const evidence = evidenceByUuid.get(uuid)
+  const entityTokens = uniqueList([
+    ...(selectedRiskObject.value.source_entity_uuids || []),
+    ...(selectedRiskObject.value.source_actor_ids || []),
+    ...(selectedRiskObject.value.source_actor_names || [])
+  ])
+
+  return entityTokens.map((token, index) => {
+    const node = graphNodeByUuid.value.get(token) || graphNodesByName.value.get(String(token).toLowerCase())?.[0]
+    const evidence = evidenceByUuid.get(token)
     return {
       id: node?.uuid || `risk-entity-${index}`,
-      uuid,
-      name: node?.name || evidence?.title || `entity_${index + 1}`,
+      uuid: node?.uuid || token,
+      name: node?.name || evidence?.title || token || `entity_${index + 1}`,
       labels: normalizeLabels(node?.labels),
       matched: Boolean(node)
     }
@@ -1070,15 +1369,23 @@ const riskObjectEntityNodes = computed(() => {
 const riskObjectRegionNodes = computed(() => {
   if (!selectedRiskObject.value) return []
 
-  return uniqueList([
-    ...(selectedRiskObject.value.primary_regions || []),
-    ...(selectedRiskObject.value.region_scope || [])
-  ]).map((name, index) => {
-    const matched = graphNodesByName.value.get(String(name).toLowerCase()) || []
+  const scopeRegions = Array.isArray(selectedRiskObject.value.scope_regions) && selectedRiskObject.value.scope_regions.length > 0
+    ? selectedRiskObject.value.scope_regions
+    : uniqueList([
+        ...(selectedRiskObject.value.primary_regions || []),
+        ...(selectedRiskObject.value.region_scope || [])
+      ]).map(name => ({ region_id: name, region_name: name }))
+
+  return scopeRegions.map((ref, index) => {
+    const regionName = firstNonEmptyString(ref.region_name, ref.region_id)
+    const matched = [
+      ...(graphNodesByName.value.get(regionName.toLowerCase()) || []),
+      ...(ref.region_id ? graphNodesByName.value.get(String(ref.region_id).toLowerCase()) || [] : [])
+    ]
     const node = matched[0]
     return {
       id: node?.uuid || `risk-region-${index}`,
-      name,
+      name: regionName,
       labels: normalizeLabels(node?.labels),
       matched: Boolean(node)
     }
@@ -1096,7 +1403,9 @@ const riskObjectHighlightPayload = computed(() => {
       label: '',
       riskObjectId: '',
       nodeIds: [],
-      nodeNames: []
+      nodeNames: [],
+      edgeIds: [],
+      mode: ''
     }
   }
 
@@ -1107,7 +1416,9 @@ const riskObjectHighlightPayload = computed(() => {
     nodeNames: uniqueList([
       ...riskObjectEntityNodes.value.map(item => item.name),
       ...riskObjectRegionNodes.value.map(item => item.name)
-    ])
+    ]),
+    edgeIds: uniqueList(selectedRiskObject.value.edge_ids || []),
+    mode: selectedRiskObject.value.highlight_mode || selectedRiskObject.value.source_kind || selectedRiskObject.value.mode || 'risk_definition'
   }
 })
 

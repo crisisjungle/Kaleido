@@ -20,7 +20,9 @@ from .env_profile_generator import EnvProfileGenerator
 from .env_simulation_config_generator import EnvSimulationConfigGenerator, normalize_search_mode
 from .envfish_models import ENVFISH_ENGINE_MODE, InjectedVariable, dump_json, write_profiles_csv
 from .map_seed_manager import MapSeedManager
-from .risk_object_builder import RiskObjectBuilder
+from .risk_artifact_store import write_risk_artifacts
+from .risk_definition_builder import RiskDefinitionBuilder
+from .risk_runtime_tracker import RiskRuntimeTracker
 from .zep_entity_reader import EntityNode, FilteredEntities, ZepEntityReader
 
 logger = get_logger("envfish.simulation")
@@ -311,6 +313,9 @@ class SimulationManager:
                 progress_callback("reading", 100, f"Loaded {filtered.filtered_count} entities")
 
             generator = EnvProfileGenerator()
+            profiles_full_path = os.path.join(sim_dir, "profiles_full.json")
+            incremental_profiles: List[Dict[str, Any]] = []
+            dump_json(profiles_full_path, incremental_profiles)
 
             def profile_progress(current: int, total: int, message: str):
                 if progress_callback:
@@ -324,6 +329,13 @@ class SimulationManager:
                         item_name=message,
                     )
 
+            def profile_created(profile, generated_count: int, target_count: int, stage: str):
+                del generated_count, target_count, stage
+                incremental_profiles.append(profile.to_dict())
+                dump_json(profiles_full_path, incremental_profiles)
+                state.profiles_count = len(incremental_profiles)
+                self._save_simulation_state(state)
+
             result = generator.generate_from_entities(
                 entities=filtered.entities,
                 simulation_requirement=simulation_requirement,
@@ -334,6 +346,7 @@ class SimulationManager:
                 diffusion_provider=state.diffusion_provider,
                 use_llm=use_llm_for_profiles,
                 progress_callback=profile_progress,
+                profile_created_callback=profile_created,
                 parallel_count=parallel_profile_count,
             )
 
@@ -345,7 +358,7 @@ class SimulationManager:
             dump_json(os.path.join(sim_dir, "grounding_summary.json"), result.grounding_summary)
             dump_json(os.path.join(sim_dir, "transport_edges.json"), [edge.to_dict() for edge in result.transport_edges])
             dump_json(os.path.join(sim_dir, "diffusion_context.json"), result.diffusion_context)
-            dump_json(os.path.join(sim_dir, "profiles_full.json"), [profile.to_dict() for profile in result.profiles])
+            dump_json(profiles_full_path, [profile.to_dict() for profile in result.profiles])
             dump_json(os.path.join(sim_dir, "agent_relationship_graph.json"), [edge.to_dict() for edge in result.agent_relationships])
             dump_json(os.path.join(sim_dir, "region_agent_index.json"), result.region_agent_index)
             dump_json(os.path.join(sim_dir, "agent_generation_summary.json"), result.generation_summary)
@@ -359,7 +372,7 @@ class SimulationManager:
             state.active_variables_count = len(variables)
             dump_json(os.path.join(sim_dir, "injected_variables.json"), [variable.to_dict() for variable in variables])
 
-            risk_builder = RiskObjectBuilder()
+            risk_builder = RiskDefinitionBuilder()
             risk_result = risk_builder.build(
                 simulation_requirement=simulation_requirement,
                 document_text=document_text,
@@ -370,10 +383,25 @@ class SimulationManager:
                 scenario_mode=state.scenario_mode,
                 diffusion_template=state.diffusion_template,
             )
-            state.risk_objects_count = len(risk_result.risk_objects)
-            state.primary_risk_object_id = risk_result.primary_risk_object_id
-            dump_json(os.path.join(sim_dir, "risk_objects.json"), [item.to_dict() for item in risk_result.risk_objects])
-            dump_json(os.path.join(sim_dir, "risk_object_summary.json"), risk_result.to_dict())
+            runtime_tracker = RiskRuntimeTracker()
+            latest_risk_runtime_state = runtime_tracker.build_initial_bundle(
+                risk_definitions=risk_result.risk_definitions,
+                primary_risk_id=risk_result.primary_risk_id,
+            )
+            risk_artifacts = write_risk_artifacts(
+                sim_dir=sim_dir,
+                risk_definitions=risk_result.risk_definitions,
+                latest_runtime_bundle=latest_risk_runtime_state,
+                primary_risk_id=risk_result.primary_risk_id,
+                generation_notes=risk_result.generation_notes,
+                risk_events=[],
+                rewrite_runtime_history=[latest_risk_runtime_state],
+            )
+            state.risk_objects_count = len(risk_artifacts["risk_objects"])
+            state.primary_risk_object_id = (
+                risk_artifacts["risk_objects_summary"].get("primary_risk_object_id")
+                or risk_result.primary_risk_id
+            )
 
             if progress_callback:
                 progress_callback("generating_config", 10, "Synthesizing EnvFish config...", current=1, total=3)
@@ -403,8 +431,11 @@ class SimulationManager:
                 diffusion_context=result.diffusion_context,
                 injected_variables=variables,
                 data_grounding_summary=result.grounding_summary,
-                risk_objects=risk_result.risk_objects,
-                primary_risk_object_id=risk_result.primary_risk_object_id,
+                risk_definitions=risk_artifacts["risk_definitions"],
+                latest_risk_runtime_state=risk_artifacts["latest_risk_runtime_state"],
+                risk_objects=risk_artifacts["risk_objects"],
+                primary_risk_object_id=state.primary_risk_object_id,
+                primary_active_risk_id=risk_artifacts["latest_risk_runtime_state"].get("primary_active_risk_id", ""),
             )
 
             if progress_callback:

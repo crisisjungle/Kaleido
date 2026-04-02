@@ -786,6 +786,264 @@ class RiskObjectBuildResult:
         }
 
 
+@dataclass
+class RiskScopeRegionRef:
+    region_id: str
+    region_name: str
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "region_id": str(self.region_id or ""),
+            "region_name": str(self.region_name or self.region_id or ""),
+        }
+
+
+@dataclass
+class RiskScopeEntityRef:
+    entity_uuid: str
+    entity_name: str = ""
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "entity_uuid": str(self.entity_uuid or ""),
+            "entity_name": str(self.entity_name or self.entity_uuid or ""),
+        }
+
+
+@dataclass
+class RiskScopeActorRef:
+    actor_id: int
+    actor_name: str = ""
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "actor_id": int(self.actor_id),
+            "actor_name": str(self.actor_name or self.actor_id),
+        }
+
+
+@dataclass
+class RiskChainStepDefinition:
+    step_id: str
+    label: str
+    step_type: str = "generic"
+    monitor_metrics: List[str] = field(default_factory=list)
+    threshold_notes: List[str] = field(default_factory=list)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "step_id": self.step_id,
+            "label": self.label,
+            "step_type": self.step_type or "generic",
+            "monitor_metrics": list(dict.fromkeys(self.monitor_metrics)),
+            "threshold_notes": list(dict.fromkeys(self.threshold_notes)),
+        }
+
+
+@dataclass
+class RiskDefinition:
+    risk_id: str
+    title: str
+    summary: str
+    category: str = "baseline"
+    risk_type: str = ""
+    status: str = "tracked"
+    mode: str = "watch"
+    time_horizon: str = "30d"
+    legacy_risk_object_id: str = ""
+    priority_seed: float = 0.0
+    scope_regions: List[RiskScopeRegionRef] = field(default_factory=list)
+    scope_entities: List[RiskScopeEntityRef] = field(default_factory=list)
+    scope_actors: List[RiskScopeActorRef] = field(default_factory=list)
+    chain_template: List[RiskChainStepDefinition] = field(default_factory=list)
+    root_pressures: List[str] = field(default_factory=list)
+    turning_point_candidates: List[str] = field(default_factory=list)
+    amplifiers: List[str] = field(default_factory=list)
+    buffers: List[str] = field(default_factory=list)
+    source_entity_uuids: List[str] = field(default_factory=list)
+    source_variable_ids: List[str] = field(default_factory=list)
+    evidence: List[RiskEvidence] = field(default_factory=list)
+    affected_clusters: List[RiskAffectedCluster] = field(default_factory=list)
+    intervention_templates: List[RiskInterventionOption] = field(default_factory=list)
+    branch_templates: List[RiskScenarioBranch] = field(default_factory=list)
+    trigger_rules: Dict[str, Any] = field(default_factory=dict)
+    created_at: str = field(default_factory=utcnow_iso)
+    updated_at: str = field(default_factory=utcnow_iso)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "risk_id": self.risk_id,
+            "legacy_risk_object_id": self.legacy_risk_object_id or self.risk_id,
+            "category": self.category or "baseline",
+            "risk_type": self.risk_type,
+            "title": self.title,
+            "summary": self.summary,
+            "status": self.status or "tracked",
+            "mode": self.mode or "watch",
+            "time_horizon": self.time_horizon or "30d",
+            "priority_seed": clamp_probability(self.priority_seed),
+            "scope": {
+                "regions": [item.to_dict() for item in self.scope_regions],
+                "entities": [item.to_dict() for item in self.scope_entities],
+                "actors": [item.to_dict() for item in self.scope_actors],
+            },
+            "chain_template": [item.to_dict() for item in self.chain_template],
+            "root_pressures": list(dict.fromkeys(self.root_pressures)),
+            "turning_point_candidates": list(dict.fromkeys(self.turning_point_candidates)),
+            "amplifiers": list(dict.fromkeys(self.amplifiers)),
+            "buffers": list(dict.fromkeys(self.buffers)),
+            "source_entity_uuids": list(dict.fromkeys(self.source_entity_uuids)),
+            "source_variable_ids": list(dict.fromkeys(self.source_variable_ids)),
+            "evidence": [item.to_dict() for item in self.evidence],
+            "affected_clusters": [item.to_dict() for item in self.affected_clusters],
+            "intervention_templates": [item.to_dict() for item in self.intervention_templates],
+            "branch_templates": [item.to_dict() for item in self.branch_templates],
+            "trigger_rules": dict(self.trigger_rules or {}),
+            "created_at": self.created_at,
+            "updated_at": self.updated_at,
+        }
+
+
+@dataclass
+class RiskStepRuntimeState:
+    step_id: str
+    label: str
+    status: str = "inactive"
+    score: float = 0.0
+    evidence_refs: List[str] = field(default_factory=list)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "step_id": self.step_id,
+            "label": self.label,
+            "status": self.status or "inactive",
+            "score": clamp_probability(self.score),
+            "evidence_refs": list(dict.fromkeys(self.evidence_refs)),
+        }
+
+
+@dataclass
+class RiskRuntimeState:
+    risk_id: str
+    title: str
+    round: int
+    category: str = "baseline"
+    risk_type: str = ""
+    severity_score: float = 0.0
+    confidence_score: float = 0.0
+    trend: str = "stable"
+    runtime_priority: float = 0.0
+    active_step_ids: List[str] = field(default_factory=list)
+    step_states: List[RiskStepRuntimeState] = field(default_factory=list)
+    impacted_regions: List[RiskScopeRegionRef] = field(default_factory=list)
+    impacted_actors: List[RiskScopeActorRef] = field(default_factory=list)
+    related_dynamic_edge_ids: List[str] = field(default_factory=list)
+    drivers: List[str] = field(default_factory=list)
+    buffers: List[str] = field(default_factory=list)
+    turning_points: List[str] = field(default_factory=list)
+    explanation: str = ""
+    triggered_by_event_ids: List[str] = field(default_factory=list)
+    updated_at: str = field(default_factory=utcnow_iso)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "risk_id": self.risk_id,
+            "title": self.title,
+            "round": max(0, int(self.round or 0)),
+            "category": self.category or "baseline",
+            "risk_type": self.risk_type,
+            "severity_score": clamp_score(self.severity_score),
+            "confidence_score": clamp_probability(self.confidence_score),
+            "trend": self.trend or "stable",
+            "runtime_priority": clamp_probability(self.runtime_priority),
+            "active_step_ids": list(dict.fromkeys(self.active_step_ids)),
+            "step_states": [item.to_dict() for item in self.step_states],
+            "impacted_regions": [item.to_dict() for item in self.impacted_regions],
+            "impacted_actors": [item.to_dict() for item in self.impacted_actors],
+            "related_dynamic_edge_ids": list(dict.fromkeys(self.related_dynamic_edge_ids)),
+            "drivers": list(dict.fromkeys(self.drivers)),
+            "buffers": list(dict.fromkeys(self.buffers)),
+            "turning_points": list(dict.fromkeys(self.turning_points)),
+            "explanation": self.explanation,
+            "triggered_by_event_ids": list(dict.fromkeys(self.triggered_by_event_ids)),
+            "updated_at": self.updated_at,
+        }
+
+
+@dataclass
+class RiskEvent:
+    event_id: str
+    round: int
+    event_type: str
+    risk_id: str
+    source_ref: str = ""
+    summary: str = ""
+    delta: Dict[str, Any] = field(default_factory=dict)
+    evidence_refs: List[str] = field(default_factory=list)
+    timestamp: str = field(default_factory=utcnow_iso)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "event_id": self.event_id,
+            "round": max(0, int(self.round or 0)),
+            "event_type": self.event_type,
+            "risk_id": self.risk_id,
+            "source_ref": self.source_ref,
+            "summary": self.summary,
+            "delta": dict(self.delta or {}),
+            "evidence_refs": list(dict.fromkeys(self.evidence_refs)),
+            "timestamp": self.timestamp,
+        }
+
+
+@dataclass
+class RiskDefinitionBuildResult:
+    risk_definitions: List[RiskDefinition]
+    primary_risk_id: str = ""
+    generation_notes: List[str] = field(default_factory=list)
+
+    def to_dict(self) -> Dict[str, Any]:
+        primary = None
+        if self.primary_risk_id:
+            for item in self.risk_definitions:
+                if item.risk_id == self.primary_risk_id:
+                    primary = item.to_dict()
+                    break
+        return {
+            "primary_risk_id": self.primary_risk_id,
+            "risk_definition_count": len(self.risk_definitions),
+            "risk_definitions": [item.to_dict() for item in self.risk_definitions],
+            "primary_risk_definition": primary,
+            "generation_notes": self.generation_notes,
+        }
+
+
+@dataclass
+class RiskRuntimeStateBundle:
+    round: int
+    risk_states: List[RiskRuntimeState]
+    primary_active_risk_id: str = ""
+    pinned_risk_ids: List[str] = field(default_factory=list)
+    refresh_reason: str = ""
+    updated_at: str = field(default_factory=utcnow_iso)
+
+    def to_dict(self) -> Dict[str, Any]:
+        primary = None
+        for item in self.risk_states:
+            if item.risk_id == self.primary_active_risk_id:
+                primary = item.to_dict()
+                break
+        return {
+            "round": max(0, int(self.round or 0)),
+            "updated_at": self.updated_at,
+            "refresh_reason": self.refresh_reason,
+            "primary_active_risk_id": self.primary_active_risk_id,
+            "pinned_risk_ids": list(dict.fromkeys(self.pinned_risk_ids)),
+            "risk_states": [item.to_dict() for item in self.risk_states],
+            "primary_active_risk": primary,
+        }
+
+
 def dump_json(path: str, payload: Any) -> None:
     with open(path, "w", encoding="utf-8") as handle:
         json.dump(payload, handle, ensure_ascii=False, indent=2)

@@ -9,13 +9,13 @@
       <div class="header-center">
         <div class="view-switcher">
           <button 
-            v-for="mode in ['graph', 'split', 'workbench']" 
+            v-for="mode in ['map', 'graph', 'split', 'workbench']" 
             :key="mode"
             class="switch-btn"
             :class="{ active: viewMode === mode }"
             @click="viewMode = mode"
           >
-            {{ { graph: '图谱', split: '双栏', workbench: '工作台' }[mode] }}
+            {{ { map: '地图', graph: '图谱', split: '双栏', workbench: '工作台' }[mode] }}
           </button>
         </div>
       </div>
@@ -37,14 +37,29 @@
     <main class="content-area">
       <!-- Left Panel: Graph -->
       <div class="panel-wrapper left" :style="leftPanelStyle">
-        <GraphPanel 
+        <MapRelationPanel
+          v-if="viewMode === 'map'"
+          :mapData="mapProjection"
+          :loading="graphLoading"
+          :highlightNodeIds="graphHighlight.nodeIds"
+          :highlightNodeNames="graphHighlight.nodeNames"
+          :highlightEdgeIds="graphHighlight.edgeIds"
+          :highlightLabel="graphHighlight.label"
+          :highlightMode="graphHighlight.mode"
+          @refresh="refreshGraph"
+          @toggle-maximize="toggleMaximize('map')"
+        />
+        <GraphPanel
+          v-else
           :graphData="graphData"
           :loading="graphLoading"
           :currentPhase="3"
           :isSimulating="isSimulating"
           :highlightNodeIds="graphHighlight.nodeIds"
           :highlightNodeNames="graphHighlight.nodeNames"
+          :highlightEdgeIds="graphHighlight.edgeIds"
           :highlightLabel="graphHighlight.label"
+          :highlightMode="graphHighlight.mode"
           @refresh="refreshGraph"
           @toggle-maximize="toggleMaximize('graph')"
         />
@@ -77,9 +92,10 @@
 import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import GraphPanel from '../components/GraphPanel.vue'
+import MapRelationPanel from '../components/MapRelationPanel.vue'
 import Step3Simulation from '../components/Step3Simulation.vue'
 import { getProject, getGraphData } from '../api/graph'
-import { getSimulation, getSimulationConfig, stopSimulation, closeSimulationEnv, getEnvStatus } from '../api/simulation'
+import { getSimulation, getSimulationConfig, getSimulationGraphRealtime, stopSimulation, closeSimulationEnv, getEnvStatus } from '../api/simulation'
 
 const route = useRoute()
 const router = useRouter()
@@ -99,21 +115,22 @@ const maxRounds = ref(route.query.maxRounds ? parseInt(route.query.maxRounds) : 
 const minutesPerRound = ref(30) // 默认每轮30分钟
 const projectData = ref(null)
 const graphData = ref(null)
+const mapProjection = ref(null)
 const graphLoading = ref(false)
 const systemLogs = ref([])
 const currentStatus = ref('processing') // processing | completed | error
-const graphHighlight = ref({ nodeIds: [], nodeNames: [], label: '' })
+const graphHighlight = ref({ nodeIds: [], nodeNames: [], edgeIds: [], label: '', mode: '' })
 
 // --- Computed Layout Styles ---
 const leftPanelStyle = computed(() => {
-  if (viewMode.value === 'graph') return { width: '100%', opacity: 1, transform: 'translateX(0)' }
+  if (viewMode.value === 'graph' || viewMode.value === 'map') return { width: '100%', opacity: 1, transform: 'translateX(0)' }
   if (viewMode.value === 'workbench') return { width: '0%', opacity: 0, transform: 'translateX(-20px)' }
   return { width: '50%', opacity: 1, transform: 'translateX(0)' }
 })
 
 const rightPanelStyle = computed(() => {
   if (viewMode.value === 'workbench') return { width: '100%', opacity: 1, transform: 'translateX(0)' }
-  if (viewMode.value === 'graph') return { width: '0%', opacity: 0, transform: 'translateX(20px)' }
+  if (viewMode.value === 'graph' || viewMode.value === 'map') return { width: '0%', opacity: 0, transform: 'translateX(20px)' }
   return { width: '50%', opacity: 1, transform: 'translateX(0)' }
 })
 
@@ -147,7 +164,161 @@ const updateGraphHighlight = (payload = {}) => {
   graphHighlight.value = {
     nodeIds: Array.isArray(payload.nodeIds) ? payload.nodeIds : [],
     nodeNames: Array.isArray(payload.nodeNames) ? payload.nodeNames : [],
-    label: payload.label || ''
+    edgeIds: Array.isArray(payload.edgeIds) ? payload.edgeIds : [],
+    label: payload.label || '',
+    mode: payload.mode || ''
+  }
+}
+
+const extractGraphData = (payload) => {
+  if (!payload) return null
+  if (payload.graph_data) return payload.graph_data
+  if (payload.map_graph_data) return payload.map_graph_data
+  if (payload.map_graph?.graph_data) return payload.map_graph.graph_data
+  if (payload.map_graph) return payload.map_graph
+  if (payload.graph) return payload.graph
+  return payload
+}
+
+const KEY_RELATION_TOKENS = new Set([
+  'dynamic_edge',
+  'agent_influence',
+  'influences_region',
+  'depends_on',
+  'affects',
+  'exposed_to',
+  'regulates',
+  'monitors',
+  'uses',
+  'supports',
+  'blocks',
+  'collaborates_with'
+])
+
+const NON_KEY_RELATION_TOKENS = new Set([
+  'agent_anchor',
+  'region_neighbor',
+  'region_hierarchy',
+  'belongs_to',
+  'neighbor_of'
+])
+
+const toNumber = (value) => {
+  const num = Number(value)
+  return Number.isFinite(num) ? num : null
+}
+
+const nodeKindFromNode = (node) => {
+  const nodeId = String(node?.uuid || '')
+  if (nodeId.startsWith('region::')) return 'region'
+  if (nodeId.startsWith('subregion::')) return 'subregion'
+  if (nodeId.startsWith('agent::')) return 'agent'
+  const labels = (Array.isArray(node?.labels) ? node.labels : []).map((item) => String(item).toLowerCase())
+  if (labels.includes('subregion')) return 'subregion'
+  if (labels.includes('region')) return 'region'
+  if (labels.includes('humanactor') || labels.includes('governmentactor') || labels.includes('organizationactor')) return 'agent'
+  return 'entity'
+}
+
+const isKeyEdge = (edge) => {
+  const factType = String(edge?.fact_type || '').toLowerCase()
+  const name = String(edge?.name || '').toLowerCase()
+  const attrs = edge?.attributes || {}
+  if (attrs?.is_key_interaction) return true
+  if (KEY_RELATION_TOKENS.has(factType) || KEY_RELATION_TOKENS.has(name)) return true
+  if (NON_KEY_RELATION_TOKENS.has(factType) || NON_KEY_RELATION_TOKENS.has(name)) return false
+  if (String(attrs?.kind || '').toLowerCase() === 'structural_agent_relationship') {
+    const strength = Number(attrs?.strength || 0)
+    return strength >= 0.45 || Boolean(attrs?.interaction_channel)
+  }
+  const confidence = Number(attrs?.confidence || 0)
+  return confidence >= 0.68
+}
+
+const buildMapProjectionFallback = ({ graph, layersPayload = null, sourceMode = 'graph', mapSeedId = '' }) => {
+  const nodes = Array.isArray(graph?.nodes) ? graph.nodes : []
+  const edges = Array.isArray(graph?.edges) ? graph.edges : []
+  const projectedNodes = []
+  const nodeCoordById = new Map()
+
+  nodes.forEach((node, index) => {
+    const attrs = node?.attributes || {}
+    const lat = toNumber(attrs?.lat)
+    const lon = toNumber(attrs?.lon)
+    if (!Number.isFinite(lat) || !Number.isFinite(lon)) return
+    const normalized = {
+      uuid: node?.uuid || node?.id || `node_${index}`,
+      name: node?.name || `Node ${index + 1}`,
+      labels: Array.isArray(node?.labels) ? node.labels : [],
+      summary: node?.summary || '',
+      kind: node?.kind || nodeKindFromNode(node),
+      attributes: {
+        ...attrs,
+        lat,
+        lon
+      }
+    }
+    projectedNodes.push(normalized)
+    nodeCoordById.set(String(normalized.uuid), normalized)
+  })
+
+  const projectedEdges = []
+  edges.forEach((edge, index) => {
+    const sourceId = String(edge?.source_node_uuid || edge?.source || '')
+    const targetId = String(edge?.target_node_uuid || edge?.target || '')
+    const sourceNode = nodeCoordById.get(sourceId)
+    const targetNode = nodeCoordById.get(targetId)
+    if (!sourceNode || !targetNode) return
+    const keyInteraction = isKeyEdge(edge)
+    if (!keyInteraction) return
+    projectedEdges.push({
+      uuid: edge?.uuid || edge?.id || `edge_${index}`,
+      name: edge?.name || edge?.fact_type || 'related_to',
+      fact_type: edge?.fact_type || edge?.name || 'related_to',
+      fact: edge?.fact || '',
+      source_node_uuid: sourceId,
+      target_node_uuid: targetId,
+      source_lat: sourceNode.attributes.lat,
+      source_lon: sourceNode.attributes.lon,
+      target_lat: targetNode.attributes.lat,
+      target_lon: targetNode.attributes.lon,
+      attributes: { ...(edge?.attributes || {}), is_key_interaction: true },
+      is_key_interaction: true
+    })
+  })
+
+  let center = null
+  if (layersPayload?.center) {
+    const lat = toNumber(layersPayload.center.lat)
+    const lon = toNumber(layersPayload.center.lon)
+    if (Number.isFinite(lat) && Number.isFinite(lon)) center = { lat, lon }
+  }
+  if (!center && projectedNodes.length > 0) {
+    const lat = projectedNodes.reduce((sum, item) => sum + item.attributes.lat, 0) / projectedNodes.length
+    const lon = projectedNodes.reduce((sum, item) => sum + item.attributes.lon, 0) / projectedNodes.length
+    center = { lat, lon }
+  }
+  if (!center) center = { lat: 20, lon: 0 }
+
+  return {
+    simulation_id: currentSimulationId.value,
+    source_mode: sourceMode || 'graph',
+    map_seed_id: mapSeedId || '',
+    center,
+    radius_m: Number(layersPayload?.radius_m || 0),
+    zoom_hint: Number(layersPayload?.radius_m || 0) > 0 ? 10 : 9,
+    analysis_polygon: layersPayload?.analysis_polygon || null,
+    layers: Array.isArray(layersPayload?.layers) ? layersPayload.layers : [],
+    nodes: projectedNodes,
+    edges: projectedEdges,
+    meta: {
+      key_edges_only: true,
+      input_node_count: nodes.length,
+      input_edge_count: edges.length,
+      node_count: projectedNodes.length,
+      edge_count: projectedEdges.length,
+      key_edge_count: projectedEdges.length
+    }
   }
 }
 
@@ -231,6 +402,26 @@ const loadSimulationData = async () => {
     if (simRes.success && simRes.data) {
       const simData = simRes.data
       let graphLoaded = false
+
+      try {
+        const realtimeRes = await getSimulationGraphRealtime(currentSimulationId.value, {
+          include_map: 1,
+          key_edges_only: 1
+        })
+        if (realtimeRes.success) {
+          const realtimeGraph = extractGraphData(realtimeRes.data)
+          if (realtimeGraph) {
+            graphData.value = realtimeGraph
+            graphLoaded = true
+            addLog('实时图谱加载成功')
+          }
+          if (realtimeRes.data?.map_projection) {
+            mapProjection.value = realtimeRes.data.map_projection
+          }
+        }
+      } catch (realtimeErr) {
+        console.warn('实时图谱加载失败:', realtimeErr)
+      }
       
       // 获取 simulation config 以获取 minutes_per_round
       try {
@@ -251,7 +442,7 @@ const loadSimulationData = async () => {
           addLog(`项目加载成功: ${projRes.data.project_id}`)
           
           // 获取 graph 数据
-          if (projRes.data.graph_id) {
+          if (!graphLoaded && projRes.data.graph_id) {
             await loadGraph(projRes.data.graph_id)
             graphLoaded = true
           }
@@ -260,6 +451,14 @@ const loadSimulationData = async () => {
 
       if (!graphLoaded) {
         applyMapSeedGraph(simData)
+      }
+      if (!mapProjection.value) {
+        mapProjection.value = buildMapProjectionFallback({
+          graph: graphData.value,
+          layersPayload: simData?.map_layers || null,
+          sourceMode: simData?.source_mode || 'graph',
+          mapSeedId: simData?.map_seed_id || ''
+        })
       }
     } else {
       addLog(`加载模拟数据失败: ${simRes.error || '未知错误'}`)
@@ -279,6 +478,12 @@ const applyMapSeedGraph = (simData) => {
   }
 
   graphData.value = mapGraph
+  mapProjection.value = buildMapProjectionFallback({
+    graph: mapGraph,
+    layersPayload: simData?.map_layers || null,
+    sourceMode: simData?.source_mode || 'map_seed',
+    mapSeedId: simData?.map_seed_id || ''
+  })
   if (!isSimulating.value) {
     addLog('地图图谱加载成功')
   }
@@ -296,6 +501,11 @@ const loadGraph = async (graphId) => {
     const res = await getGraphData(graphId)
     if (res.success) {
       graphData.value = res.data
+      mapProjection.value = buildMapProjectionFallback({
+        graph: res.data,
+        layersPayload: null,
+        sourceMode: 'graph'
+      })
       if (!isSimulating.value) {
         addLog('图谱数据加载成功')
       }
@@ -308,16 +518,43 @@ const loadGraph = async (graphId) => {
 }
 
 const refreshGraph = async () => {
-  if (projectData.value?.graph_id) {
-    await loadGraph(projectData.value.graph_id)
-    return
-  }
-
-  if (!isSimulating.value) {
-    graphLoading.value = true
-  }
+  if (graphRefreshInFlight) return
+  graphRefreshInFlight = true
 
   try {
+    const realtimeRes = await getSimulationGraphRealtime(currentSimulationId.value, {
+      include_map: 1,
+      key_edges_only: 1
+    })
+    if (realtimeRes.success) {
+      const realtimeGraph = extractGraphData(realtimeRes.data)
+      if (realtimeGraph) {
+        graphData.value = realtimeGraph
+        if (realtimeRes.data?.map_projection) {
+          mapProjection.value = realtimeRes.data.map_projection
+        } else {
+          mapProjection.value = buildMapProjectionFallback({
+            graph: realtimeGraph,
+            layersPayload: null,
+            sourceMode: 'graph'
+          })
+        }
+        if (!isSimulating.value) {
+          addLog('实时图谱刷新成功')
+        }
+        return
+      }
+    }
+
+    if (projectData.value?.graph_id) {
+      await loadGraph(projectData.value.graph_id)
+      return
+    }
+
+    if (!isSimulating.value) {
+      graphLoading.value = true
+    }
+
     const simRes = await getSimulation(currentSimulationId.value)
     if (!simRes.success || !applyMapSeedGraph(simRes.data)) {
       if (!isSimulating.value) {
@@ -328,17 +565,19 @@ const refreshGraph = async () => {
     addLog(`地图图谱刷新失败: ${err.message}`)
   } finally {
     graphLoading.value = false
+    graphRefreshInFlight = false
   }
 }
 
 // --- Auto Refresh Logic ---
 let graphRefreshTimer = null
+let graphRefreshInFlight = false
 
 const startGraphRefresh = () => {
   if (graphRefreshTimer) return
-  addLog('开启图谱实时刷新 (30s)')
-  // 立即刷新一次，然后每30秒刷新
-  graphRefreshTimer = setInterval(refreshGraph, 30000)
+  addLog('开启图谱实时刷新 (2.5s)')
+  refreshGraph()
+  graphRefreshTimer = setInterval(refreshGraph, 2500)
 }
 
 const stopGraphRefresh = () => {

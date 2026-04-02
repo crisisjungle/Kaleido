@@ -17,6 +17,7 @@ from ..models.project import ProjectManager
 from ..utils.llm_client import LLMClient
 from ..utils.logger import get_logger
 from .graph_builder import GraphBuilderService
+from .risk_projection import build_legacy_risk_summary, project_legacy_risk_objects
 from .report_agent import ReportManager, ReportStatus
 from .simulation_manager import SimulationManager
 from .simulation_runner import SimulationRunner
@@ -104,6 +105,7 @@ class ReportAnalysisService:
             self.project = ProjectManager.get_project(self.simulation_state.project_id)
 
         self.artifacts = SimulationRunner.get_envfish_artifacts(self.simulation_id) or {}
+        self.risk_artifacts = self._load_risk_artifacts()
         self.latest_snapshot = self.artifacts.get("latest_snapshot") or {}
         self.round_snapshots = self._dedupe_round_snapshots(self.artifacts.get("round_snapshots") or [])
         self.max_round = self._get_max_round()
@@ -129,6 +131,107 @@ class ReportAnalysisService:
         except Exception as exc:
             logger.warning(f"读取模拟工件失败: simulation_id={self.simulation_id}, file={filename}, error={exc}")
             return default
+
+    def _read_simulation_jsonl(self, filename: str, default: Any) -> Any:
+        sim_dir = self._simulation_dir()
+        if not sim_dir:
+            return default
+        file_path = os.path.join(sim_dir, filename)
+        if not os.path.exists(file_path):
+            return default
+        records: List[Dict[str, Any]] = []
+        try:
+            with open(file_path, "r", encoding="utf-8") as handle:
+                for line in handle:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        payload = json.loads(line)
+                    except Exception:
+                        continue
+                    if isinstance(payload, dict):
+                        records.append(payload)
+            return records
+        except Exception as exc:
+            logger.warning(f"读取模拟JSONL工件失败: simulation_id={self.simulation_id}, file={filename}, error={exc}")
+            return default
+
+    def _load_risk_artifacts(self) -> Dict[str, Any]:
+        sim_dir = self._simulation_dir()
+        if not sim_dir:
+            return {
+                "risk_definitions": [],
+                "latest_risk_runtime_state": {},
+                "risk_runtime_state": [],
+                "risk_events": [],
+            }
+
+        risk_definitions = self._read_simulation_json("risk_definitions.json", []) or []
+        latest_risk_runtime_state = self._read_simulation_json("latest_risk_runtime_state.json", {}) or {}
+        risk_runtime_state = self._read_simulation_jsonl("risk_runtime_state.jsonl", []) or []
+        risk_events = self._read_simulation_jsonl("risk_events.jsonl", []) or []
+        return {
+            "risk_definitions": risk_definitions if isinstance(risk_definitions, list) else [],
+            "latest_risk_runtime_state": latest_risk_runtime_state if isinstance(latest_risk_runtime_state, dict) else {},
+            "risk_runtime_state": risk_runtime_state if isinstance(risk_runtime_state, list) else [],
+            "risk_events": risk_events if isinstance(risk_events, list) else [],
+        }
+
+    def _preferred_risk_definitions(self) -> List[Dict[str, Any]]:
+        risk_definitions = self.risk_artifacts.get("risk_definitions") or []
+        if isinstance(risk_definitions, list) and risk_definitions:
+            return [item for item in risk_definitions if isinstance(item, dict)]
+        return []
+
+    def _preferred_risk_runtime_state(self) -> Dict[str, Any]:
+        latest_runtime = self.risk_artifacts.get("latest_risk_runtime_state") or {}
+        if isinstance(latest_runtime, dict) and latest_runtime:
+            return latest_runtime
+        return {}
+
+    def _preferred_risk_events(self) -> List[Dict[str, Any]]:
+        events = self.risk_artifacts.get("risk_events") or []
+        if isinstance(events, list):
+            return [item for item in events if isinstance(item, dict)]
+        return []
+
+    def _preferred_risk_objects(self) -> List[Dict[str, Any]]:
+        risk_definitions = self._preferred_risk_definitions()
+        if risk_definitions:
+            runtime_bundle = self._preferred_risk_runtime_state()
+            projected = project_legacy_risk_objects(risk_definitions, runtime_bundle)
+            if projected:
+                return projected
+        legacy = self.artifacts.get("risk_objects") or []
+        if isinstance(legacy, list):
+            return [item for item in legacy if isinstance(item, dict)]
+        return []
+
+    def _preferred_risk_summary(self) -> Dict[str, Any]:
+        preferred_objects = self._preferred_risk_objects()
+        runtime_bundle = self._preferred_risk_runtime_state()
+        primary_active_risk_id = _normalize_text(runtime_bundle.get("primary_active_risk_id"))
+        primary_risk_object_id = _normalize_text(
+            runtime_bundle.get("primary_risk_object_id")
+            or self.artifacts.get("risk_objects_summary", {}).get("primary_risk_object_id")
+        )
+        pinned_risk_ids = [
+            _normalize_text(item)
+            for item in (runtime_bundle.get("pinned_risk_ids") or [])
+            if _normalize_text(item)
+        ]
+        summary = build_legacy_risk_summary(
+            preferred_objects,
+            primary_risk_object_id=primary_risk_object_id,
+            generation_notes=list(self.artifacts.get("risk_objects_summary", {}).get("generation_notes") or []),
+            primary_active_risk_id=primary_active_risk_id,
+            pinned_risk_ids=pinned_risk_ids,
+        )
+        summary["risk_definitions_count"] = len(self._preferred_risk_definitions())
+        summary["risk_event_count"] = len(self._preferred_risk_events())
+        summary["risk_runtime_state_count"] = len(self.risk_artifacts.get("risk_runtime_state") or [])
+        return summary
 
     def _dedupe_round_snapshots(self, snapshots: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         latest_by_round: Dict[str, Dict[str, Any]] = {}
@@ -236,7 +339,7 @@ class ReportAnalysisService:
         latest_subregions = latest_snapshot.get("subregions") or []
         base_regions = self.artifacts.get("region_graph") or []
         base_subregions = self.artifacts.get("subregion_graph") or []
-        risk_objects = self.artifacts.get("risk_objects") or []
+        risk_objects = self._preferred_risk_objects()
         agent_relationships = self._read_simulation_json("agent_relationship_graph.json", []) or []
         dynamic_edges = self._load_dynamic_edges()
         agents = self._load_agent_catalog()
@@ -1030,12 +1133,14 @@ class ReportAnalysisService:
     def get_overview(self) -> Dict[str, Any]:
         analysis_graph = self._load_graph_data()
         dynamic_edges = self._load_dynamic_edges()
+        preferred_risk_summary = self._preferred_risk_summary()
         analysis_ready = bool(
             (self.latest_snapshot and isinstance(self.latest_snapshot, dict))
             or self.round_snapshots
             or self.artifacts.get("region_graph")
             or self.artifacts.get("subregion_graph")
-            or self.artifacts.get("risk_objects")
+            or self._preferred_risk_objects()
+            or self._preferred_risk_definitions()
         )
         return {
             "report_id": self.report_id,
@@ -1055,7 +1160,10 @@ class ReportAnalysisService:
                 "region_count": len(self.artifacts.get("region_graph") or []),
                 "subregion_count": len(self.artifacts.get("subregion_graph") or []),
                 "agent_count": len(self._load_agent_catalog()),
-                "risk_object_count": len(self.artifacts.get("risk_objects") or []),
+                "risk_object_count": len(self._preferred_risk_objects()),
+                "risk_definition_count": preferred_risk_summary.get("risk_definitions_count", 0),
+                "risk_event_count": preferred_risk_summary.get("risk_event_count", 0),
+                "primary_risk_object_id": preferred_risk_summary.get("primary_active_risk_id") or preferred_risk_summary.get("primary_risk_object_id") or "",
                 "dynamic_edge_count": len(dynamic_edges),
                 "graph_node_count": analysis_graph.get("node_count", 0),
                 "graph_edge_count": analysis_graph.get("edge_count", 0),
@@ -1106,6 +1214,7 @@ class ReportAnalysisService:
         node_name = _normalize_text(node.get("name"))
         node_name_l = node_name.lower()
         labels = [_normalize_text(item).lower() for item in node.get("labels") or []]
+        risk_objects = self._preferred_risk_objects()
 
         if "subregion" in labels:
             return "subregion", True
@@ -1124,7 +1233,7 @@ class ReportAnalysisService:
             if node_name == merged.get("name") or node_name == merged.get("region_id"):
                 return "subregion", True
 
-        for item in self.artifacts.get("risk_objects") or []:
+        for item in risk_objects:
             if node_id and node_id in (item.get("source_entity_uuids") or []):
                 return "risk_object_related", True
             if node_name == _normalize_text(item.get("title")):
@@ -1194,6 +1303,7 @@ class ReportAnalysisService:
         target_name = _normalize_text(node.get("name"))
         target_id = _normalize_text(node.get("uuid"))
         series: List[Dict[str, Any]] = []
+        risk_objects = self._preferred_risk_objects()
 
         for snapshot in self._filter_snapshots_by_range(round_range):
             round_id = snapshot.get("round")
@@ -1238,7 +1348,7 @@ class ReportAnalysisService:
                 })
                 continue
 
-            for item in self.artifacts.get("risk_objects") or []:
+            for item in risk_objects:
                 source_uuids = item.get("source_entity_uuids") or []
                 if (target_id and target_id in source_uuids) or target_name == _normalize_text(item.get("title")):
                     series.append({
@@ -1344,7 +1454,7 @@ class ReportAnalysisService:
         target_name = _normalize_text(node.get("name"))
         target_id = _normalize_text(node.get("uuid"))
         results: List[Dict[str, Any]] = []
-        for item in self.artifacts.get("risk_objects") or []:
+        for item in self._preferred_risk_objects():
             if not isinstance(item, dict):
                 continue
             source_uuids = item.get("source_entity_uuids") or []

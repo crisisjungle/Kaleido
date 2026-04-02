@@ -20,6 +20,7 @@ from queue import Queue
 
 from ..config import Config
 from ..utils.logger import get_logger
+from .risk_artifact_store import load_risk_artifacts
 from .zep_graph_memory_updater import ZepGraphMemoryManager
 from .simulation_ipc import SimulationIPCClient, CommandType, IPCResponse
 
@@ -1022,6 +1023,10 @@ class SimulationRunner:
             "engine_mode": "envfish",
             "region_graph": [],
             "subregion_graph": [],
+            "risk_definitions": [],
+            "latest_risk_runtime_state": {},
+            "risk_runtime_history": [],
+            "risk_events": [],
             "risk_objects": [],
             "primary_risk_object": None,
             "latest_snapshot": None,
@@ -1035,8 +1040,6 @@ class SimulationRunner:
 
         region_graph_path = os.path.join(sim_dir, "region_graph_snapshot.json")
         subregion_graph_path = os.path.join(sim_dir, "subregion_graph_snapshot.json")
-        risk_objects_path = os.path.join(sim_dir, "risk_objects.json")
-        risk_object_summary_path = os.path.join(sim_dir, "risk_object_summary.json")
         latest_snapshot_path = os.path.join(sim_dir, "latest_round_snapshot.json")
 
         if os.path.exists(region_graph_path):
@@ -1060,21 +1063,14 @@ class SimulationRunner:
             except Exception:
                 pass
 
-        if os.path.exists(risk_objects_path):
-            try:
-                with open(risk_objects_path, "r", encoding="utf-8") as handle:
-                    artifacts["risk_objects"] = json.load(handle)
-            except Exception:
-                pass
-
-        if os.path.exists(risk_object_summary_path):
-            try:
-                with open(risk_object_summary_path, "r", encoding="utf-8") as handle:
-                    summary = json.load(handle)
-                    artifacts["primary_risk_object"] = summary.get("primary_risk_object")
-                    artifacts["risk_objects_summary"] = summary
-            except Exception:
-                pass
+        risk_artifacts = load_risk_artifacts(sim_dir)
+        artifacts["risk_definitions"] = risk_artifacts.get("risk_definitions", [])
+        artifacts["latest_risk_runtime_state"] = risk_artifacts.get("latest_risk_runtime_state", {})
+        artifacts["risk_runtime_history"] = risk_artifacts.get("risk_runtime_history", [])
+        artifacts["risk_events"] = risk_artifacts.get("risk_events", [])
+        artifacts["risk_objects"] = risk_artifacts.get("risk_objects", [])
+        artifacts["primary_risk_object"] = risk_artifacts.get("primary_risk_object")
+        artifacts["risk_objects_summary"] = risk_artifacts.get("risk_objects_summary")
 
         artifacts["round_snapshots"] = cls._read_jsonl_file(
             os.path.join(sim_dir, "round_state_matrix.jsonl"), limit=32

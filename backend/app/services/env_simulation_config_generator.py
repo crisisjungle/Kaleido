@@ -18,6 +18,7 @@ from .envfish_models import (
     EnvAgentProfile,
     InjectedVariable,
     RegionNode,
+    RiskDefinition,
     RiskObject,
     STATE_VECTOR_SCHEMA,
     TransportEdge,
@@ -112,8 +113,11 @@ class EnvSimulationConfig:
     runtime_limits: Dict[str, Any] = field(default_factory=dict)
     aggregation_rules: Dict[str, Any] = field(default_factory=dict)
     injected_variables: List[Dict[str, Any]] = field(default_factory=list)
+    risk_definitions: List[Dict[str, Any]] = field(default_factory=list)
+    latest_risk_runtime_state: Dict[str, Any] = field(default_factory=dict)
     risk_objects: List[Dict[str, Any]] = field(default_factory=list)
     primary_risk_object_id: str = ""
+    primary_active_risk_id: str = ""
     data_grounding_summary: Dict[str, Any] = field(default_factory=dict)
     diffusion_context: Dict[str, Any] = field(default_factory=dict)
     report_focus: List[str] = field(default_factory=list)
@@ -152,8 +156,11 @@ class EnvSimulationConfig:
             "runtime_limits": self.runtime_limits,
             "aggregation_rules": self.aggregation_rules,
             "injected_variables": self.injected_variables,
+            "risk_definitions": self.risk_definitions,
+            "latest_risk_runtime_state": self.latest_risk_runtime_state,
             "risk_objects": self.risk_objects,
             "primary_risk_object_id": self.primary_risk_object_id,
+            "primary_active_risk_id": self.primary_active_risk_id,
             "data_grounding_summary": self.data_grounding_summary,
             "diffusion_context": self.diffusion_context,
             "report_focus": self.report_focus,
@@ -194,8 +201,11 @@ class EnvSimulationConfigGenerator:
         diffusion_context: Optional[Dict[str, Any]] = None,
         injected_variables: Optional[List[InjectedVariable]] = None,
         data_grounding_summary: Optional[Dict[str, Any]] = None,
+        risk_definitions: Optional[List[RiskDefinition]] = None,
+        latest_risk_runtime_state: Optional[Dict[str, Any]] = None,
         risk_objects: Optional[List[RiskObject]] = None,
         primary_risk_object_id: str = "",
+        primary_active_risk_id: str = "",
     ) -> EnvSimulationConfig:
         search_mode = normalize_search_mode(search_mode)
         llm_plan = self._generate_plan_with_llm(
@@ -304,8 +314,11 @@ class EnvSimulationConfigGenerator:
                 "subregion_rollup": "mean_then_weighted_by_population_capacity",
             },
             injected_variables=[item.to_dict() for item in (injected_variables or [])],
-            risk_objects=[item.to_dict() for item in (risk_objects or [])],
+            risk_definitions=[item.to_dict() if hasattr(item, "to_dict") else item for item in (risk_definitions or [])],
+            latest_risk_runtime_state=dict(latest_risk_runtime_state or {}),
+            risk_objects=[item.to_dict() if hasattr(item, "to_dict") else item for item in (risk_objects or [])],
             primary_risk_object_id=primary_risk_object_id,
+            primary_active_risk_id=primary_active_risk_id or primary_risk_object_id,
             data_grounding_summary=data_grounding_summary or {},
             diffusion_context=diffusion_context or {},
             report_focus=plan.get(

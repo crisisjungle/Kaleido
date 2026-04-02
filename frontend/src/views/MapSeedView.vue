@@ -503,14 +503,39 @@ function pickLayerColor(index, kind = '') {
   return palette[index % palette.length]
 }
 
+const KEY_RELATION_TOKENS = new Set([
+  'depends_on',
+  'affects',
+  'exposed_to',
+  'regulates',
+  'monitors',
+  'uses',
+  'dynamic_edge',
+  'agent_influence',
+  'influences_region'
+])
+
+function isKeyInteractionEdge(edge) {
+  const name = String(edge?.name || '').toLowerCase()
+  const factType = String(edge?.fact_type || '').toLowerCase()
+  const attrs = edge?.attributes || {}
+  if (attrs?.is_key_interaction) return true
+  if (KEY_RELATION_TOKENS.has(name) || KEY_RELATION_TOKENS.has(factType)) return true
+  const confidence = Number(attrs?.confidence || 0)
+  return confidence >= 0.62
+}
+
 const mapLayers = computed(() => {
   const derived = []
   const graphNodes = graphData.value?.nodes || []
+  const graphEdges = graphData.value?.edges || []
   const grouped = new Map()
+  const nodePointById = new Map()
 
   graphNodes.forEach((node) => {
     const point = extractPoint(node)
     if (!point) return
+    nodePointById.set(String(node?.uuid || ''), point)
     const sourceKind = String(node?.attributes?.source_kind || node?.source_kind || 'observed')
     if (!grouped.has(sourceKind)) {
       grouped.set(sourceKind, [])
@@ -522,6 +547,49 @@ const mapLayers = computed(() => {
       radius: sourceKind === 'inferred' ? 7 : 6
     })
   })
+
+  if (graphEdges.length > 0 && nodePointById.size > 0) {
+    const features = []
+    graphEdges.forEach((edge) => {
+      if (!isKeyInteractionEdge(edge)) return
+      const sourceId = String(edge?.source_node_uuid || edge?.source || '')
+      const targetId = String(edge?.target_node_uuid || edge?.target || '')
+      const sourcePoint = nodePointById.get(sourceId)
+      const targetPoint = nodePointById.get(targetId)
+      if (!sourcePoint || !targetPoint) return
+      features.push({
+        type: 'Feature',
+        geometry: {
+          type: 'LineString',
+          coordinates: [
+            [sourcePoint.lon, sourcePoint.lat],
+            [targetPoint.lon, targetPoint.lat]
+          ]
+        },
+        properties: {
+          name: edge?.name || edge?.fact_type || 'relation',
+          color: '#a16207',
+          weight: 2,
+          opacity: 0.78,
+          fillOpacity: 0
+        }
+      })
+    })
+    if (features.length > 0) {
+      derived.push({
+        id: 'derived-key-relations',
+        name: '关键关系链路',
+        type: 'geojson',
+        color: '#a16207',
+        visible: true,
+        note: '关键交互关系线',
+        data: {
+          type: 'FeatureCollection',
+          features
+        }
+      })
+    }
+  }
 
   grouped.forEach((points, key) => {
     derived.push({

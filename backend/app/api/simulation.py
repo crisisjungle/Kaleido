@@ -6,12 +6,20 @@ Step2: Zep实体读取与过滤、OASIS模拟准备与运行（全程自动化�
 import json
 import os
 import traceback
+from typing import Any, Dict
 from flask import request, jsonify, send_file
 
 from . import simulation_bp
 from ..config import Config
 from ..services.map_seed_manager import MapSeedManager
+from ..services.graph_builder import GraphBuilderService
 from ..services.env_simulation_config_generator import normalize_search_mode
+from ..services.risk_artifact_store import load_risk_artifacts, write_risk_artifacts
+from ..services.risk_definition_builder import RiskDefinitionBuilder
+from ..services.risk_event_engine import RiskEventEngine
+from ..services.risk_runtime_tracker import RiskRuntimeTracker
+from ..services.simulation_map_projection import SimulationMapProjectionBuilder
+from ..services.simulation_realtime_graph import SimulationRealtimeGraphBuilder
 from ..services.zep_entity_reader import ZepEntityReader
 from ..services.oasis_profile_generator import OasisProfileGenerator
 from ..services.simulation_manager import SimulationManager, SimulationStatus
@@ -43,6 +51,34 @@ def optimize_interview_prompt(prompt: str) -> str:
     if prompt.startswith(INTERVIEW_PROMPT_PREFIX):
         return prompt
     return f"{INTERVIEW_PROMPT_PREFIX}{prompt}"
+
+
+def _load_risk_bundle(simulation_id: str) -> tuple[str, Dict[str, Any]]:
+    manager = SimulationManager()
+    sim_dir = manager._get_simulation_dir(simulation_id)
+    return sim_dir, load_risk_artifacts(sim_dir)
+
+
+def _sync_risk_fields_to_config(sim_dir: str, risk_bundle: Dict[str, Any]) -> None:
+    config_path = os.path.join(sim_dir, "simulation_config.json")
+    if not os.path.exists(config_path):
+        return
+    try:
+        with open(config_path, "r", encoding="utf-8") as handle:
+            config = json.load(handle)
+    except Exception:
+        return
+    config["risk_definitions"] = risk_bundle.get("risk_definitions", [])
+    config["latest_risk_runtime_state"] = risk_bundle.get("latest_risk_runtime_state", {})
+    config["risk_objects"] = risk_bundle.get("risk_objects", [])
+    summary = risk_bundle.get("risk_objects_summary") or {}
+    config["primary_risk_object_id"] = summary.get("primary_risk_object_id") or config.get("primary_risk_object_id", "")
+    config["primary_active_risk_id"] = (
+        risk_bundle.get("latest_risk_runtime_state", {}).get("primary_active_risk_id")
+        or config.get("primary_active_risk_id", "")
+    )
+    with open(config_path, "w", encoding="utf-8") as handle:
+        json.dump(config, handle, ensure_ascii=False, indent=2)
 
 
 # ============== 实体读取接口 ==============
@@ -833,23 +869,19 @@ def get_simulation(simulation_id: str):
         if state.status == SimulationStatus.READY:
             result["run_instructions"] = manager.get_run_instructions(simulation_id)
 
-        sim_dir = manager._get_simulation_dir(simulation_id)
-        risk_objects_file = os.path.join(sim_dir, "risk_objects.json")
-        risk_object_summary_file = os.path.join(sim_dir, "risk_object_summary.json")
-        if os.path.exists(risk_objects_file):
-            try:
-                with open(risk_objects_file, "r", encoding="utf-8") as handle:
-                    result["risk_objects"] = json.load(handle)
-            except Exception:
-                result["risk_objects"] = []
-        if os.path.exists(risk_object_summary_file):
-            try:
-                with open(risk_object_summary_file, "r", encoding="utf-8") as handle:
-                    summary = json.load(handle)
-                    result["risk_objects_summary"] = summary
-                    result["primary_risk_object"] = summary.get("primary_risk_object")
-            except Exception:
-                pass
+        sim_dir, risk_bundle = _load_risk_bundle(simulation_id)
+        result["risk_definitions"] = risk_bundle.get("risk_definitions", [])
+        result["latest_risk_runtime_state"] = risk_bundle.get("latest_risk_runtime_state", {})
+        result["risk_events"] = risk_bundle.get("risk_events", [])
+        result["risk_objects"] = risk_bundle.get("risk_objects", [])
+        summary = risk_bundle.get("risk_objects_summary") or {}
+        result["risk_objects_summary"] = summary
+        result["primary_risk_object"] = summary.get("primary_risk_object")
+        result["primary_active_risk_id"] = (
+            risk_bundle.get("latest_risk_runtime_state", {}).get("primary_active_risk_id")
+            or summary.get("primary_active_risk_id")
+            or ""
+        )
 
         if state.source_mode == "map_seed" and state.map_seed_id:
             graph_snapshot = MapSeedManager.get_graph_snapshot(state.map_seed_id)
@@ -875,6 +907,348 @@ def get_simulation(simulation_id: str):
             "error": str(e),
             "traceback": traceback.format_exc()
         }), 500
+
+
+@simulation_bp.route('/<simulation_id>/graph/realtime', methods=['GET'])
+def get_simulation_graph_realtime(simulation_id: str):
+    """
+    实时获取 EnvFish 推演图谱（Step2/Step3 专用）
+
+    优先返回 simulation artifacts 投影出的图谱；当 artifacts 尚未就绪时，
+    回退到 map_seed 图谱或项目原始 graph_id 图谱。
+    """
+    try:
+        include_map = request.args.get("include_map", "false").lower() in {"1", "true", "yes", "on"}
+        key_edges_only = request.args.get("key_edges_only", "true").lower() not in {"0", "false", "no", "off"}
+
+        manager = SimulationManager()
+        state = manager.get_simulation(simulation_id)
+        if not state:
+            return jsonify({
+                "success": False,
+                "error": f"模拟不存在: {simulation_id}"
+            }), 404
+
+        sim_dir = manager._get_simulation_dir(simulation_id)
+        realtime_graph = SimulationRealtimeGraphBuilder(sim_dir).build()
+        source = "envfish_realtime"
+        has_envfish_projection = bool(realtime_graph.get("nodes") or realtime_graph.get("edges"))
+        fallback_used = False
+
+        if not has_envfish_projection:
+            fallback_graph = None
+            if state.source_mode == "map_seed" and state.map_seed_id:
+                snapshot = MapSeedManager.get_graph_snapshot(state.map_seed_id)
+                if snapshot:
+                    fallback_graph = snapshot.get("graph_data") or snapshot
+                    source = "map_seed_snapshot"
+
+            if fallback_graph is None and state.graph_id and Config.ZEP_API_KEY:
+                try:
+                    builder = GraphBuilderService(api_key=Config.ZEP_API_KEY)
+                    fallback_graph = builder.get_graph_data(state.graph_id)
+                    source = "project_graph"
+                except Exception as exc:
+                    logger.warning(f"实时图谱回退到 project graph 失败: simulation_id={simulation_id}, error={exc}")
+
+            if fallback_graph:
+                realtime_graph = {
+                    "nodes": list(fallback_graph.get("nodes") or []),
+                    "edges": list(fallback_graph.get("edges") or []),
+                    "meta": {
+                        "node_count": len(list(fallback_graph.get("nodes") or [])),
+                        "edge_count": len(list(fallback_graph.get("edges") or [])),
+                    },
+                }
+                fallback_used = True
+
+        map_projection = None
+        if include_map:
+            projection_builder = SimulationMapProjectionBuilder(
+                sim_dir=sim_dir,
+                simulation_id=simulation_id,
+                map_seed_id=state.map_seed_id if state.map_seed_id else None,
+                source_mode=state.source_mode,
+            )
+            map_projection = projection_builder.build(
+                realtime_graph,
+                key_edges_only=key_edges_only,
+            )
+
+        return jsonify({
+            "success": True,
+            "data": {
+                "simulation_id": simulation_id,
+                "source": source,
+                "fallback_used": fallback_used,
+                "has_envfish_projection": has_envfish_projection,
+                "graph_data": realtime_graph,
+                "map_projection": map_projection,
+            }
+        })
+
+    except Exception as e:
+        logger.error(f"获取实时图谱失败: {str(e)}")
+        return jsonify({
+            "success": False,
+            "error": str(e),
+            "traceback": traceback.format_exc()
+        }), 500
+
+
+@simulation_bp.route('/<simulation_id>/risk/definitions', methods=['GET'])
+def get_risk_definitions(simulation_id: str):
+    try:
+        _, risk_bundle = _load_risk_bundle(simulation_id)
+        return jsonify({
+            "success": True,
+            "data": {
+                "simulation_id": simulation_id,
+                "risk_definitions": risk_bundle.get("risk_definitions", []),
+                "count": len(risk_bundle.get("risk_definitions", [])),
+                "primary_risk_id": (
+                    risk_bundle.get("risk_objects_summary", {}).get("primary_risk_object_id")
+                    or risk_bundle.get("latest_risk_runtime_state", {}).get("primary_active_risk_id")
+                    or ""
+                ),
+            }
+        })
+    except Exception as e:
+        logger.error(f"获取风险定义失败: {str(e)}")
+        return jsonify({"success": False, "error": str(e), "traceback": traceback.format_exc()}), 500
+
+
+@simulation_bp.route('/<simulation_id>/risk/runtime', methods=['GET'])
+def get_risk_runtime(simulation_id: str):
+    try:
+        _, risk_bundle = _load_risk_bundle(simulation_id)
+        runtime_history = list(risk_bundle.get("risk_runtime_history") or [])
+        latest_runtime = dict(risk_bundle.get("latest_risk_runtime_state") or {})
+        requested_round = request.args.get("round", type=int)
+        if requested_round is not None and runtime_history:
+            matched = next((item for item in reversed(runtime_history) if int(item.get("round") or -1) == requested_round), None)
+            if matched:
+                latest_runtime = matched
+        risk_states = list(latest_runtime.get("risk_states") or [])
+        pinned_ids = set(latest_runtime.get("pinned_risk_ids") or [])
+        active_only = request.args.get("active_only", "false").lower() == "true"
+        pinned_only = request.args.get("pinned_only", "false").lower() == "true"
+        if active_only:
+            risk_states = [
+                item for item in risk_states
+                if float(item.get("severity_score") or 0) >= 35
+                or str(item.get("trend") or "") in {"rising", "falling"}
+                or len(item.get("active_step_ids") or []) > 0
+            ]
+        if pinned_only:
+            risk_states = [item for item in risk_states if str(item.get("risk_id") or "") in pinned_ids]
+        latest_runtime["risk_states"] = risk_states
+        return jsonify({
+            "success": True,
+            "data": {
+                "simulation_id": simulation_id,
+                "latest_risk_runtime_state": latest_runtime,
+                "count": len(risk_states),
+            }
+        })
+    except Exception as e:
+        logger.error(f"获取风险运行态失败: {str(e)}")
+        return jsonify({"success": False, "error": str(e), "traceback": traceback.format_exc()}), 500
+
+
+@simulation_bp.route('/<simulation_id>/risk/events', methods=['GET'])
+def get_risk_events(simulation_id: str):
+    try:
+        _, risk_bundle = _load_risk_bundle(simulation_id)
+        risk_id = str(request.args.get("risk_id") or "").strip()
+        limit = request.args.get("limit", type=int)
+        events = list(risk_bundle.get("risk_events") or [])
+        if risk_id:
+            events = [item for item in events if str(item.get("risk_id") or "") == risk_id]
+        if limit is not None and limit > 0 and len(events) > limit:
+            events = events[-limit:]
+        return jsonify({
+            "success": True,
+            "data": {
+                "simulation_id": simulation_id,
+                "risk_events": events,
+                "count": len(events),
+            }
+        })
+    except Exception as e:
+        logger.error(f"获取风险事件失败: {str(e)}")
+        return jsonify({"success": False, "error": str(e), "traceback": traceback.format_exc()}), 500
+
+
+@simulation_bp.route('/<simulation_id>/risk/pin', methods=['POST'])
+def update_risk_pin(simulation_id: str):
+    try:
+        data = request.get_json() or {}
+        sim_dir, risk_bundle = _load_risk_bundle(simulation_id)
+        latest_runtime = dict(risk_bundle.get("latest_risk_runtime_state") or {})
+        pinned_risk_ids = []
+        for item in data.get("pinned_risk_ids") or []:
+            risk_id = str(item or "").strip()
+            if risk_id and risk_id not in pinned_risk_ids:
+                pinned_risk_ids.append(risk_id)
+        latest_runtime["pinned_risk_ids"] = pinned_risk_ids
+        if not latest_runtime.get("primary_active_risk_id") and pinned_risk_ids:
+            latest_runtime["primary_active_risk_id"] = pinned_risk_ids[0]
+        runtime_history = list(risk_bundle.get("risk_runtime_history") or [])
+        if runtime_history and int(runtime_history[-1].get("round") or -1) == int(latest_runtime.get("round") or -2):
+            runtime_history[-1] = latest_runtime
+        else:
+            runtime_history.append(latest_runtime)
+        updated = write_risk_artifacts(
+            sim_dir=sim_dir,
+            risk_definitions=risk_bundle.get("risk_definitions", []),
+            latest_runtime_bundle=latest_runtime,
+            primary_risk_id=str(
+                (risk_bundle.get("risk_objects_summary") or {}).get("primary_risk_object_id")
+                or latest_runtime.get("primary_active_risk_id")
+                or ""
+            ),
+            generation_notes=list((risk_bundle.get("risk_objects_summary") or {}).get("generation_notes") or []),
+            risk_events=risk_bundle.get("risk_events", []),
+            rewrite_runtime_history=runtime_history,
+        )
+        _sync_risk_fields_to_config(sim_dir, updated)
+        return jsonify({
+            "success": True,
+            "data": {
+                "simulation_id": simulation_id,
+                "pinned_risk_ids": pinned_risk_ids,
+                "primary_active_risk_id": latest_runtime.get("primary_active_risk_id"),
+            }
+        })
+    except Exception as e:
+        logger.error(f"更新风险 pin 失败: {str(e)}")
+        return jsonify({"success": False, "error": str(e), "traceback": traceback.format_exc()}), 500
+
+
+@simulation_bp.route('/<simulation_id>/risk/reframe', methods=['POST'])
+def reframe_risks(simulation_id: str):
+    try:
+        data = request.get_json() or {}
+        manager = SimulationManager()
+        config = manager.get_simulation_config(simulation_id) or {}
+        sim_dir, risk_bundle = _load_risk_bundle(simulation_id)
+        regions = []
+        profiles = []
+        region_graph_path = os.path.join(sim_dir, "region_graph_snapshot.json")
+        profiles_path = os.path.join(sim_dir, "profiles_full.json")
+        latest_snapshot_path = os.path.join(sim_dir, "latest_round_snapshot.json")
+        injected_variables_path = os.path.join(sim_dir, "injected_variables.json")
+        if os.path.exists(region_graph_path):
+            with open(region_graph_path, "r", encoding="utf-8") as handle:
+                regions = json.load(handle)
+        else:
+            regions = config.get("region_graph") or []
+        if os.path.exists(profiles_path):
+            with open(profiles_path, "r", encoding="utf-8") as handle:
+                profiles = json.load(handle)
+        else:
+            profiles = config.get("actor_profiles") or []
+        if os.path.exists(injected_variables_path):
+            with open(injected_variables_path, "r", encoding="utf-8") as handle:
+                injected_variables = json.load(handle)
+        else:
+            injected_variables = config.get("injected_variables") or []
+        latest_snapshot = {}
+        if os.path.exists(latest_snapshot_path):
+            with open(latest_snapshot_path, "r", encoding="utf-8") as handle:
+                latest_snapshot = json.load(handle)
+
+        builder = RiskDefinitionBuilder()
+        tracker = RiskRuntimeTracker()
+        event_engine = RiskEventEngine()
+        reframe_result = builder.reframe_runtime(
+            existing_definitions=risk_bundle.get("risk_definitions", []),
+            regions=regions,
+            profiles=profiles,
+            injected_variables=injected_variables,
+            current_round=int(
+                data.get("round")
+                or (risk_bundle.get("latest_risk_runtime_state") or {}).get("round")
+                or 0
+            ),
+            scenario_mode=str(config.get("scenario_mode") or "baseline_mode"),
+            diffusion_template=str(config.get("diffusion_template") or "marine"),
+        )
+        latest_runtime = tracker.refresh(
+            risk_definitions=reframe_result.get("risk_definitions", []),
+            snapshot=latest_snapshot or None,
+            previous_bundle=risk_bundle.get("latest_risk_runtime_state", {}),
+            risk_events=risk_bundle.get("risk_events", []),
+            primary_hint=str(
+                (risk_bundle.get("latest_risk_runtime_state") or {}).get("primary_active_risk_id")
+                or reframe_result.get("primary_risk_id")
+                or ""
+            ),
+            pinned_risk_ids=list((risk_bundle.get("latest_risk_runtime_state") or {}).get("pinned_risk_ids") or []),
+            refresh_reason="manual_reframe",
+        ) if latest_snapshot else tracker.build_initial_bundle(
+            risk_definitions=reframe_result.get("risk_definitions", []),
+            primary_risk_id=str(
+                reframe_result.get("primary_risk_id")
+                or (risk_bundle.get("latest_risk_runtime_state") or {}).get("primary_active_risk_id")
+                or ""
+            ),
+            source_risk_objects=risk_bundle.get("risk_objects", []),
+        )
+
+        risk_events = list(risk_bundle.get("risk_events") or [])
+        for risk_id in reframe_result.get("created_risk_ids") or []:
+            risk_events.append(
+                event_engine.build_reframed_event(
+                    risk_id=risk_id,
+                    round_num=int(latest_runtime.get("round") or 0),
+                    source_ref="manual:reframe",
+                    summary="手动重新框定后创建新的风险链路。",
+                )
+            )
+        for risk_id in reframe_result.get("updated_risk_ids") or []:
+            risk_events.append(
+                event_engine.build_reframed_event(
+                    risk_id=risk_id,
+                    round_num=int(latest_runtime.get("round") or 0),
+                    source_ref="manual:reframe",
+                    summary="手动重新框定后刷新已有风险链路。",
+                )
+            )
+        runtime_history = list(risk_bundle.get("risk_runtime_history") or [])
+        if runtime_history and int(runtime_history[-1].get("round") or -1) == int(latest_runtime.get("round") or -2):
+            runtime_history[-1] = latest_runtime
+        else:
+            runtime_history.append(latest_runtime)
+        updated = write_risk_artifacts(
+            sim_dir=sim_dir,
+            risk_definitions=reframe_result.get("risk_definitions", []),
+            latest_runtime_bundle=latest_runtime,
+            primary_risk_id=str(
+                (risk_bundle.get("risk_objects_summary") or {}).get("primary_risk_object_id")
+                or reframe_result.get("primary_risk_id")
+                or latest_runtime.get("primary_active_risk_id")
+                or ""
+            ),
+            generation_notes=list((risk_bundle.get("risk_objects_summary") or {}).get("generation_notes") or []),
+            risk_events=risk_events,
+            rewrite_runtime_history=runtime_history,
+        )
+        _sync_risk_fields_to_config(sim_dir, updated)
+        return jsonify({
+            "success": True,
+            "data": {
+                "simulation_id": simulation_id,
+                "created_risk_ids": reframe_result.get("created_risk_ids", []),
+                "updated_risk_ids": reframe_result.get("updated_risk_ids", []),
+                "primary_active_risk_id": latest_runtime.get("primary_active_risk_id"),
+                "pinned_risk_ids": latest_runtime.get("pinned_risk_ids", []),
+            }
+        })
+    except Exception as e:
+        logger.error(f"重新框定风险失败: {str(e)}")
+        return jsonify({"success": False, "error": str(e), "traceback": traceback.format_exc()}), 500
 
 
 @simulation_bp.route('/list', methods=['GET'])
@@ -2055,7 +2429,17 @@ def get_run_status_detail(simulation_id: str):
             result["envfish"] = envfish_artifacts
             result["region_graph"] = envfish_artifacts.get("region_graph", [])
             result["subregion_graph"] = envfish_artifacts.get("subregion_graph", [])
+            result["risk_definitions"] = envfish_artifacts.get("risk_definitions", [])
+            result["latest_risk_runtime_state"] = envfish_artifacts.get("latest_risk_runtime_state", {})
+            result["risk_runtime_history"] = envfish_artifacts.get("risk_runtime_history", [])
+            result["risk_events"] = envfish_artifacts.get("risk_events", [])
+            result["primary_active_risk_id"] = (
+                envfish_artifacts.get("latest_risk_runtime_state", {}).get("primary_active_risk_id")
+                or (envfish_artifacts.get("risk_objects_summary") or {}).get("primary_active_risk_id")
+                or ""
+            )
             result["risk_objects"] = envfish_artifacts.get("risk_objects", [])
+            result["risk_objects_summary"] = envfish_artifacts.get("risk_objects_summary") or {}
             result["primary_risk_object"] = envfish_artifacts.get("primary_risk_object")
             result["round_snapshots"] = envfish_artifacts.get("round_snapshots", [])
             result["latest_snapshot"] = envfish_artifacts.get("latest_snapshot")

@@ -38,10 +38,6 @@
         <strong>{{ templateLabel }}</strong>
       </div>
       <div class="status-card">
-        <span>Search</span>
-        <strong>{{ searchModeLabel }}</strong>
-      </div>
-      <div class="status-card">
         <span>Regions</span>
         <strong>{{ regionRows.length }}</strong>
       </div>
@@ -868,8 +864,7 @@ const props = defineProps({
   graphData: Object,
   systemLogs: Array,
   initialScenarioMode: String,
-  initialDiffusionTemplate: String,
-  initialSearchMode: String
+  initialDiffusionTemplate: String
 })
 
 const emit = defineEmits(['go-back', 'next-step', 'add-log', 'update-status', 'risk-object-focus'])
@@ -886,7 +881,6 @@ const simulationSnapshot = ref(null)
 const configSnapshot = ref(null)
 const currentScenarioMode = ref(props.initialScenarioMode || route.query.scenario_mode || 'baseline_mode')
 const currentTemplate = ref(props.initialDiffusionTemplate || route.query.diffusion_template || 'marine')
-const currentSearchMode = ref(props.initialSearchMode || route.query.search_mode || 'fast')
 const roundIndex = ref(0)
 const selectedScoreKey = ref('vulnerability_score')
 const injectionHistory = ref([])
@@ -908,10 +902,6 @@ const scenarioLabel = computed(() => {
 const templateLabel = computed(() => {
   const map = { air: 'air', inland_water: 'inland_water', marine: 'marine' }
   return map[currentTemplate.value] || currentTemplate.value || 'marine'
-})
-
-const searchModeLabel = computed(() => {
-  return currentSearchMode.value === 'deep_search' ? 'deep search' : 'fast'
 })
 
 const totalRoundsLabel = computed(() => {
@@ -1916,7 +1906,6 @@ async function startRun() {
       platform: 'envfish',
       scenario_mode: currentScenarioMode.value,
       diffusion_template: currentTemplate.value,
-      search_mode: currentSearchMode.value,
       max_rounds: props.maxRounds || undefined,
       enable_graph_memory_update: true,
       force: true
@@ -1926,7 +1915,7 @@ async function startRun() {
       runStatus.value = res.data
       addLog('✓ EnvFish 推演引擎已启动')
       addLog(`  ├─ PID: ${res.data.process_pid || '-'}`)
-      addLog(`  └─ 模式: ${currentScenarioMode.value} / ${currentTemplate.value} / ${currentSearchMode.value}`)
+      addLog(`  └─ 模式: ${currentScenarioMode.value} / ${currentTemplate.value}`)
       startPolling()
       await refreshStatus()
       await refreshDetail()
@@ -2012,14 +2001,12 @@ async function refreshSimulationContext() {
       simulationSnapshot.value = simulationRes.value.data || null
       currentScenarioMode.value = simulationSnapshot.value?.scenario_mode || currentScenarioMode.value
       currentTemplate.value = simulationSnapshot.value?.diffusion_template || currentTemplate.value
-      currentSearchMode.value = simulationSnapshot.value?.search_mode || currentSearchMode.value
     }
 
     if (configRes.status === 'fulfilled' && configRes.value?.success && configRes.value.data) {
       configSnapshot.value = configRes.value.data
       if (configRes.value.data.scenario_mode) currentScenarioMode.value = configRes.value.data.scenario_mode
       if (configRes.value.data.diffusion_template) currentTemplate.value = configRes.value.data.diffusion_template
-      if (configRes.value.data.search_mode) currentSearchMode.value = configRes.value.data.search_mode
       if (configRes.value.data.max_rounds) roundIndex.value = 0
       if (configRes.value.data.time_config?.minutes_per_round) {
         addLog(`时间粒度: ${configRes.value.data.time_config.minutes_per_round} min / round`)
@@ -2037,7 +2024,6 @@ async function refreshStatus() {
     const res = await getRunStatus(props.simulationId)
     if (res.success && res.data) {
       runStatus.value = res.data
-      if (runStatus.value.search_mode) currentSearchMode.value = runStatus.value.search_mode
       if (runStatus.value.current_round !== undefined) {
         const latestIndex = Math.max((roundSnapshots.value.length || 1) - 1, 0)
         roundIndex.value = latestIndex
@@ -2104,13 +2090,6 @@ watch(
 )
 
 watch(
-  () => props.initialSearchMode,
-  (value) => {
-    if (value) currentSearchMode.value = value
-  }
-)
-
-watch(
   () => roundSnapshots.value.length,
   (value) => {
     if (value > 0) {
@@ -2165,8 +2144,7 @@ onUnmounted(() => {
   flex-direction: column;
   gap: 14px;
   padding: 18px;
-  overflow-y: auto;
-  overflow-x: hidden;
+  overflow: hidden;
   background:
     radial-gradient(circle at top left, rgba(255, 191, 105, 0.18), transparent 30%),
     radial-gradient(circle at top right, rgba(28, 196, 135, 0.16), transparent 28%),
@@ -2291,10 +2269,13 @@ onUnmounted(() => {
 
 .workspace-shell {
   display: flex;
+  flex: 1;
+  min-height: 0;
   flex-direction: column;
   gap: 18px;
   padding: 18px;
   border-radius: 28px;
+  overflow: hidden;
 }
 
 .workspace-topbar {
@@ -2396,6 +2377,9 @@ onUnmounted(() => {
 }
 
 .workspace-panel {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
   display: flex;
   flex-direction: column;
   gap: 14px;
@@ -2453,15 +2437,20 @@ onUnmounted(() => {
 
 .overview-main-grid {
   grid-template-columns: minmax(0, 1.15fr) minmax(320px, 0.85fr);
+  min-height: 0;
+  flex: 1;
 }
 
 .inject-grid {
   grid-template-columns: minmax(0, 1.05fr) minmax(320px, 0.95fr);
+  min-height: 0;
+  flex: 1;
 }
 
 .control-panel.embedded,
 .pulse-panel,
 .log-panel {
+  min-height: 0;
 }
 
 .pulse-panel,
@@ -2657,6 +2646,7 @@ onUnmounted(() => {
 
 .mini-panel {
   min-width: 0;
+  min-height: 0;
   border-radius: 18px;
   padding: 14px;
   background: linear-gradient(180deg, #fff, #f8fbff);
@@ -3025,6 +3015,8 @@ onUnmounted(() => {
 .panel {
   border-radius: 24px;
   padding: 16px;
+  min-height: 0;
+  overflow: auto;
 }
 
 .matrix-head,
