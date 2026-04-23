@@ -1,9 +1,9 @@
 services:
-  envfish:
-    image: ghcr.io/crisisjungle/envfish:latest
+  kaleido:
+    image: ghcr.io/crisisjungle/kaleido:latest
     # 加速镜像（如拉取缓慢可替换上方地址）
-    # image: ghcr.nju.edu.cn/crisisjungle/envfish:latest
-    container_name: envfish
+    # image: ghcr.nju.edu.cn/crisisjungle/kaleido:latest
+    container_name: kaleido
     env_file:
       - .env
     ports:

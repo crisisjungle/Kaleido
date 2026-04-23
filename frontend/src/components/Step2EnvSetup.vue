@@ -1,9 +1,9 @@
 <template>
-  <EnvFishStep2 v-bind="$attrs" />
+  <KaleidoStep2 v-bind="$attrs" />
 </template>
 
 <script setup>
-import EnvFishStep2 from './EnvFishStep2.vue'
+import KaleidoStep2 from './KaleidoStep2.vue'
 
 defineOptions({ inheritAttrs: false })
 </script>

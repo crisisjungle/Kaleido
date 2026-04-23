@@ -10,6 +10,14 @@
         <div class="mode-switch">
           <button
             class="mode-btn"
+            :class="{ active: graphMode === 'map' }"
+            @click="setGraphMode('map')"
+            title="地图关系"
+          >
+            地图
+          </button>
+          <button
+            class="mode-btn"
             :class="{ active: graphMode === '2d' }"
             @click="setGraphMode('2d')"
             title="2D 图谱"
@@ -36,8 +44,23 @@
     </div>
     
     <div class="graph-container" ref="graphContainer">
+      <MapRelationPanel
+        v-show="graphMode === 'map'"
+        class="embedded-map-panel"
+        :mapData="mapData"
+        :loading="loading"
+        :highlightNodeIds="highlightNodeIds"
+        :highlightNodeNames="highlightNodeNames"
+        :highlightEdgeIds="highlightEdgeIds"
+        :highlightLabel="highlightLabel"
+        :highlightMode="highlightMode"
+        embedded
+        @refresh="$emit('refresh')"
+        @toggle-maximize="$emit('toggle-maximize')"
+      />
+
       <!-- 图谱可视化 -->
-      <div v-if="hasGraphContent" class="graph-view">
+      <div v-if="hasGraphContent" v-show="graphMode !== 'map'" class="graph-view">
         <svg v-show="graphMode === '2d'" ref="graphSvg" class="graph-svg"></svg>
         <div v-show="graphMode === '3d'" ref="graph3dContainer" class="graph-3d-view"></div>
         
@@ -230,22 +253,49 @@
           </div>
         </div>
       </div>
-      
-      <!-- 加载状态 -->
-      <div v-else-if="loading" class="graph-state">
+
+      <!-- Step 2 图谱准备态 -->
+      <div v-if="graphMode !== 'map' && !hasGraphContent && showSceneDesignLoadingState" class="graph-state graph-state-network">
+        <div class="network-loader" aria-hidden="true">
+          <span class="network-ring ring-a"></span>
+          <span class="network-ring ring-b"></span>
+          <span class="network-ring ring-c"></span>
+          <span class="network-node node-core"></span>
+          <span class="network-node node-top"></span>
+          <span class="network-node node-right"></span>
+          <span class="network-node node-bottom"></span>
+          <span class="network-node node-left"></span>
+          <span class="network-link link-top"></span>
+          <span class="network-link link-right"></span>
+          <span class="network-link link-bottom"></span>
+          <span class="network-link link-left"></span>
+        </div>
+        <p class="graph-state-title">{{ loading ? '图谱正在接入场景设计' : '场景图谱准备中' }}</p>
+        <p class="graph-state-subtitle">
+          {{ loading ? '正在同步区域、主体和关系节点，请稍候。' : '区域、主体和交互关系会在图谱就绪后自动填入右侧配置。' }}
+        </p>
+        <div class="graph-loading-tags">
+          <span class="loading-tag">区域骨架</span>
+          <span class="loading-tag">主体锚点</span>
+          <span class="loading-tag">关系网络</span>
+        </div>
+      </div>
+
+      <!-- 通用加载状态 -->
+      <div v-else-if="graphMode !== 'map' && loading" class="graph-state">
         <div class="loading-spinner"></div>
         <p>图谱数据加载中...</p>
       </div>
       
       <!-- 等待/空状态 -->
-      <div v-else class="graph-state">
+      <div v-else-if="graphMode !== 'map'" class="graph-state">
         <div class="empty-icon">❖</div>
         <p class="empty-text">{{ currentPhase === 4 ? '结果图谱暂无可用节点' : '等待本体生成...' }}</p>
       </div>
     </div>
 
     <!-- 底部图例 (Bottom Left) -->
-    <div v-if="hasGraphContent && entityTypes.length" class="graph-legend">
+    <div v-if="hasGraphContent && graphMode !== 'map' && entityTypes.length" class="graph-legend">
       <span class="legend-title">Entity Types</span>
       <div class="legend-items">
         <div class="legend-item" v-for="type in entityTypes" :key="type.name">
@@ -269,9 +319,14 @@
 <script setup>
 import { ref, onMounted, onUnmounted, watch, nextTick, computed } from 'vue'
 import * as d3 from 'd3'
+import MapRelationPanel from './MapRelationPanel.vue'
 
 const props = defineProps({
   graphData: Object,
+  mapData: {
+    type: Object,
+    default: null
+  },
   loading: Boolean,
   currentPhase: Number,
   isSimulating: Boolean,
@@ -307,14 +362,14 @@ const graphContainer = ref(null)
 const graphSvg = ref(null)
 const graph3dContainer = ref(null)
 const selectedItem = ref(null)
-const showEdgeLabels = ref(true) // 默认显示边标签
-const graphMode = ref('2d')
+const showEdgeLabels = ref(false)
+const graphMode = ref('map')
 const expandedSelfLoops = ref(new Set()) // 展开的自环项
 const showSimulationFinishedHint = ref(false) // 模拟结束后的提示
 const wasSimulating = ref(false) // 追踪之前是否在模拟中
 
 const setGraphMode = (mode) => {
-  graphMode.value = mode === '3d' ? '3d' : '2d'
+  graphMode.value = ['map', '2d', '3d'].includes(mode) ? mode : '2d'
 }
 
 const normalizeHighlightToken = (value) => String(value || '').trim().toLowerCase()
@@ -369,6 +424,9 @@ const dismissFinishedHint = () => {
 
 // 监听 isSimulating 变化，检测模拟结束
 watch(() => props.isSimulating, (newValue, oldValue) => {
+  if (newValue) {
+    showEdgeLabels.value = false
+  }
   if (wasSimulating.value && !newValue) {
     // 从模拟中变为非模拟状态，显示结束提示
     showSimulationFinishedHint.value = true
@@ -408,6 +466,10 @@ const hasGraphContent = computed(() => {
   const nodes = props.graphData?.nodes || []
   const edges = props.graphData?.edges || []
   return nodes.length > 0 || edges.length > 0
+})
+
+const showSceneDesignLoadingState = computed(() => {
+  return props.currentPhase === 2 && !hasGraphContent.value
 })
 
 // 格式化时间
@@ -463,6 +525,18 @@ let graph3DInstance = null
 let forceGraph3DFactory = null
 let THREERef = null
 let SpriteTextClass = null
+let renderFrame = null
+let resizeTimer = null
+
+const scheduleGraphRender = () => {
+  if (renderFrame !== null) {
+    cancelAnimationFrame(renderFrame)
+  }
+  renderFrame = requestAnimationFrame(() => {
+    renderFrame = null
+    void renderActiveGraph()
+  })
+}
 
 const load3DDeps = async () => {
   if (forceGraph3DFactory && THREERef && SpriteTextClass) {
@@ -831,6 +905,11 @@ const renderGraph3D = async () => {
 }
 
 const renderActiveGraph = async () => {
+  if (graphMode.value === 'map') {
+    stop2DSimulation()
+    destroy3DGraph()
+    return
+  }
   if (graphMode.value === '3d') {
     await renderGraph3D()
   } else {
@@ -1022,6 +1101,12 @@ const renderGraph = () => {
       }
     })
   })
+
+  edges.forEach(edge => {
+    const label = String(edge.name || '')
+    edge.labelWidth = Math.min(180, Math.max(28, label.length * 5.8 + 10))
+    edge.labelHeight = 14
+  })
     
   // Color scale
   const colorMap = {}
@@ -1039,6 +1124,8 @@ const renderGraph = () => {
   // Simulation - 根据边数量动态调整节点间距
   const simulation = d3.forceSimulation(nodes)
     .alpha(oldNodeMap.size > 0 ? 0.3 : 1) // 降低热度避免图谱位置突变跳动
+    .alphaDecay(oldNodeMap.size > 0 ? 0.09 : 0.06)
+    .velocityDecay(0.55)
     .force('link', d3.forceLink(edges).id(d => d.id).distance(d => {
       // 根据这对节点之间的边数量动态调整距离
       // 基础距离 150，每多一条边增加 40
@@ -1340,31 +1427,37 @@ const renderGraph = () => {
 
   applyBaseGraphState()
 
+  const maxTicks = oldNodeMap.size > 0 ? 70 : 140
+  let tickCount = 0
+
   simulation.on('tick', () => {
+    tickCount += 1
     // 更新曲线路径
     link.attr('d', d => getLinkPath(d))
     
-    // 更新边标签位置（无旋转，水平显示更清晰）
-    linkLabels.each(function(d) {
-      const mid = getLinkMidpoint(d)
-      d3.select(this)
-        .attr('x', mid.x)
-        .attr('y', mid.y)
-        .attr('transform', '') // 移除旋转，保持水平
-    })
-    
-    // 更新边标签背景
-    linkLabelBg.each(function(d, i) {
-      const mid = getLinkMidpoint(d)
-      const textEl = linkLabels.nodes()[i]
-      const bbox = textEl.getBBox()
-      d3.select(this)
-        .attr('x', mid.x - bbox.width / 2 - 4)
-        .attr('y', mid.y - bbox.height / 2 - 2)
-        .attr('width', bbox.width + 8)
-        .attr('height', bbox.height + 4)
-        .attr('transform', '') // 移除旋转
-    })
+    if (showEdgeLabels.value) {
+      // 更新边标签位置（无旋转，水平显示更清晰）
+      linkLabels.each(function(d) {
+        const mid = getLinkMidpoint(d)
+        d3.select(this)
+          .attr('x', mid.x)
+          .attr('y', mid.y)
+          .attr('transform', '') // 移除旋转，保持水平
+      })
+
+      // 使用预估尺寸，避免在每个 tick 中触发 getBBox() 同步布局。
+      linkLabelBg.each(function(d) {
+        const mid = getLinkMidpoint(d)
+        const width = d.labelWidth || 36
+        const height = d.labelHeight || 14
+        d3.select(this)
+          .attr('x', mid.x - width / 2 - 4)
+          .attr('y', mid.y - height / 2 - 2)
+          .attr('width', width + 8)
+          .attr('height', height + 4)
+          .attr('transform', '') // 移除旋转
+      })
+    }
 
     node
       .attr('cx', d => d.x)
@@ -1373,6 +1466,10 @@ const renderGraph = () => {
     nodeLabels
       .attr('x', d => d.x)
       .attr('y', d => d.y)
+
+    if (tickCount >= maxTicks) {
+      simulation.stop()
+    }
   })
   
   // 点击空白处关闭详情面板
@@ -1383,15 +1480,21 @@ const renderGraph = () => {
 }
 
 watch(() => props.graphData, () => {
-  nextTick(() => { void renderActiveGraph() })
-}, { deep: true })
+  nextTick(scheduleGraphRender)
+})
 
 watch(
-  () => [props.highlightLabel, props.highlightNodeIds, props.highlightNodeNames, props.highlightEdgeIds, props.highlightMode, graphMode.value],
+  () => [
+    props.highlightLabel,
+    (props.highlightNodeIds || []).join('|'),
+    (props.highlightNodeNames || []).join('|'),
+    (props.highlightEdgeIds || []).join('|'),
+    props.highlightMode,
+    graphMode.value
+  ],
   () => {
-    nextTick(() => { void renderActiveGraph() })
-  },
-  { deep: true }
+    nextTick(scheduleGraphRender)
+  }
 )
 
 // 监听边标签显示开关
@@ -1402,19 +1505,36 @@ watch(showEdgeLabels, (newVal) => {
   if (linkLabelBgRef) {
     linkLabelBgRef.style('display', newVal ? 'block' : 'none')
   }
+  if (newVal) {
+    nextTick(scheduleGraphRender)
+  }
 })
 
 const handleResize = () => {
-  nextTick(() => { void renderActiveGraph() })
+  if (resizeTimer) {
+    clearTimeout(resizeTimer)
+  }
+  resizeTimer = window.setTimeout(() => {
+    resizeTimer = null
+    nextTick(scheduleGraphRender)
+  }, 120)
 }
 
 onMounted(() => {
   window.addEventListener('resize', handleResize)
-  nextTick(() => { void renderActiveGraph() })
+  nextTick(scheduleGraphRender)
 })
 
 onUnmounted(() => {
   window.removeEventListener('resize', handleResize)
+  if (resizeTimer) {
+    clearTimeout(resizeTimer)
+    resizeTimer = null
+  }
+  if (renderFrame !== null) {
+    cancelAnimationFrame(renderFrame)
+    renderFrame = null
+  }
   stop2DSimulation()
   destroy3DGraph()
 })
@@ -1437,7 +1557,7 @@ onUnmounted(() => {
   left: 0;
   right: 0;
   padding: 16px 20px;
-  z-index: 10;
+  z-index: 1200;
   display: flex;
   justify-content: space-between;
   align-items: center;
@@ -1555,6 +1675,11 @@ onUnmounted(() => {
   height: 100%;
 }
 
+.embedded-map-panel {
+  width: 100%;
+  height: 100%;
+}
+
 .graph-view, .graph-svg {
   width: 100%;
   height: 100%;
@@ -1574,12 +1699,207 @@ onUnmounted(() => {
   transform: translate(-50%, -50%);
   text-align: center;
   color: #999;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  width: min(420px, calc(100% - 48px));
+}
+
+.graph-state-network {
+  color: #123127;
+}
+
+.network-loader {
+  position: relative;
+  width: 210px;
+  height: 210px;
+  margin-bottom: 4px;
+}
+
+.network-ring,
+.network-node,
+.network-link {
+  position: absolute;
+  display: block;
+}
+
+.network-ring {
+  inset: 0;
+  border-radius: 50%;
+  border: 1px solid rgba(31, 125, 93, 0.14);
+}
+
+.ring-a {
+  animation: graphPulse 2.8s ease-out infinite;
+}
+
+.ring-b {
+  inset: 24px;
+  animation: graphPulse 2.8s ease-out 0.45s infinite;
+}
+
+.ring-c {
+  inset: 48px;
+  animation: graphPulse 2.8s ease-out 0.9s infinite;
+}
+
+.network-node {
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: linear-gradient(135deg, #1f7d5d, #f08a24);
+  box-shadow: 0 0 0 8px rgba(240, 138, 36, 0.08);
+}
+
+.node-core {
+  top: 98px;
+  left: 98px;
+  width: 18px;
+  height: 18px;
+  background: linear-gradient(135deg, #174c3a, #1f7d5d);
+  box-shadow: 0 0 0 12px rgba(31, 125, 93, 0.12);
+  animation: graphNodeBeat 1.8s ease-in-out infinite;
+}
+
+.node-top {
+  top: 26px;
+  left: 98px;
+  animation: graphNodeFloat 2.4s ease-in-out infinite;
+}
+
+.node-right {
+  top: 98px;
+  right: 26px;
+  animation: graphNodeFloat 2.4s ease-in-out 0.4s infinite;
+}
+
+.node-bottom {
+  bottom: 26px;
+  left: 98px;
+  animation: graphNodeFloat 2.4s ease-in-out 0.8s infinite;
+}
+
+.node-left {
+  top: 98px;
+  left: 26px;
+  animation: graphNodeFloat 2.4s ease-in-out 1.2s infinite;
+}
+
+.network-link {
+  top: 105px;
+  left: 105px;
+  transform-origin: left center;
+  height: 2px;
+  width: 72px;
+  border-radius: 999px;
+  background: linear-gradient(90deg, rgba(31, 125, 93, 0.85), rgba(240, 138, 36, 0.2));
+  animation: graphLinkPulse 1.8s ease-in-out infinite;
+}
+
+.link-top {
+  transform: rotate(-90deg);
+}
+
+.link-right {
+  transform: rotate(0deg);
+  animation-delay: 0.25s;
+}
+
+.link-bottom {
+  transform: rotate(90deg);
+  animation-delay: 0.5s;
+}
+
+.link-left {
+  transform: rotate(180deg);
+  animation-delay: 0.75s;
+}
+
+.graph-state-title {
+  margin: 0;
+  font-size: 22px;
+  line-height: 1.2;
+  font-weight: 700;
+  color: #123127;
+}
+
+.graph-state-subtitle {
+  margin: 0;
+  max-width: 360px;
+  font-size: 14px;
+  line-height: 1.6;
+  color: rgba(18, 49, 39, 0.72);
+}
+
+.graph-loading-tags {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 8px;
+  margin-top: 2px;
+}
+
+.loading-tag {
+  padding: 6px 10px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.92);
+  border: 1px solid rgba(18, 49, 39, 0.08);
+  box-shadow: 0 8px 20px rgba(18, 49, 39, 0.06);
+  color: #174c3a;
+  font-size: 12px;
+  font-weight: 700;
 }
 
 .empty-icon {
   font-size: 48px;
   margin-bottom: 16px;
   opacity: 0.2;
+}
+
+.empty-text {
+  margin: 0;
+}
+
+@keyframes graphPulse {
+  0% {
+    opacity: 0.22;
+    transform: scale(0.88);
+  }
+  60% {
+    opacity: 0.52;
+  }
+  100% {
+    opacity: 0;
+    transform: scale(1.08);
+  }
+}
+
+@keyframes graphNodeBeat {
+  0%, 100% {
+    transform: scale(1);
+  }
+  50% {
+    transform: scale(1.14);
+  }
+}
+
+@keyframes graphNodeFloat {
+  0%, 100% {
+    transform: translateY(0);
+  }
+  50% {
+    transform: translateY(-6px);
+  }
+}
+
+@keyframes graphLinkPulse {
+  0%, 100% {
+    opacity: 0.35;
+  }
+  50% {
+    opacity: 1;
+  }
 }
 
 /* Entity Types Legend - Bottom Left */

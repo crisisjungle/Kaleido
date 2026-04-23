@@ -113,8 +113,8 @@ export const getRunStatus = (simulationId) => {
  * 获取模拟运行详细状态（包含最近动作）
  * @param {string} simulationId
  */
-export const getRunStatusDetail = (simulationId) => {
-  return service.get(`/api/simulation/${simulationId}/run-status/detail`)
+export const getRunStatusDetail = (simulationId, params = {}) => {
+  return service.get(`/api/simulation/${simulationId}/run-status/detail`, { params })
 }
 
 /**

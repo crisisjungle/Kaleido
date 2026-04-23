@@ -15,9 +15,26 @@ from typing import Any, Dict, Iterable, List, Optional
 ENVFISH_ENGINE_MODE = "envfish"
 
 SCENARIO_MODES = {"baseline_mode", "crisis_mode"}
-DIFFUSION_TEMPLATES = {"air", "inland_water", "marine", "generic"}
+LEGACY_DIFFUSION_TEMPLATES = {"air", "inland_water", "marine", "generic"}
+TRANSPORT_FAMILIES = {
+    "atmospheric_plume",
+    "marine_current",
+    "inland_water_network",
+    "surface_flood_flow",
+    "coastal_inundation",
+    "ecological_mobility",
+    "bio_ecological_transmission",
+    "ash_plume",
+    "infrastructure_failure",
+    "impact_blast",
+    "slow_ecosystem_decline",
+    "terrestrial_surface",
+    "generic",
+}
+DIFFUSION_TEMPLATES = LEGACY_DIFFUSION_TEMPLATES | TRANSPORT_FAMILIES
 VARIABLE_TYPES = {"disaster", "policy"}
 TEMPORAL_PRESETS = {"rapid", "standard", "slow"}
+TIME_PLAN_UNITS = {"hour", "day", "week", "month", "quarter", "year"}
 POLICY_MODES = {
     "restrict",
     "relocate",
@@ -98,6 +115,29 @@ CRISIS_STATE_VECTOR = {
     "vulnerability_score": 72,
 }
 
+LEGACY_TEMPLATE_TO_FAMILY = {
+    "air": "atmospheric_plume",
+    "inland_water": "inland_water_network",
+    "marine": "marine_current",
+    "generic": "generic",
+}
+
+PRIMARY_FAMILY_TO_LEGACY = {
+    "atmospheric_plume": "air",
+    "ash_plume": "air",
+    "marine_current": "marine",
+    "coastal_inundation": "marine",
+    "surface_flood_flow": "inland_water",
+    "inland_water_network": "inland_water",
+    "ecological_mobility": "generic",
+    "bio_ecological_transmission": "generic",
+    "infrastructure_failure": "generic",
+    "impact_blast": "generic",
+    "slow_ecosystem_decline": "generic",
+    "terrestrial_surface": "generic",
+    "generic": "generic",
+}
+
 DEFAULT_TEMPLATE_RULES = {
     "air": {
         "default_lag_rounds": 1,
@@ -121,6 +161,78 @@ DEFAULT_TEMPLATE_RULES = {
         "default_lag_rounds": 1,
         "default_decay": 0.88,
         "default_persistence": 55,
+        "max_neighbor_spread": 2,
+    },
+    "atmospheric_plume": {
+        "default_lag_rounds": 1,
+        "default_decay": 0.84,
+        "default_persistence": 48,
+        "max_neighbor_spread": 3,
+    },
+    "marine_current": {
+        "default_lag_rounds": 2,
+        "default_decay": 0.92,
+        "default_persistence": 70,
+        "max_neighbor_spread": 4,
+    },
+    "inland_water_network": {
+        "default_lag_rounds": 1,
+        "default_decay": 0.9,
+        "default_persistence": 62,
+        "max_neighbor_spread": 2,
+    },
+    "surface_flood_flow": {
+        "default_lag_rounds": 1,
+        "default_decay": 0.86,
+        "default_persistence": 52,
+        "max_neighbor_spread": 3,
+    },
+    "coastal_inundation": {
+        "default_lag_rounds": 1,
+        "default_decay": 0.82,
+        "default_persistence": 40,
+        "max_neighbor_spread": 3,
+    },
+    "ecological_mobility": {
+        "default_lag_rounds": 2,
+        "default_decay": 0.95,
+        "default_persistence": 82,
+        "max_neighbor_spread": 2,
+    },
+    "bio_ecological_transmission": {
+        "default_lag_rounds": 1,
+        "default_decay": 0.9,
+        "default_persistence": 68,
+        "max_neighbor_spread": 3,
+    },
+    "ash_plume": {
+        "default_lag_rounds": 1,
+        "default_decay": 0.8,
+        "default_persistence": 64,
+        "max_neighbor_spread": 3,
+    },
+    "infrastructure_failure": {
+        "default_lag_rounds": 1,
+        "default_decay": 0.9,
+        "default_persistence": 46,
+        "max_neighbor_spread": 2,
+    },
+    "impact_blast": {
+        "default_lag_rounds": 0,
+        "default_decay": 0.76,
+        "default_persistence": 36,
+        "max_neighbor_spread": 4,
+    },
+    "slow_ecosystem_decline": {
+        "default_lag_rounds": 3,
+        "default_decay": 0.97,
+        "default_persistence": 88,
+        "max_neighbor_spread": 2,
+    },
+    "terrestrial_surface": {
+        "default_lag_rounds": 1,
+        "default_decay": 0.89,
+        "default_persistence": 58,
         "max_neighbor_spread": 2,
     },
 }
@@ -151,6 +263,136 @@ DIFFUSION_PROVIDER_DEFAULTS = {
     "inland_water": "topology",
     "marine": "open_meteo",
     "generic": "heuristic",
+    "atmospheric_plume": "open_meteo",
+    "marine_current": "open_meteo",
+    "inland_water_network": "topology",
+    "surface_flood_flow": "topology",
+    "coastal_inundation": "open_meteo",
+    "ecological_mobility": "heuristic",
+    "bio_ecological_transmission": "heuristic",
+    "ash_plume": "open_meteo",
+    "infrastructure_failure": "heuristic",
+    "impact_blast": "heuristic",
+    "slow_ecosystem_decline": "heuristic",
+    "terrestrial_surface": "heuristic",
+}
+
+TIME_PLAN_UNIT_MINUTES = {
+    "hour": 60,
+    "day": 1440,
+    "week": 10080,
+    "month": 43200,
+    "quarter": 129600,
+    "year": 525600,
+}
+
+HAZARD_TEMPLATE_CATALOG: Dict[str, Dict[str, Any]] = {
+    "coastal_radioactive_release": {
+        "label": "核废水/近海放射性释放",
+        "description": "围绕近海放射性物质释放、海流输运、生物累积与岸线暴露展开。",
+        "impact_chain": ["海流输运", "沉积物滞留", "食物网累积", "岸线暴露"],
+        "primary_family": "marine_current",
+        "secondary_channels": ["sediment_retention", "food_web_bioaccumulation", "shoreline_exposure"],
+    },
+    "radioactive_fallout": {
+        "label": "放射性沉降",
+        "description": "围绕大气羽流、干湿沉降、地表径流和土壤累积展开。",
+        "impact_chain": ["大气羽流", "干湿沉降", "地表径流", "土壤累积"],
+        "primary_family": "atmospheric_plume",
+        "secondary_channels": ["dry_wet_deposition", "surface_runoff", "soil_accumulation"],
+    },
+    "industrial_toxic_release": {
+        "label": "工业有毒物质释放",
+        "description": "适用于化工泄漏、危险品散逸以及生产设施释放场景。",
+        "impact_chain": ["介质释放", "土壤或水体累积", "食物链暴露", "服务能力受压"],
+        "primary_family": "terrestrial_surface",
+        "secondary_channels": ["soil_accumulation", "food_chain_exposure", "service_disruption"],
+        "allow_auto_primary_family": True,
+    },
+    "inland_water_contamination": {
+        "label": "内陆水体污染",
+        "description": "适用于河流、湖库、尾矿或污水外泄导致的流域污染。",
+        "impact_chain": ["沿河输运", "库区滞留", "地下水交换", "灌溉暴露"],
+        "primary_family": "inland_water_network",
+        "secondary_channels": ["reservoir_retention", "groundwater_exchange", "irrigation_exposure"],
+    },
+    "marine_pollution_bloom": {
+        "label": "海洋污染/赤潮",
+        "description": "适用于近海污染、富营养化、赤潮与低氧链路。",
+        "impact_chain": ["近海输运", "营养盐累积", "低氧区", "渔业暴露"],
+        "primary_family": "marine_current",
+        "secondary_channels": ["nutrient_accumulation", "hypoxia", "fishery_exposure"],
+    },
+    "wildfire_smoke_ash": {
+        "label": "山火烟尘与灰烬",
+        "description": "适用于山火烟尘扩散、灰烬径流、土壤疏水化与栖息地丧失。",
+        "impact_chain": ["烟羽扩散", "灰烬径流", "土壤疏水化", "栖息地损失"],
+        "primary_family": "atmospheric_plume",
+        "secondary_channels": ["ash_runoff", "soil_hydrophobicity", "habitat_loss"],
+    },
+    "volcanic_eruption": {
+        "label": "火山喷发",
+        "description": "适用于火山灰、火山泥流、酸性沉降与下游泥沙压力。",
+        "impact_chain": ["火山灰扩散", "火山泥流", "酸性沉降", "河道淤积"],
+        "primary_family": "ash_plume",
+        "secondary_channels": ["lahar_runoff", "acid_deposition", "river_siltation"],
+    },
+    "earthquake_secondary_cascade": {
+        "label": "地震次生级联",
+        "description": "适用于地震引发滑坡、液化、基础设施中断和次生泄漏。",
+        "impact_chain": ["基础设施失效", "滑坡", "液化", "次生泄漏"],
+        "primary_family": "infrastructure_failure",
+        "secondary_channels": ["landslide", "liquefaction", "pipeline_release"],
+    },
+    "tsunami_inundation": {
+        "label": "海啸淹没",
+        "description": "适用于海啸、沿海淹没、盐水入侵和漂浮碎片冲击。",
+        "impact_chain": ["沿海淹没", "盐水入侵", "漂浮碎片", "港湾污染"],
+        "primary_family": "coastal_inundation",
+        "secondary_channels": ["saline_intrusion", "debris_transport", "harbor_contamination"],
+    },
+    "flood_storm_surge": {
+        "label": "洪水/风暴潮",
+        "description": "适用于河洪、内涝、风暴潮和复合淹没场景。",
+        "impact_chain": ["地表洪流", "污水外溢", "沉积再悬浮", "沿海回灌"],
+        "primary_family": "surface_flood_flow",
+        "secondary_channels": ["sewage_overflow", "sediment_rework", "coastal_backflow"],
+    },
+    "drought_ecosystem_stress": {
+        "label": "干旱生态压力",
+        "description": "适用于干旱、热浪和长期水资源压力驱动的生态退化。",
+        "impact_chain": ["水资源短缺", "植被衰退", "生态脆弱性上升", "火险易感"],
+        "primary_family": "slow_ecosystem_decline",
+        "secondary_channels": ["water_shortage", "vegetation_dieback", "wildfire_susceptibility"],
+    },
+    "invasive_species_spread": {
+        "label": "外来物种入侵",
+        "description": "适用于物种扩散、建立、走廊传播和治理摩擦。",
+        "impact_chain": ["扩散走廊", "人为携带", "种群建立", "治理摩擦"],
+        "primary_family": "ecological_mobility",
+        "secondary_channels": ["habitat_corridor", "human_transport_vector", "establishment_feedback"],
+    },
+    "pest_disease_ecology": {
+        "label": "虫害/生态病害",
+        "description": "适用于虫害、野生动物疫病和生态系统病害传播。",
+        "impact_chain": ["宿主密度", "传播媒介移动", "栖息地破碎化", "生态受体损伤"],
+        "primary_family": "bio_ecological_transmission",
+        "secondary_channels": ["host_density", "vector_mobility", "habitat_fragmentation"],
+    },
+    "asteroid_impact_cascade": {
+        "label": "小行星撞击级联",
+        "description": "适用于撞击冲击波、抛射物、火灾和海啸级联。",
+        "impact_chain": ["冲击波", "抛射物沉降", "次生火灾", "撞击海啸"],
+        "primary_family": "impact_blast",
+        "secondary_channels": ["ejecta_fallout", "wildfire_trigger", "impact_tsunami"],
+    },
+    "generic": {
+        "label": "通用生态危机",
+        "description": "在识别失败或输入过弱时使用的兜底模板。",
+        "impact_chain": ["局地扩散", "生态受体承压", "社会响应波动"],
+        "primary_family": "generic",
+        "secondary_channels": ["environmental_link"],
+    },
 }
 
 NODE_FAMILY_KEYWORDS = {
@@ -211,6 +453,139 @@ def normalize_temporal_profile(
         "total_rounds": resolved_total_rounds,
         "total_simulation_hours": total_hours,
         "recommended_templates": list(defaults["recommended_templates"]),
+    }
+
+
+def normalize_transport_family(value: Optional[str]) -> str:
+    normalized = str(value or "generic").strip().lower().replace("-", "_").replace(" ", "_")
+    if normalized in LEGACY_TEMPLATE_TO_FAMILY:
+        return LEGACY_TEMPLATE_TO_FAMILY[normalized]
+    if normalized in TRANSPORT_FAMILIES:
+        return normalized
+    return "generic"
+
+
+def compatibility_diffusion_template(value: Optional[str]) -> str:
+    family = normalize_transport_family(value)
+    return PRIMARY_FAMILY_TO_LEGACY.get(family, "generic")
+
+
+def get_template_rules(value: Optional[str]) -> Dict[str, Any]:
+    family = normalize_transport_family(value)
+    return dict(DEFAULT_TEMPLATE_RULES.get(family, DEFAULT_TEMPLATE_RULES["generic"]))
+
+
+def normalize_hazard_template_id(value: Optional[str]) -> str:
+    normalized = str(value or "").strip().lower().replace("-", "_").replace(" ", "_")
+    if normalized in HAZARD_TEMPLATE_CATALOG:
+        return normalized
+    return "generic"
+
+
+def get_hazard_template_definition(value: Optional[str]) -> Dict[str, Any]:
+    template_id = normalize_hazard_template_id(value)
+    return {"id": template_id, **dict(HAZARD_TEMPLATE_CATALOG.get(template_id, HAZARD_TEMPLATE_CATALOG["generic"]))}
+
+
+def default_hazard_template_for_family(value: Optional[str]) -> str:
+    family = normalize_transport_family(value)
+    for template_id, definition in HAZARD_TEMPLATE_CATALOG.items():
+        if normalize_transport_family(definition.get("primary_family")) == family:
+            return template_id
+    return "generic"
+
+
+def build_transport_profile(
+    primary_family: Optional[str],
+    secondary_channels: Optional[List[str]] = None,
+    context_provider: Optional[str] = None,
+) -> Dict[str, Any]:
+    family = normalize_transport_family(primary_family)
+    rules = get_template_rules(family)
+    provider = str(context_provider or DIFFUSION_PROVIDER_DEFAULTS.get(family, "heuristic"))
+    return {
+        "primary_family": family,
+        "secondary_channels": list(secondary_channels or []),
+        "default_lag_rounds": max(0, int(rules.get("default_lag_rounds", 1))),
+        "default_decay": clamp_probability(rules.get("default_decay", 0.88)),
+        "default_persistence": clamp_score(rules.get("default_persistence", 55)),
+        "max_neighbor_spread": max(1, int(rules.get("max_neighbor_spread", 2))),
+        "context_provider": provider,
+    }
+
+
+def suggest_temporal_preset(minutes_per_round: int) -> str:
+    if minutes_per_round <= 30:
+        return "rapid"
+    if minutes_per_round >= 120:
+        return "slow"
+    return "standard"
+
+
+def minutes_to_time_plan_unit(minutes_per_round: int) -> tuple[str, int]:
+    rounded = max(10, int(minutes_per_round or 60))
+    for unit, unit_minutes in (
+        ("year", TIME_PLAN_UNIT_MINUTES["year"]),
+        ("quarter", TIME_PLAN_UNIT_MINUTES["quarter"]),
+        ("month", TIME_PLAN_UNIT_MINUTES["month"]),
+        ("week", TIME_PLAN_UNIT_MINUTES["week"]),
+        ("day", TIME_PLAN_UNIT_MINUTES["day"]),
+        ("hour", TIME_PLAN_UNIT_MINUTES["hour"]),
+    ):
+        if rounded >= unit_minutes and rounded % unit_minutes == 0:
+            return unit, max(1, rounded // unit_minutes)
+    if rounded % 60 == 0:
+        return "hour", max(1, rounded // 60)
+    return "hour", max(1, round(rounded / 60))
+
+
+def format_total_coverage(total_rounds: int, step_unit: str, step_size: int) -> str:
+    unit_labels = {
+        "hour": "小时",
+        "day": "天",
+        "week": "周",
+        "month": "个月",
+        "quarter": "个季度",
+        "year": "年",
+    }
+    total_units = max(1, int(total_rounds or 1)) * max(1, int(step_size or 1))
+    return f"{total_units} {unit_labels.get(step_unit, step_unit)}"
+
+
+def normalize_time_plan(
+    time_plan: Optional[Dict[str, Any]] = None,
+    *,
+    total_rounds: Optional[int] = None,
+    minutes_per_round: Optional[int] = None,
+    preset: Optional[str] = None,
+    reference_time: str = "",
+    reasoning_summary: str = "",
+    source: str = "auto",
+) -> Dict[str, Any]:
+    payload = dict(time_plan or {})
+    resolved_rounds = max(4, int(payload.get("total_rounds") or total_rounds or 12))
+    if payload.get("step_unit") in TIME_PLAN_UNITS:
+        step_unit = str(payload.get("step_unit"))
+        step_size = max(1, int(payload.get("step_size") or 1))
+        resolved_minutes = TIME_PLAN_UNIT_MINUTES[step_unit] * step_size
+    else:
+        resolved_minutes = max(10, int(payload.get("minutes_per_round") or minutes_per_round or 60))
+        step_unit, step_size = minutes_to_time_plan_unit(resolved_minutes)
+    resolved_preset = str(payload.get("preset") or preset or suggest_temporal_preset(resolved_minutes))
+    total_hours = round(resolved_rounds * resolved_minutes / 60, 1)
+    return {
+        "step_unit": step_unit,
+        "step_size": step_size,
+        "total_rounds": resolved_rounds,
+        "total_coverage_label": str(
+            payload.get("total_coverage_label") or format_total_coverage(resolved_rounds, step_unit, step_size)
+        ),
+        "reference_time": str(payload.get("reference_time") or reference_time or ""),
+        "reasoning_summary": str(payload.get("reasoning_summary") or reasoning_summary or ""),
+        "source": str(payload.get("source") or source or "auto"),
+        "minutes_per_round": resolved_minutes,
+        "total_simulation_hours": total_hours,
+        "preset": resolved_preset if resolved_preset in TEMPORAL_PRESETS else suggest_temporal_preset(resolved_minutes),
     }
 
 
@@ -383,10 +758,11 @@ class InjectedVariable:
     description: str = ""
     target_regions: List[str] = field(default_factory=list)
     target_nodes: List[int] = field(default_factory=list)
-    start_round: int = 1
+    start_round: int = 0
     duration_rounds: int = 1
     intensity_0_100: float = 50.0
     policy_mode: Optional[str] = None
+    source_origin: str = "manual"
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -397,10 +773,11 @@ class InjectedVariable:
             "description": self.description,
             "target_regions": self.target_regions,
             "target_nodes": self.target_nodes,
-            "start_round": max(1, int(self.start_round)),
+            "start_round": max(0, int(self.start_round)),
             "duration_rounds": max(1, int(self.duration_rounds)),
             "intensity_0_100": clamp_score(self.intensity_0_100),
             "policy_mode": self.policy_mode if self.policy_mode in POLICY_MODES else None,
+            "source_origin": self.source_origin if self.source_origin in {"seed", "manual", "runtime"} else "manual",
         }
 
     @classmethod
@@ -413,10 +790,11 @@ class InjectedVariable:
             description=str(data.get("description") or ""),
             target_regions=list(data.get("target_regions") or []),
             target_nodes=[int(item) for item in (data.get("target_nodes") or []) if str(item).isdigit()],
-            start_round=int(data.get("start_round") or 1),
+            start_round=int(data.get("start_round") or 0),
             duration_rounds=int(data.get("duration_rounds") or 1),
             intensity_0_100=clamp_score(data.get("intensity_0_100", data.get("intensity", 50))),
             policy_mode=data.get("policy_mode"),
+            source_origin=str(data.get("source_origin") or "manual"),
         )
 
 
@@ -456,6 +834,11 @@ class EnvAgentProfile:
     state_vector: Dict[str, float] = field(default_factory=dict)
     source_entity_uuid: Optional[str] = None
     source_entity_type: Optional[str] = None
+    generation_mode: str = ""
+    evidence_refs: List[str] = field(default_factory=list)
+    evidence_confidence: float = 0.0
+    review_status: str = ""
+    grounding_reason: str = ""
     created_at: str = field(default_factory=lambda: datetime.now().strftime("%Y-%m-%d"))
 
     def to_dict(self) -> Dict[str, Any]:
@@ -474,6 +857,8 @@ class EnvAgentProfile:
         payload["goals"] = list(dict.fromkeys(self.goals))
         payload["sensitivities"] = list(dict.fromkeys(self.sensitivities))
         payload["spawn_weight"] = clamp_probability(self.spawn_weight)
+        payload["evidence_refs"] = list(dict.fromkeys(self.evidence_refs))
+        payload["evidence_confidence"] = clamp_probability(self.evidence_confidence)
         return payload
 
     def to_agent_config(self) -> Dict[str, Any]:
@@ -512,6 +897,11 @@ class EnvAgentProfile:
             "persona": self.persona,
             "source_entity_uuid": self.source_entity_uuid,
             "source_entity_type": self.source_entity_type,
+            "generation_mode": self.generation_mode,
+            "evidence_refs": list(dict.fromkeys(self.evidence_refs)),
+            "evidence_confidence": clamp_probability(self.evidence_confidence),
+            "review_status": self.review_status,
+            "grounding_reason": self.grounding_reason,
         }
 
     def to_reddit_format(self) -> Dict[str, Any]:
@@ -528,6 +918,8 @@ class EnvAgentProfile:
             "agent_type": self.agent_type,
             "agent_subtype": self.agent_subtype,
             "home_subregion_id": self.home_subregion_id,
+            "generation_mode": self.generation_mode,
+            "evidence_confidence": clamp_probability(self.evidence_confidence),
             "interested_topics": self.goals[:6],
             "created_at": self.created_at,
         }
@@ -548,6 +940,8 @@ class EnvAgentProfile:
             "agent_type": self.agent_type,
             "agent_subtype": self.agent_subtype,
             "home_subregion_id": self.home_subregion_id,
+            "generation_mode": self.generation_mode,
+            "evidence_confidence": clamp_probability(self.evidence_confidence),
             "friend_count": 80 + self.agent_id * 3,
             "follower_count": 120 + self.agent_id * 5,
             "statuses_count": 40 + self.agent_id * 4,

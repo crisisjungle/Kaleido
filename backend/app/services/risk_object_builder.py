@@ -13,6 +13,7 @@ from typing import Any, Dict, List, Optional
 from ..utils.logger import get_logger
 from .envfish_models import (
     EnvAgentProfile,
+    get_hazard_template_definition,
     InjectedVariable,
     RegionNode,
     RiskAffectedCluster,
@@ -44,6 +45,7 @@ class RiskObjectBuilder:
         injected_variables: Optional[List[InjectedVariable]] = None,
         scenario_mode: str = "baseline_mode",
         diffusion_template: str = "marine",
+        hazard_template_id: str = "generic",
     ) -> RiskObjectBuildResult:
         del document_text  # reserved for future richer builders
         injected_variables = injected_variables or []
@@ -64,6 +66,7 @@ class RiskObjectBuilder:
                 injected_variables=injected_variables,
                 scenario_mode=scenario_mode,
                 diffusion_template=diffusion_template,
+                hazard_template_id=hazard_template_id,
             )
             for index, spec in enumerate(risk_specs, 1)
         ]
@@ -163,6 +166,7 @@ class RiskObjectBuilder:
         injected_variables: List[InjectedVariable],
         scenario_mode: str,
         diffusion_template: str,
+        hazard_template_id: str,
     ) -> RiskObject:
         del index
         mode = "incident" if injected_variables or scenario_mode == "crisis_mode" else "watch"
@@ -172,13 +176,13 @@ class RiskObjectBuilder:
         selected_entities = self._select_entities(entities)
         selected_profiles = self._select_profiles(profiles, selected_regions)
 
-        title = self._compose_title(spec["title_hint"], selected_regions, diffusion_template)
+        title = self._compose_title(spec["title_hint"], selected_regions, hazard_template_id, diffusion_template)
         severity_score = self._severity_score(selected_regions, injected_variables, selected_profiles)
         confidence_score = self._confidence_score(selected_entities, selected_regions, selected_profiles)
         actionability_score = self._actionability_score(injected_variables, selected_profiles, mode)
         novelty_score = self._novelty_score(injected_variables, selected_entities)
         turning_points = self._turning_points(spec["key"], injected_variables, selected_profiles)
-        amplifiers = self._amplifiers(selected_profiles, injected_variables, diffusion_template)
+        amplifiers = self._amplifiers(selected_profiles, injected_variables, hazard_template_id, diffusion_template)
         buffers = self._buffers(selected_profiles, mode)
         evidence = self._build_evidence(
             spec_key=spec["key"],
@@ -292,10 +296,17 @@ class RiskObjectBuilder:
                     ordered.append(items[index])
         return ordered[:18]
 
-    def _compose_title(self, title_hint: str, selected_regions: List[RegionNode], diffusion_template: str) -> str:
+    def _compose_title(
+        self,
+        title_hint: str,
+        selected_regions: List[RegionNode],
+        hazard_template_id: str,
+        diffusion_template: str,
+    ) -> str:
         if selected_regions:
             return f"{selected_regions[0].name}{title_hint}"
-        return f"{diffusion_template}场景{title_hint}"
+        template_label = get_hazard_template_definition(hazard_template_id).get("label") or diffusion_template
+        return f"{template_label}{title_hint}"
 
     def _severity_score(
         self,
@@ -387,9 +398,15 @@ class RiskObjectBuilder:
         self,
         selected_profiles: List[EnvAgentProfile],
         injected_variables: List[InjectedVariable],
+        hazard_template_id: str,
         diffusion_template: str,
     ) -> List[str]:
-        amplifiers = [f"{diffusion_template}扩散路径"]
+        definition = get_hazard_template_definition(hazard_template_id)
+        template_label = definition.get("label") or diffusion_template
+        impact_chain = list(definition.get("impact_chain") or [])
+        amplifiers = [f"{template_label}传播链"]
+        if impact_chain:
+            amplifiers.append(impact_chain[0])
         if injected_variables:
             amplifiers.append("外生变量强度叠加")
         if any(profile.node_family == "HumanActor" for profile in selected_profiles):

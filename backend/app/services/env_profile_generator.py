@@ -6,8 +6,9 @@ from __future__ import annotations
 
 import json
 import math
+from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
 from ..config import Config
@@ -25,6 +26,7 @@ from .envfish_models import (
     ensure_unique_slug,
     infer_node_family,
     normalize_state_vector,
+    normalize_transport_family,
 )
 from .transport_context_resolver import TransportContextResolver
 from .zep_entity_reader import EntityNode
@@ -39,6 +41,146 @@ class PreparedEntityContext:
     node_family: str
     summary: str
     relation_hints: List[str]
+
+
+HUMAN_ACTIVITY_SUBTYPES = {
+    "residential",
+    "commercial",
+    "commercial_hub",
+    "office_cluster",
+    "hospital",
+    "school",
+    "university",
+    "tourism",
+    "shop",
+    "worldcover_50",
+}
+
+TRANSPORT_SUBTYPES = {
+    "road_corridor",
+    "transit_stop",
+    "rail_station",
+    "pier",
+    "marina",
+    "ferry_terminal",
+    "breakwater",
+    "groyne",
+}
+
+INDUSTRY_SUBTYPES = {
+    "industrial",
+    "wastewater_plant",
+    "power_plant",
+    "warehouse",
+}
+
+WATER_SUBTYPES = {
+    "worldcover_80",
+    "water",
+    "river",
+    "stream",
+    "canal",
+    "ditch",
+    "reservoir",
+    "basin",
+    "coastline",
+    "beach",
+}
+
+ECOLOGY_SUBTYPES = {
+    "worldcover_10",
+    "worldcover_90",
+    "worldcover_95",
+    "forest",
+    "wetland",
+    "nature_reserve",
+    "protected_area",
+    "park",
+    "garden",
+}
+
+AGRICULTURE_SUBTYPES = {"worldcover_40", "farmland", "farmyard"}
+OPEN_SUBTYPES = {"worldcover_20", "worldcover_30", "worldcover_60", "meadow"}
+
+
+@dataclass
+class MapEvidenceContext:
+    human_activity_score: float
+    industry_score: float
+    transport_score: float
+    ecology_score: float
+    water_score: float
+    agriculture_score: float
+    open_score: float
+    evidence_level: str
+    environment_archetype: str
+    target_count_range: Tuple[int, int]
+    target_agent_count: int
+    allowed_roles: List[str] = field(default_factory=list)
+    forbidden_roles: List[str] = field(default_factory=list)
+    evidence_refs_by_role: Dict[str, List[str]] = field(default_factory=dict)
+    feature_subtype_counts: Dict[str, int] = field(default_factory=dict)
+    source_kind_counts: Dict[str, int] = field(default_factory=dict)
+    dominant_subtypes: List[str] = field(default_factory=list)
+    admin_context: Dict[str, Any] = field(default_factory=dict)
+    warnings: List[str] = field(default_factory=list)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "human_activity_score": round(self.human_activity_score, 3),
+            "industry_score": round(self.industry_score, 3),
+            "transport_score": round(self.transport_score, 3),
+            "ecology_score": round(self.ecology_score, 3),
+            "water_score": round(self.water_score, 3),
+            "agriculture_score": round(self.agriculture_score, 3),
+            "open_score": round(self.open_score, 3),
+            "evidence_level": self.evidence_level,
+            "environment_archetype": self.environment_archetype,
+            "target_count_range": list(self.target_count_range),
+            "target_agent_count": self.target_agent_count,
+            "allowed_roles": list(self.allowed_roles),
+            "forbidden_roles": list(self.forbidden_roles),
+            "evidence_refs_by_role": {key: list(value) for key, value in self.evidence_refs_by_role.items()},
+            "feature_subtype_counts": dict(self.feature_subtype_counts),
+            "source_kind_counts": dict(self.source_kind_counts),
+            "dominant_subtypes": list(self.dominant_subtypes),
+            "admin_context": dict(self.admin_context),
+            "warnings": list(self.warnings),
+        }
+
+
+@dataclass
+class AgentCandidatePlan:
+    candidate_id: str
+    role_name: str
+    node_family: str
+    agent_type: str
+    agent_subtype: str
+    role_type: str
+    home_region_id: str
+    home_subregion_id: str
+    evidence_refs: List[str]
+    confidence: float
+    why_this_agent: str
+    action_space_hint: List[str] = field(default_factory=list)
+    generation_mode: str = "map_rule"
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "candidate_id": self.candidate_id,
+            "role_name": self.role_name,
+            "node_family": self.node_family,
+            "agent_type": self.agent_type,
+            "agent_subtype": self.agent_subtype,
+            "role_type": self.role_type,
+            "home_region_id": self.home_region_id,
+            "home_subregion_id": self.home_subregion_id,
+            "evidence_refs": list(dict.fromkeys(self.evidence_refs)),
+            "confidence": round(max(0.0, min(1.0, float(self.confidence))), 3),
+            "why_this_agent": self.why_this_agent,
+            "action_space_hint": list(dict.fromkeys(self.action_space_hint)),
+            "generation_mode": self.generation_mode,
+        }
 
 
 class EnvProfileGenerator:
@@ -67,20 +209,26 @@ class EnvProfileGenerator:
         document_text: str,
         scenario_mode: str = "baseline_mode",
         diffusion_template: str = "marine",
+        search_mode: str = "fast",
         reference_time: str = "",
         diffusion_provider: str = "auto",
+        injected_variables: Optional[List[InjectedVariable]] = None,
         use_llm: bool = True,
         progress_callback: Optional[Callable[[int, int, str], None]] = None,
         profile_created_callback: Optional[Callable[[EnvAgentProfile, int, int, str], None]] = None,
         parallel_count: int = 3,
     ) -> EnvProfileGenerationResult:
+        injected_variables = injected_variables or []
         prepared_entities = [self._prepare_entity(entity) for entity in entities]
+        is_map_seed = self._looks_like_map_seed_context(prepared_entities)
         regions = self._build_regions(
             prepared_entities=prepared_entities,
             simulation_requirement=simulation_requirement,
             document_text=document_text,
             scenario_mode=scenario_mode,
             diffusion_template=diffusion_template,
+            search_mode=search_mode,
+            injected_variables=injected_variables,
         )
         grounding_summary = self.grounding_service.ground(
             regions=[region.to_dict() for region in regions],
@@ -107,12 +255,26 @@ class EnvProfileGenerator:
             diffusion_template=diffusion_template,
         )
 
+        map_evidence_context = (
+            self._build_map_evidence_context(
+                prepared_entities=prepared_entities,
+                regions=regions,
+                subregions=subregions,
+                diffusion_template=diffusion_template,
+                search_mode=search_mode,
+            )
+            if is_map_seed
+            else None
+        )
         anchor_profiles: List[EnvAgentProfile] = []
+        synthesized_profiles: List[EnvAgentProfile] = []
+        map_generation_summary: Dict[str, Any] = {}
         total = len(prepared_entities)
         target_count = self._target_agent_count(
             prepared_entities=prepared_entities,
             regions=regions,
             subregions=subregions,
+            map_evidence_context=map_evidence_context,
         )
         generated_count = 0
 
@@ -125,51 +287,67 @@ class EnvProfileGenerator:
         if progress_callback:
             progress_callback(0, max(total, 1), "开始生成 EnvFish 基础角色")
 
-        def build_profile(args: Tuple[int, PreparedEntityContext]) -> EnvAgentProfile:
-            index, prepared = args
-            return self._build_profile(
-                index=index,
-                prepared=prepared,
+        if map_evidence_context is not None:
+            profiles, synthesized_profiles, map_generation_summary = self._generate_map_seed_agent_profiles(
+                prepared_entities=prepared_entities,
                 regions=regions,
                 subregions=subregions,
                 scenario_mode=scenario_mode,
+                diffusion_template=diffusion_template,
                 simulation_requirement=simulation_requirement,
+                evidence_context=map_evidence_context,
+                target_count=target_count,
+                injected_variables=injected_variables,
                 use_llm=use_llm,
+                profile_created_callback=lambda profile: emit_profile(profile, "map_evidence"),
             )
+        else:
+            def build_profile(args: Tuple[int, PreparedEntityContext]) -> EnvAgentProfile:
+                index, prepared = args
+                return self._build_profile(
+                    index=index,
+                    prepared=prepared,
+                    regions=regions,
+                    subregions=subregions,
+                    scenario_mode=scenario_mode,
+                    simulation_requirement=simulation_requirement,
+                    injected_variables=injected_variables,
+                    use_llm=use_llm,
+                )
 
-        if parallel_count > 1 and total > 1:
-            with ThreadPoolExecutor(max_workers=min(parallel_count, total)) as executor:
-                future_map = {
-                    executor.submit(build_profile, item): item[0] for item in enumerate(prepared_entities)
-                }
-                completed = 0
-                ordered: Dict[int, EnvAgentProfile] = {}
-                for future in as_completed(future_map):
-                    profile = future.result()
-                    ordered[future_map[future]] = profile
-                    completed += 1
+            if parallel_count > 1 and total > 1:
+                with ThreadPoolExecutor(max_workers=min(parallel_count, total)) as executor:
+                    future_map = {
+                        executor.submit(build_profile, item): item[0] for item in enumerate(prepared_entities)
+                    }
+                    completed = 0
+                    ordered: Dict[int, EnvAgentProfile] = {}
+                    for future in as_completed(future_map):
+                        profile = future.result()
+                        ordered[future_map[future]] = profile
+                        completed += 1
+                        emit_profile(profile, "anchor")
+                        if progress_callback:
+                            progress_callback(completed, total, f"已生成 {completed}/{total} 个基础角色")
+                    anchor_profiles = [ordered[index] for index in sorted(ordered.keys())]
+            else:
+                for index, prepared in enumerate(prepared_entities):
+                    profile = build_profile((index, prepared))
+                    anchor_profiles.append(profile)
                     emit_profile(profile, "anchor")
                     if progress_callback:
-                        progress_callback(completed, total, f"已生成 {completed}/{total} 个基础角色")
-                anchor_profiles = [ordered[index] for index in sorted(ordered.keys())]
-        else:
-            for index, prepared in enumerate(prepared_entities):
-                profile = build_profile((index, prepared))
-                anchor_profiles.append(profile)
-                emit_profile(profile, "anchor")
-                if progress_callback:
-                    progress_callback(index + 1, total, f"已生成 {index + 1}/{total} 个基础角色")
+                        progress_callback(index + 1, total, f"已生成 {index + 1}/{total} 个基础角色")
 
-        synthesized_profiles = self._expand_synthetic_agents(
-            regions=regions,
-            subregions=subregions,
-            existing_profiles=anchor_profiles,
-            target_count=target_count,
-            scenario_mode=scenario_mode,
-            diffusion_template=diffusion_template,
-            profile_created_callback=lambda profile: emit_profile(profile, "synthesized"),
-        )
-        profiles = anchor_profiles + synthesized_profiles
+            synthesized_profiles = self._expand_synthetic_agents(
+                regions=regions,
+                subregions=subregions,
+                existing_profiles=anchor_profiles,
+                target_count=target_count,
+                scenario_mode=scenario_mode,
+                diffusion_template=diffusion_template,
+                profile_created_callback=lambda profile: emit_profile(profile, "synthesized"),
+            )
+            profiles = anchor_profiles + synthesized_profiles
         relationships = self._build_agent_relationships(
             regions=regions,
             subregions=subregions,
@@ -185,10 +363,13 @@ class EnvProfileGenerator:
         notes = [
             f"Generated {len(regions)} macro regions, {len(subregions)} subregions, and {len(profiles)} agent profiles.",
             f"Anchor entities preserved: {len(anchor_profiles)}; synthesized agents added: {len(synthesized_profiles)}.",
+            f"Agent generation mode: {'map_evidence_driven' if map_evidence_context else 'entity_template'}.",
             f"Diffusion template: {diffusion_template}",
             f"Scenario mode: {scenario_mode}",
             f"Transport edges: {len(transport_edges)} via {diffusion_context.get('provider') or 'heuristic'}",
         ]
+        if injected_variables:
+            notes.append(f"Injected variables available during region/agent generation: {', '.join(item.name for item in injected_variables[:4])}")
         if grounding_summary.get("successful_sources"):
             notes.append(f"Grounding sources: {', '.join(grounding_summary['successful_sources'])}")
         if diffusion_context.get("note"):
@@ -213,6 +394,8 @@ class EnvProfileGenerator:
                 "relationship_count": len(relationships),
                 "transport_edge_count": len(transport_edges),
                 "target_agent_count": target_count,
+                "generation_mode": "map_evidence_driven" if map_evidence_context else "entity_template",
+                **map_generation_summary,
             },
         )
 
@@ -240,9 +423,22 @@ class EnvProfileGenerator:
         document_text: str,
         scenario_mode: str,
         diffusion_template: str,
+        search_mode: str,
+        injected_variables: Optional[List[InjectedVariable]] = None,
     ) -> List[RegionNode]:
+        diffusion_template = normalize_transport_family(diffusion_template)
         if diffusion_template not in DIFFUSION_TEMPLATES:
             diffusion_template = "generic"
+
+        if self._looks_like_map_seed_context(prepared_entities):
+            map_seed_regions = self._build_regions_from_map_seed(
+                prepared_entities=prepared_entities,
+                scenario_mode=scenario_mode,
+                diffusion_template=diffusion_template,
+                search_mode=search_mode,
+            )
+            if map_seed_regions:
+                return map_seed_regions
 
         region_candidates = self._region_candidates_from_entities(prepared_entities)
         llm_regions = self._build_regions_with_llm(
@@ -251,6 +447,8 @@ class EnvProfileGenerator:
             document_text=document_text,
             scenario_mode=scenario_mode,
             diffusion_template=diffusion_template,
+            max_regions=self._region_cap_for_search_mode(search_mode),
+            injected_variables=injected_variables or [],
         )
         if llm_regions:
             return llm_regions
@@ -300,6 +498,588 @@ class EnvProfileGenerator:
         except (TypeError, ValueError):
             return None
 
+    def _region_cap_for_search_mode(self, search_mode: str) -> int:
+        normalized = str(search_mode or "fast").strip().lower().replace("-", "_")
+        return 16 if normalized == "deep_search" else 8
+
+    def _looks_like_map_seed_context(self, prepared_entities: List[PreparedEntityContext]) -> bool:
+        has_seed_root = False
+        physical_count = 0
+        for prepared in prepared_entities:
+            attrs = prepared.entity.attributes or {}
+            if prepared.node_family == "Region" and isinstance(attrs.get("admin_context"), dict):
+                has_seed_root = True
+                continue
+            if self._coerce_float(attrs.get("lat")) is None or self._coerce_float(attrs.get("lon")) is None:
+                continue
+            if str(attrs.get("source_kind") or "").lower() in {"observed", "detected"}:
+                physical_count += 1
+        return has_seed_root and physical_count >= 3
+
+    def _build_regions_from_map_seed(
+        self,
+        prepared_entities: List[PreparedEntityContext],
+        scenario_mode: str,
+        diffusion_template: str,
+        search_mode: str,
+    ) -> List[RegionNode]:
+        root = next(
+            (
+                prepared
+                for prepared in prepared_entities
+                if prepared.node_family == "Region"
+                and isinstance((prepared.entity.attributes or {}).get("admin_context"), dict)
+            ),
+            None,
+        )
+        if root is None:
+            return []
+
+        root_attrs = root.entity.attributes or {}
+        admin_context = root_attrs.get("admin_context") or {}
+        center_lat = self._coerce_float(root_attrs.get("lat")) or self._coerce_float(admin_context.get("lat"))
+        center_lon = self._coerce_float(root_attrs.get("lon")) or self._coerce_float(admin_context.get("lon"))
+        if center_lat is None or center_lon is None:
+            return []
+        radius_m = max(1500, int(root_attrs.get("radius_m") or 12000))
+        max_regions = self._region_cap_for_search_mode(search_mode)
+
+        weighted_features: List[Dict[str, Any]] = []
+        class_totals: Dict[str, float] = defaultdict(float)
+        for prepared in prepared_entities:
+            attrs = prepared.entity.attributes or {}
+            if prepared is root:
+                continue
+            lat = self._coerce_float(attrs.get("lat"))
+            lon = self._coerce_float(attrs.get("lon"))
+            if lat is None or lon is None:
+                continue
+            source_kind = str(attrs.get("source_kind") or "").lower()
+            if source_kind not in {"observed", "detected"}:
+                continue
+            class_info = self._classify_map_seed_feature(prepared)
+            if not class_info:
+                continue
+            weight = self._map_seed_feature_weight(
+                prepared=prepared,
+                macro_class=class_info["macro_class"],
+                radius_m=radius_m,
+            )
+            feature_payload = {
+                "prepared": prepared,
+                "attrs": attrs,
+                "lat": lat,
+                "lon": lon,
+                "weight": weight,
+                "macro_class": class_info["macro_class"],
+                "label": class_info["label"],
+                "region_type": class_info["region_type"],
+                "carriers": class_info["carriers"],
+                "evidence_tags": class_info["evidence_tags"],
+            }
+            weighted_features.append(feature_payload)
+            class_totals[class_info["macro_class"]] += weight
+
+        if not weighted_features:
+            return []
+
+        weighted_features.sort(key=lambda item: item["weight"], reverse=True)
+        clusters: List[Dict[str, Any]] = []
+        for feature in weighted_features:
+            threshold_m = max(
+                1800.0,
+                radius_m
+                * (
+                    0.16
+                    if feature["macro_class"] in {"transport", "industrial"}
+                    else 0.24
+                ),
+            )
+            target_cluster = None
+            for cluster in clusters:
+                if cluster["macro_class"] != feature["macro_class"]:
+                    continue
+                distance = self._haversine_m(
+                    feature["lat"],
+                    feature["lon"],
+                    cluster["lat"],
+                    cluster["lon"],
+                )
+                if distance <= threshold_m:
+                    target_cluster = cluster
+                    break
+            if target_cluster is None:
+                clusters.append(
+                    {
+                        "macro_class": feature["macro_class"],
+                        "label": feature["label"],
+                        "region_type": feature["region_type"],
+                        "lat": feature["lat"],
+                        "lon": feature["lon"],
+                        "weight_sum": feature["weight"],
+                        "features": [feature],
+                        "carriers": set(feature["carriers"]),
+                        "evidence_tags": set(feature["evidence_tags"]),
+                    }
+                )
+                continue
+
+            total_weight = target_cluster["weight_sum"] + feature["weight"]
+            target_cluster["lat"] = round(
+                (
+                    target_cluster["lat"] * target_cluster["weight_sum"]
+                    + feature["lat"] * feature["weight"]
+                )
+                / max(total_weight, 1e-6),
+                6,
+            )
+            target_cluster["lon"] = round(
+                (
+                    target_cluster["lon"] * target_cluster["weight_sum"]
+                    + feature["lon"] * feature["weight"]
+                )
+                / max(total_weight, 1e-6),
+                6,
+            )
+            target_cluster["weight_sum"] = total_weight
+            target_cluster["features"].append(feature)
+            target_cluster["carriers"].update(feature["carriers"])
+            target_cluster["evidence_tags"].update(feature["evidence_tags"])
+
+        clusters.sort(key=lambda item: item["weight_sum"], reverse=True)
+        selected_clusters: List[Dict[str, Any]] = []
+        selected_keys: set[int] = set()
+        selected_classes: set[str] = set()
+
+        for index, cluster in enumerate(clusters):
+            if cluster["macro_class"] in selected_classes:
+                continue
+            selected_clusters.append(cluster)
+            selected_keys.add(index)
+            selected_classes.add(cluster["macro_class"])
+            if len(selected_clusters) >= max_regions:
+                break
+
+        for index, cluster in enumerate(clusters):
+            if len(selected_clusters) >= max_regions:
+                break
+            if index in selected_keys:
+                continue
+            selected_clusters.append(cluster)
+
+        water_share = 0.0
+        for feature in weighted_features:
+            if feature["macro_class"] != "water":
+                continue
+            share = self._coerce_float((feature["attrs"].get("tags") or {}).get("pixel_share_pct")) or 0.0
+            water_share = max(water_share, share)
+
+        used: set[str] = set()
+        regions: List[RegionNode] = []
+        for cluster in selected_clusters[:max_regions]:
+            state_vector = default_state_vector(scenario_mode, "Region")
+            state_vector = self._adjust_state_vector_for_macro_class(
+                state_vector=state_vector,
+                macro_class=cluster["macro_class"],
+            )
+            name = self._name_map_seed_region(
+                cluster=cluster,
+                admin_context=admin_context,
+                center_lat=center_lat,
+                center_lon=center_lon,
+                radius_m=radius_m,
+                water_share=water_share,
+            )
+            region_id = ensure_unique_slug(name, used)
+            regions.append(
+                RegionNode(
+                    region_id=region_id,
+                    name=name,
+                    region_type=cluster["region_type"],
+                    description=self._describe_map_seed_region(
+                        cluster=cluster,
+                        admin_context=admin_context,
+                    ),
+                    layer="macro",
+                    land_use_class=self._macro_land_use_class(cluster["macro_class"]),
+                    carriers=sorted(cluster["carriers"]),
+                    tags=self._map_seed_region_tags(cluster, center_lat, center_lon, radius_m),
+                    ecology_assets=self._macro_ecology_assets(cluster),
+                    industry_tags=self._macro_industry_tags(cluster),
+                    region_constraints=self._macro_region_constraints(cluster["macro_class"]),
+                    exposure_channels=self._macro_exposure_channels(cluster["macro_class"], cluster["carriers"]),
+                    population_capacity=self._macro_population_capacity(cluster["macro_class"]),
+                    lat=cluster["lat"],
+                    lon=cluster["lon"],
+                    state_vector=normalize_state_vector(state_vector),
+                )
+            )
+
+        self._connect_regions_by_proximity(regions)
+        return regions
+
+    def _classify_map_seed_feature(self, prepared: PreparedEntityContext) -> Optional[Dict[str, Any]]:
+        attrs = prepared.entity.attributes or {}
+        subtype = str(attrs.get("subtype") or "").lower()
+        name = prepared.entity.name.lower()
+        if subtype in {"", "weather_baseline"}:
+            return None
+
+        if subtype in {"road_corridor", "transit_stop", "rail_station", "pier", "marina", "ferry_terminal"} or any(
+            token in name for token in ("桥", "bridge", "corridor", "terminal")
+        ):
+            return {
+                "macro_class": "transport",
+                "label": "交通走廊",
+                "region_type": "infrastructure_corridor",
+                "carriers": ["transport_flow"],
+                "evidence_tags": [subtype or "transport"],
+            }
+
+        if subtype in {"industrial", "wastewater_plant", "power_plant", "warehouse"}:
+            return {
+                "macro_class": "industrial",
+                "label": "工业设施带",
+                "region_type": "industrial_zone",
+                "carriers": ["surface_contact", "waste_stream"],
+                "evidence_tags": [subtype],
+            }
+
+        if subtype in {
+            "worldcover_80",
+            "water",
+            "river",
+            "stream",
+            "canal",
+            "reservoir",
+            "basin",
+            "coastline",
+            "beach",
+            "breakwater",
+            "groyne",
+        }:
+            return {
+                "macro_class": "water",
+                "label": "近岸水域",
+                "region_type": "coastal_zone",
+                "carriers": ["water_flow"],
+                "evidence_tags": [subtype],
+            }
+
+        if subtype in {
+            "worldcover_10",
+            "worldcover_90",
+            "worldcover_95",
+            "forest",
+            "wetland",
+            "nature_reserve",
+            "protected_area",
+            "park",
+            "garden",
+        }:
+            label = "树木覆盖带" if subtype == "worldcover_10" else "生态斑块"
+            if subtype in {"worldcover_90", "worldcover_95", "wetland"}:
+                label = "湿地生态带"
+            return {
+                "macro_class": "ecology",
+                "label": label,
+                "region_type": "ecology_zone",
+                "carriers": ["ecology_feedback"],
+                "evidence_tags": [subtype],
+            }
+
+        if subtype in {
+            "worldcover_50",
+            "residential",
+            "commercial",
+            "commercial_hub",
+            "office_cluster",
+            "hospital",
+            "school",
+            "university",
+        }:
+            return {
+                "macro_class": "urban",
+                "label": "建成片区",
+                "region_type": "urban_zone",
+                "carriers": ["daily_contact", "service_flow"],
+                "evidence_tags": [subtype],
+            }
+
+        if subtype in {"worldcover_20", "worldcover_30", "worldcover_40", "worldcover_60", "farmland", "farmyard", "meadow"}:
+            label = "草地开放区"
+            if subtype in {"worldcover_40", "farmland", "farmyard"}:
+                label = "农地开放区"
+            if subtype == "worldcover_60":
+                label = "裸地稀疏地表"
+            return {
+                "macro_class": "open",
+                "label": label,
+                "region_type": "open_space_zone",
+                "carriers": ["surface_runoff"],
+                "evidence_tags": [subtype],
+            }
+
+        return None
+
+    def _map_seed_feature_weight(
+        self,
+        prepared: PreparedEntityContext,
+        macro_class: str,
+        radius_m: int,
+    ) -> float:
+        attrs = prepared.entity.attributes or {}
+        share = self._coerce_float((attrs.get("tags") or {}).get("pixel_share_pct")) or 0.0
+        importance = float(attrs.get("importance") or 4)
+        distance_m = self._coerce_float(attrs.get("distance_m")) or 0.0
+        distance_factor = max(0.2, 1.0 - distance_m / max(float(radius_m), 1.0))
+        weight = importance + share * 0.85 + distance_factor * 4.0
+        if str(attrs.get("source_kind") or "").lower() == "observed":
+            weight += 1.2
+        if macro_class == "transport" and distance_m <= radius_m * 0.18:
+            weight += 3.0
+        if macro_class == "water" and share >= 20:
+            weight += 2.0
+        return round(weight, 3)
+
+    def _adjust_state_vector_for_macro_class(
+        self,
+        state_vector: Dict[str, float],
+        macro_class: str,
+    ) -> Dict[str, float]:
+        if macro_class == "water":
+            state_vector["spread_pressure"] += 10
+            state_vector["ecosystem_integrity"] += 4
+            state_vector["vulnerability_score"] += 4
+        elif macro_class == "transport":
+            state_vector["service_capacity"] += 8
+            state_vector["exposure_score"] += 8
+            state_vector["economic_stress"] += 6
+        elif macro_class == "industrial":
+            state_vector["economic_stress"] += 12
+            state_vector["ecosystem_integrity"] -= 8
+            state_vector["vulnerability_score"] += 8
+        elif macro_class == "ecology":
+            state_vector["ecosystem_integrity"] += 10
+            state_vector["livelihood_stability"] -= 2
+            state_vector["vulnerability_score"] += 6
+        elif macro_class == "urban":
+            state_vector["service_capacity"] += 6
+            state_vector["public_trust"] -= 2
+            state_vector["vulnerability_score"] += 4
+        elif macro_class == "open":
+            state_vector["ecosystem_integrity"] += 2
+            state_vector["livelihood_stability"] -= 2
+        return state_vector
+
+    def _name_map_seed_region(
+        self,
+        cluster: Dict[str, Any],
+        admin_context: Dict[str, Any],
+        center_lat: float,
+        center_lon: float,
+        radius_m: int,
+        water_share: float,
+    ) -> str:
+        road = str(admin_context.get("road") or "").strip()
+        city = str(admin_context.get("city") or "").strip()
+        macro_class = cluster["macro_class"]
+        orientation = self._orientation_label(cluster["lat"], cluster["lon"], center_lat, center_lon, radius_m)
+        label = cluster["label"]
+        center_distance = self._haversine_m(cluster["lat"], cluster["lon"], center_lat, center_lon)
+
+        if macro_class == "transport" and road:
+            return f"{road}{label}"
+        if macro_class == "water" and road and ("桥" in road or "bridge" in road.lower()) and center_distance <= radius_m * 0.2:
+            return f"{road}桥区水域"
+        if city and macro_class in {"urban", "industrial"} and center_distance <= radius_m * 0.18 and water_share < 45:
+            return f"{city}{label}"
+        if orientation:
+            return f"{orientation}{label}"
+        if city:
+            return f"{city}{label}"
+        return label
+
+    def _describe_map_seed_region(
+        self,
+        cluster: Dict[str, Any],
+        admin_context: Dict[str, Any],
+    ) -> str:
+        features = sorted(cluster["features"], key=lambda item: item["weight"], reverse=True)
+        lead = features[0]
+        lead_name = lead["prepared"].entity.name
+        subtype_labels = [item["prepared"].entity.name for item in features[1:3]]
+        tags = lead["attrs"].get("tags") or {}
+        share = self._coerce_float(tags.get("pixel_share_pct"))
+        area_label = admin_context.get("display_name") or admin_context.get("city") or "当前 AOI"
+        summary = f"由 {lead_name}"
+        if subtype_labels:
+            summary += f"、{'、'.join(subtype_labels)}"
+        summary += f" 等 {len(features)} 个空间要素归并出的{cluster['label']}。"
+        if share:
+            summary += f" 其中主导斑块约占分析像元的 {round(share, 1)}%。"
+        summary += f" 用于表达 {area_label} 内更接近真实空间结构的主导分区。"
+        return summary
+
+    def _macro_land_use_class(self, macro_class: str) -> str:
+        return {
+            "water": "water",
+            "transport": "transport",
+            "industrial": "industrial",
+            "ecology": "ecology",
+            "urban": "urban",
+            "open": "open",
+        }.get(macro_class, "urban")
+
+    def _map_seed_region_tags(
+        self,
+        cluster: Dict[str, Any],
+        center_lat: float,
+        center_lon: float,
+        radius_m: int,
+    ) -> List[str]:
+        tags = {
+            "map_seed_physical",
+            cluster["macro_class"],
+            self._orientation_label(cluster["lat"], cluster["lon"], center_lat, center_lon, radius_m) or "center",
+        }
+        tags.update(cluster["evidence_tags"])
+        return sorted(tag for tag in tags if tag)
+
+    def _macro_ecology_assets(self, cluster: Dict[str, Any]) -> List[str]:
+        macro_class = cluster["macro_class"]
+        if macro_class == "water":
+            return ["nearshore_habitat", "water_column"]
+        if macro_class == "ecology":
+            return ["habitat_patch", "indicator_species"]
+        if macro_class == "open":
+            return ["open_ground", "edge_species"]
+        return []
+
+    def _macro_industry_tags(self, cluster: Dict[str, Any]) -> List[str]:
+        macro_class = cluster["macro_class"]
+        if macro_class == "transport":
+            return ["transport", "logistics"]
+        if macro_class == "industrial":
+            return ["industrial_operations", "compliance"]
+        if macro_class == "urban":
+            return ["mixed_use", "services"]
+        return []
+
+    def _macro_region_constraints(self, macro_class: str) -> List[str]:
+        return {
+            "water": ["跨域流动", "边界模糊"],
+            "transport": ["线性扩散", "中断敏感"],
+            "industrial": ["停摆成本高", "合规压力"],
+            "ecology": ["恢复缓慢", "阈值脆弱"],
+            "urban": ["人口活动密集", "服务耦合高"],
+            "open": ["用途混杂", "边缘效应明显"],
+        }.get(macro_class, ["空间异质性"])
+
+    def _macro_exposure_channels(self, macro_class: str, carriers: set[str]) -> List[str]:
+        base = {
+            "water": ["water_flow", "shore_contact"],
+            "transport": ["traffic_flow", "surface_contact"],
+            "industrial": ["waste_stream", "surface_contact"],
+            "ecology": ["habitat_disturbance"],
+            "urban": ["daily_contact", "service_flow"],
+            "open": ["surface_runoff", "wind_rework"],
+        }.get(macro_class, ["environmental_link"])
+        return sorted(set([*base, *list(carriers)]))
+
+    def _macro_population_capacity(self, macro_class: str) -> int:
+        return {
+            "water": 10,
+            "transport": 12,
+            "industrial": 14,
+            "ecology": 8,
+            "urban": 18,
+            "open": 6,
+        }.get(macro_class, 10)
+
+    def _orientation_label(
+        self,
+        lat: float,
+        lon: float,
+        center_lat: float,
+        center_lon: float,
+        radius_m: int,
+    ) -> str:
+        distance = self._haversine_m(lat, lon, center_lat, center_lon)
+        if distance <= max(1200.0, radius_m * 0.12):
+            return "中心"
+        dx = (lon - center_lon) * math.cos(math.radians(center_lat))
+        dy = lat - center_lat
+        if abs(dx) > abs(dy) * 1.4:
+            return "东侧" if dx > 0 else "西侧"
+        if abs(dy) > abs(dx) * 1.4:
+            return "北侧" if dy > 0 else "南侧"
+        if dx >= 0 and dy >= 0:
+            return "东北侧"
+        if dx >= 0 and dy < 0:
+            return "东南侧"
+        if dx < 0 and dy >= 0:
+            return "西北侧"
+        return "西南侧"
+
+    def _connect_regions_by_proximity(self, regions: List[RegionNode]) -> None:
+        if len(regions) <= 1:
+            return
+        for region in regions:
+            candidates: List[tuple[float, str]] = []
+            for other in regions:
+                if other.region_id == region.region_id:
+                    continue
+                if None in {region.lat, region.lon, other.lat, other.lon}:
+                    continue
+                candidates.append(
+                    (
+                        self._haversine_m(float(region.lat), float(region.lon), float(other.lat), float(other.lon)),
+                        other.region_id,
+                    )
+                )
+            for _, neighbor_id in sorted(candidates, key=lambda item: item[0])[:2]:
+                region.neighbors.append(neighbor_id)
+
+        transport_regions = [region for region in regions if region.region_type == "infrastructure_corridor"]
+        for region in transport_regions:
+            candidates: List[tuple[float, str]] = []
+            for other in regions:
+                if other.region_id == region.region_id:
+                    continue
+                if None in {region.lat, region.lon, other.lat, other.lon}:
+                    continue
+                candidates.append(
+                    (
+                        self._haversine_m(float(region.lat), float(region.lon), float(other.lat), float(other.lon)),
+                        other.region_id,
+                    )
+                )
+            for _, neighbor_id in sorted(candidates, key=lambda item: item[0])[:3]:
+                region.neighbors.append(neighbor_id)
+
+        for region in regions:
+            region.neighbors = list(dict.fromkeys(neighbor for neighbor in region.neighbors if neighbor != region.region_id))
+        region_lookup = {region.region_id: region for region in regions}
+        for region in regions:
+            for neighbor_id in list(region.neighbors):
+                neighbor = region_lookup.get(neighbor_id)
+                if neighbor and region.region_id not in neighbor.neighbors:
+                    neighbor.neighbors.append(region.region_id)
+        self._ensure_region_connectivity(regions, "generic")
+
+    def _haversine_m(self, lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+        radius = 6371000.0
+        phi1 = math.radians(lat1)
+        phi2 = math.radians(lat2)
+        delta_phi = math.radians(lat2 - lat1)
+        delta_lambda = math.radians(lon2 - lon1)
+        a = (
+            math.sin(delta_phi / 2) ** 2
+            + math.cos(phi1) * math.cos(phi2) * math.sin(delta_lambda / 2) ** 2
+        )
+        return 2 * radius * math.atan2(math.sqrt(a), math.sqrt(max(1e-12, 1 - a)))
+
     def _build_regions_with_llm(
         self,
         region_candidates: List[Dict[str, Any]],
@@ -307,6 +1087,8 @@ class EnvProfileGenerator:
         document_text: str,
         scenario_mode: str,
         diffusion_template: str,
+        max_regions: int,
+        injected_variables: List[InjectedVariable],
     ) -> List[RegionNode]:
         if not self.llm_client or not document_text.strip():
             return []
@@ -318,6 +1100,7 @@ class EnvProfileGenerator:
             "region_candidates": region_candidates,
             "requirement": simulation_requirement[:1500],
             "document_excerpt": document_text[:6000],
+            "injected_variables": self._summarize_injected_variables(injected_variables),
             "output_schema": {
                 "regions": [
                     {
@@ -333,7 +1116,7 @@ class EnvProfileGenerator:
                 ]
             },
             "rules": [
-                "Return 3-8 regions whenever information allows, otherwise return at least one.",
+                f"Return 3-{max_regions} regions whenever information allows, otherwise return at least one.",
                 "Neighbors must refer to other listed regions.",
                 "Prefer region-level units, not single buildings.",
                 "If information is sparse, still return at least one region.",
@@ -364,7 +1147,7 @@ class EnvProfileGenerator:
         regions: List[RegionNode] = []
         name_to_id: Dict[str, str] = {}
         candidate_lookup = {str(item.get("name") or "").strip(): item for item in region_candidates}
-        for item in raw_regions[:8]:
+        for item in raw_regions[:max_regions]:
             name = str(item.get("name") or "").strip()
             if not name:
                 continue
@@ -441,12 +1224,23 @@ class EnvProfileGenerator:
                 region.neighbors.append(regions[index + 1].region_id)
 
     def _default_carriers(self, diffusion_template: str) -> List[str]:
-        if diffusion_template == "air":
+        diffusion_template = normalize_transport_family(diffusion_template)
+        if diffusion_template in {"air", "atmospheric_plume", "ash_plume"}:
             return ["air_mass"]
-        if diffusion_template == "inland_water":
+        if diffusion_template in {"inland_water", "inland_water_network", "surface_flood_flow"}:
             return ["river_segment"]
-        if diffusion_template == "marine":
+        if diffusion_template in {"marine", "marine_current", "coastal_inundation"}:
             return ["coastal_current"]
+        if diffusion_template in {"ecological_mobility", "bio_ecological_transmission"}:
+            return ["habitat_corridor"]
+        if diffusion_template == "infrastructure_failure":
+            return ["infrastructure_corridor"]
+        if diffusion_template == "impact_blast":
+            return ["impact_wave"]
+        if diffusion_template == "slow_ecosystem_decline":
+            return ["ecological_stress_gradient"]
+        if diffusion_template == "terrestrial_surface":
+            return ["surface_runoff"]
         return ["environmental_link"]
 
     def _build_transport_edges(
@@ -455,34 +1249,47 @@ class EnvProfileGenerator:
         diffusion_template: str,
         diffusion_context: Dict[str, Any],
     ) -> List[TransportEdge]:
+        diffusion_template = normalize_transport_family(diffusion_template)
         if len(regions) <= 1:
             return []
-        if diffusion_template == "inland_water":
+        if diffusion_template in {"inland_water", "inland_water_network", "surface_flood_flow"}:
             return self._build_inland_water_transport_edges(regions)
-        if diffusion_template == "air":
+        if diffusion_template in {"air", "atmospheric_plume", "ash_plume"}:
             return self._build_projected_transport_edges(
                 regions=regions,
                 flow_direction_deg=diffusion_context.get("flow_direction_deg"),
-                channel_type="air_corridor",
-                attenuation_rate=0.18,
+                channel_type="ash_plume" if diffusion_template == "ash_plume" else "air_corridor",
+                attenuation_rate=0.22 if diffusion_template == "ash_plume" else 0.18,
                 travel_time_rounds=1,
-                retention_factor=0.06,
+                retention_factor=0.1 if diffusion_template == "ash_plume" else 0.06,
                 directionality="directed",
                 evidence={"transport_context": diffusion_context},
                 rationale="Atmospheric transport follows dominant wind-driven downwind ordering.",
             )
-        if diffusion_template == "marine":
+        if diffusion_template in {"marine", "marine_current", "coastal_inundation"}:
             return self._build_projected_transport_edges(
                 regions=regions,
                 flow_direction_deg=diffusion_context.get("flow_direction_deg"),
-                channel_type="coastal_current",
-                attenuation_rate=0.1,
-                travel_time_rounds=2,
-                retention_factor=0.42,
-                directionality="asymmetric",
+                channel_type="storm_surge_front" if diffusion_template == "coastal_inundation" else "coastal_current",
+                attenuation_rate=0.08 if diffusion_template == "coastal_inundation" else 0.1,
+                travel_time_rounds=1 if diffusion_template == "coastal_inundation" else 2,
+                retention_factor=0.28 if diffusion_template == "coastal_inundation" else 0.42,
+                directionality="directed" if diffusion_template == "coastal_inundation" else "asymmetric",
                 evidence={"transport_context": diffusion_context},
                 rationale="Marine transport follows coastal-current ordering with stronger retention in enclosed zones.",
             )
+        if diffusion_template == "ecological_mobility":
+            return self._build_neighbor_transport_edges(regions, channel_type="habitat_corridor")
+        if diffusion_template == "bio_ecological_transmission":
+            return self._build_neighbor_transport_edges(regions, channel_type="bio_vector")
+        if diffusion_template == "infrastructure_failure":
+            return self._build_neighbor_transport_edges(regions, channel_type="infrastructure_corridor")
+        if diffusion_template == "impact_blast":
+            return self._build_neighbor_transport_edges(regions, channel_type="impact_wave")
+        if diffusion_template == "slow_ecosystem_decline":
+            return self._build_neighbor_transport_edges(regions, channel_type="ecological_stress_gradient")
+        if diffusion_template == "terrestrial_surface":
+            return self._build_neighbor_transport_edges(regions, channel_type="surface_runoff")
         return self._build_neighbor_transport_edges(regions, channel_type="environmental_link")
 
     def _build_inland_water_transport_edges(self, regions: List[RegionNode]) -> List[TransportEdge]:
@@ -753,10 +1560,803 @@ class EnvProfileGenerator:
         prepared_entities: List[PreparedEntityContext],
         regions: List[RegionNode],
         subregions: List[RegionNode],
+        map_evidence_context: Optional[MapEvidenceContext] = None,
     ) -> int:
+        if map_evidence_context is not None:
+            return map_evidence_context.target_agent_count
         base = len(prepared_entities)
         layered = max(len(subregions) * 4, len(regions) * 12)
         return min(180, max(84, base + layered))
+
+    def _build_map_evidence_context(
+        self,
+        prepared_entities: List[PreparedEntityContext],
+        regions: List[RegionNode],
+        subregions: List[RegionNode],
+        diffusion_template: str,
+        search_mode: str,
+    ) -> MapEvidenceContext:
+        del search_mode
+        score = defaultdict(float)
+        subtype_counts: Dict[str, int] = defaultdict(int)
+        source_counts: Dict[str, int] = defaultdict(int)
+        refs: Dict[str, List[str]] = defaultdict(list)
+        admin_context: Dict[str, Any] = {}
+        observed_human_subtypes: set[str] = set()
+        warnings: List[str] = []
+
+        def add_ref(bucket: str, ref: str) -> None:
+            if ref and ref not in refs[bucket]:
+                refs[bucket].append(ref)
+
+        for prepared in prepared_entities:
+            attrs = prepared.entity.attributes or {}
+            ref = prepared.entity.uuid or prepared.entity.name
+            if isinstance(attrs.get("admin_context"), dict):
+                admin_context = dict(attrs.get("admin_context") or {})
+                add_ref("governance", ref)
+                add_ref("admin", ref)
+
+            subtype = str(attrs.get("subtype") or "").strip().lower()
+            source_kind = str(attrs.get("source_kind") or "").strip().lower()
+            proxy_role = str(attrs.get("proxy_role") or "").strip().lower()
+            if source_kind:
+                source_counts[source_kind] += 1
+            if subtype:
+                subtype_counts[subtype] += 1
+
+            weight = self._map_feature_weight_for_evidence(prepared)
+            if subtype in HUMAN_ACTIVITY_SUBTYPES:
+                score["human_activity"] += weight
+                observed_human_subtypes.add(subtype)
+                add_ref("human_activity", ref)
+            if subtype in INDUSTRY_SUBTYPES:
+                score["industry"] += weight
+                add_ref("industry", ref)
+            if subtype in TRANSPORT_SUBTYPES:
+                score["transport"] += weight
+                add_ref("transport", ref)
+                if subtype in {"pier", "marina", "ferry_terminal"}:
+                    add_ref("coastal_work", ref)
+            if subtype in WATER_SUBTYPES:
+                score["water"] += weight
+                add_ref("water", ref)
+            if subtype in ECOLOGY_SUBTYPES:
+                score["ecology"] += weight
+                add_ref("ecology", ref)
+            if subtype in AGRICULTURE_SUBTYPES:
+                score["agriculture"] += weight
+                add_ref("agriculture", ref)
+            if subtype in OPEN_SUBTYPES:
+                score["open"] += weight
+                add_ref("open", ref)
+            if subtype == "weather_baseline":
+                add_ref("weather", ref)
+                add_ref("governance", ref)
+
+            # Inferred proxy nodes should not create human activity by themselves.
+            if proxy_role in {"residents", "operators", "visitors"} and observed_human_subtypes:
+                score["human_activity"] += weight * 0.45
+                add_ref("human_activity", ref)
+            elif proxy_role in {"regulators", "maintainers"}:
+                add_ref("governance", ref)
+            elif proxy_role == "vulnerable_groups" and observed_human_subtypes:
+                add_ref("human_activity", ref)
+
+        for region in regions:
+            if region.region_id:
+                add_ref(region.land_use_class or region.region_type or "region", f"region::{region.region_id}")
+            for tag in region.tags or []:
+                normalized = str(tag).lower()
+                if normalized in {"water", "ecology", "transport", "industrial", "urban", "open"}:
+                    add_ref(normalized, f"region::{region.region_id}")
+
+        evidence_level = self._map_evidence_level(source_counts)
+        environment_archetype = self._infer_map_environment_archetype(
+            human_activity_score=score["human_activity"],
+            industry_score=score["industry"],
+            transport_score=score["transport"],
+            ecology_score=score["ecology"],
+            water_score=score["water"],
+            agriculture_score=score["agriculture"],
+            open_score=score["open"],
+            subtype_counts=subtype_counts,
+            diffusion_template=diffusion_template,
+        )
+        target_range = self._map_target_count_range(environment_archetype)
+        target_agent_count = self._resolve_map_target_agent_count(
+            target_range=target_range,
+            environment_archetype=environment_archetype,
+            evidence_level=evidence_level,
+            prepared_entities=prepared_entities,
+            regions=regions,
+            subregions=subregions,
+            source_counts=source_counts,
+        )
+        allowed_roles, forbidden_roles = self._map_role_policy(
+            environment_archetype=environment_archetype,
+            human_activity_score=score["human_activity"],
+            industry_score=score["industry"],
+            transport_score=score["transport"],
+            ecology_score=score["ecology"],
+            water_score=score["water"],
+            agriculture_score=score["agriculture"],
+        )
+        if environment_archetype == "ocean_sparse":
+            warnings.append("AOI lacks direct human-activity evidence; social agents are gated off.")
+        if evidence_level == "low":
+            warnings.append("Map evidence is sparse; generated agents should be treated as low-confidence simulation proxies.")
+
+        dominant_subtypes = [
+            key
+            for key, _count in sorted(subtype_counts.items(), key=lambda item: (-item[1], item[0]))[:8]
+        ]
+        return MapEvidenceContext(
+            human_activity_score=score["human_activity"],
+            industry_score=score["industry"],
+            transport_score=score["transport"],
+            ecology_score=score["ecology"],
+            water_score=score["water"],
+            agriculture_score=score["agriculture"],
+            open_score=score["open"],
+            evidence_level=evidence_level,
+            environment_archetype=environment_archetype,
+            target_count_range=target_range,
+            target_agent_count=target_agent_count,
+            allowed_roles=allowed_roles,
+            forbidden_roles=forbidden_roles,
+            evidence_refs_by_role={key: list(dict.fromkeys(value)) for key, value in refs.items()},
+            feature_subtype_counts=dict(subtype_counts),
+            source_kind_counts=dict(source_counts),
+            dominant_subtypes=dominant_subtypes,
+            admin_context=admin_context,
+            warnings=warnings,
+        )
+
+    def _map_feature_weight_for_evidence(self, prepared: PreparedEntityContext) -> float:
+        attrs = prepared.entity.attributes or {}
+        source_kind = str(attrs.get("source_kind") or "").lower()
+        source_multiplier = {"observed": 1.0, "detected": 0.7, "inferred": 0.35}.get(source_kind, 0.45)
+        importance = self._coerce_float(attrs.get("importance")) or 4.0
+        tags = attrs.get("tags") if isinstance(attrs.get("tags"), dict) else {}
+        share = self._coerce_float((tags or {}).get("pixel_share_pct")) or 0.0
+        confidence = self._coerce_float(attrs.get("confidence")) or 0.6
+        return round((importance * 0.7 + share * 0.08 + confidence * 2.0) * source_multiplier, 3)
+
+    def _map_evidence_level(self, source_counts: Dict[str, int]) -> str:
+        observed = source_counts.get("observed", 0)
+        detected = source_counts.get("detected", 0)
+        inferred = source_counts.get("inferred", 0)
+        if observed >= 4 or (observed >= 2 and detected >= 3):
+            return "high"
+        if observed + detected >= 4 or observed + detected + inferred >= 6:
+            return "medium"
+        return "low"
+
+    def _infer_map_environment_archetype(
+        self,
+        *,
+        human_activity_score: float,
+        industry_score: float,
+        transport_score: float,
+        ecology_score: float,
+        water_score: float,
+        agriculture_score: float,
+        open_score: float,
+        subtype_counts: Dict[str, int],
+        diffusion_template: str,
+    ) -> str:
+        coastal_tokens = {"coastline", "beach", "pier", "marina", "breakwater", "groyne"}
+        has_coastal = bool(coastal_tokens & set(subtype_counts))
+        if water_score >= 4 and human_activity_score < 2 and industry_score < 2 and transport_score < 2:
+            return "ocean_sparse" if not has_coastal else "nearshore_natural"
+        if industry_score >= max(human_activity_score, transport_score, ecology_score, agriculture_score, 3):
+            return "industrial"
+        if transport_score >= 3 and water_score >= 2:
+            return "coastal_port"
+        if transport_score >= max(human_activity_score, industry_score, ecology_score, 3):
+            return "transport_corridor"
+        if human_activity_score >= max(industry_score, transport_score, ecology_score, agriculture_score, 4):
+            return "urban"
+        if agriculture_score >= max(human_activity_score, industry_score, transport_score, 3):
+            return "agricultural"
+        if ecology_score >= max(human_activity_score, industry_score, transport_score, agriculture_score, 3):
+            return "wetland_forest" if water_score >= 2 or normalize_transport_family(diffusion_template) in {"marine_current", "inland_water_network", "surface_flood_flow", "coastal_inundation"} else "ecology_sparse"
+        if open_score >= 3 and human_activity_score < 3:
+            return "natural_sparse"
+        return "mixed_sparse" if human_activity_score < 3 and industry_score < 3 and transport_score < 3 else "mixed"
+
+    def _map_target_count_range(self, environment_archetype: str) -> Tuple[int, int]:
+        if environment_archetype in {"ocean_sparse", "nearshore_natural"}:
+            return (8, 20)
+        if environment_archetype in {"natural_sparse", "ecology_sparse", "mixed_sparse"}:
+            return (12, 35)
+        if environment_archetype in {"agricultural", "wetland_forest"}:
+            return (25, 60)
+        if environment_archetype in {"urban", "coastal_port", "industrial", "transport_corridor"}:
+            return (50, 120)
+        return (30, 80)
+
+    def _resolve_map_target_agent_count(
+        self,
+        *,
+        target_range: Tuple[int, int],
+        environment_archetype: str,
+        evidence_level: str,
+        prepared_entities: List[PreparedEntityContext],
+        regions: List[RegionNode],
+        subregions: List[RegionNode],
+        source_counts: Dict[str, int],
+    ) -> int:
+        lower, upper = target_range
+        evidence_count = source_counts.get("observed", 0) + source_counts.get("detected", 0)
+        base = len(subregions) * 4 + len(regions) * 2 + evidence_count
+        if environment_archetype in {"urban", "coastal_port", "industrial", "transport_corridor"}:
+            base = len(subregions) * 6 + evidence_count * 3 + source_counts.get("inferred", 0)
+        elif environment_archetype in {"ocean_sparse", "nearshore_natural"}:
+            base = len(subregions) * 4 + max(2, evidence_count // 3)
+        if evidence_level == "low":
+            base = min(base, lower + 4)
+        if not prepared_entities:
+            base = lower
+        return max(lower, min(upper, int(base)))
+
+    def _map_role_policy(
+        self,
+        *,
+        environment_archetype: str,
+        human_activity_score: float,
+        industry_score: float,
+        transport_score: float,
+        ecology_score: float,
+        water_score: float,
+        agriculture_score: float,
+    ) -> Tuple[List[str], List[str]]:
+        allowed = {"ecology", "carrier", "remote_monitor", "governance"}
+        if human_activity_score >= 2.0:
+            allowed.update({"resident", "shop_owner", "community_committee", "white_collar", "market_association", "visitor"})
+        if industry_score >= 2.0:
+            allowed.update({"worker", "plant_operator", "safety_inspector", "logistics_operator"})
+        if transport_score >= 2.0:
+            allowed.update({"transport_operator", "emergency_office", "worker"})
+        if ecology_score >= 2.0 or water_score >= 2.0:
+            allowed.update({"conservation_station", "scientist", "field_observer"})
+        if agriculture_score >= 2.0:
+            allowed.update({"field_observer", "producer", "maintenance_operator"})
+
+        forbidden = set()
+        if environment_archetype == "ocean_sparse":
+            forbidden.update({"resident", "shop_owner", "community_committee", "white_collar", "worker", "plant_operator", "visitor", "field_observer", "conservation_station"})
+        if human_activity_score < 2.0:
+            forbidden.update({"resident", "shop_owner", "community_committee", "white_collar", "market_association", "visitor"})
+        if industry_score < 2.0:
+            forbidden.update({"plant_operator", "safety_inspector"})
+        if transport_score < 2.0:
+            forbidden.update({"transport_operator"})
+        return sorted(allowed - forbidden), sorted(forbidden)
+
+    def _generate_map_seed_agent_profiles(
+        self,
+        *,
+        prepared_entities: List[PreparedEntityContext],
+        regions: List[RegionNode],
+        subregions: List[RegionNode],
+        scenario_mode: str,
+        diffusion_template: str,
+        simulation_requirement: str,
+        evidence_context: MapEvidenceContext,
+        target_count: int,
+        injected_variables: List[InjectedVariable],
+        use_llm: bool,
+        profile_created_callback: Optional[Callable[[EnvAgentProfile], None]] = None,
+    ) -> Tuple[List[EnvAgentProfile], List[EnvAgentProfile], Dict[str, Any]]:
+        del prepared_entities
+        candidates = self._plan_map_agent_candidates(
+            regions=regions,
+            subregions=subregions,
+            diffusion_template=diffusion_template,
+            evidence_context=evidence_context,
+        )
+        if use_llm and self.llm_client:
+            candidates.extend(
+                self._plan_map_agents_with_llm(
+                    regions=regions,
+                    subregions=subregions,
+                    simulation_requirement=simulation_requirement,
+                    evidence_context=evidence_context,
+                    injected_variables=injected_variables,
+                )
+            )
+
+        unique_candidates: Dict[str, AgentCandidatePlan] = {}
+        for candidate in candidates:
+            key = f"{candidate.agent_type}:{candidate.agent_subtype}:{candidate.home_subregion_id}:{candidate.role_name}"
+            if key not in unique_candidates:
+                unique_candidates[key] = candidate
+
+        accepted: List[AgentCandidatePlan] = []
+        rejected: List[Dict[str, Any]] = []
+        for candidate in unique_candidates.values():
+            ok, reason = self._review_map_agent_candidate(candidate, evidence_context, subregions)
+            if ok:
+                accepted.append(candidate)
+            else:
+                rejected.append({"candidate": candidate.to_dict(), "reason": reason})
+
+        if use_llm and self.llm_client and accepted:
+            rejected_ids = self._critique_map_agent_candidates_with_llm(
+                evidence_context=evidence_context,
+                candidates=accepted,
+            )
+            if rejected_ids:
+                kept = []
+                for candidate in accepted:
+                    if candidate.candidate_id in rejected_ids:
+                        rejected.append({"candidate": candidate.to_dict(), "reason": "LLM critic rejected as weakly grounded"})
+                    else:
+                        kept.append(candidate)
+                accepted = kept
+
+        if len(accepted) < evidence_context.target_count_range[0]:
+            supplements = self._supplement_map_agent_candidates(
+                accepted=accepted,
+                regions=regions,
+                subregions=subregions,
+                diffusion_template=diffusion_template,
+                evidence_context=evidence_context,
+                needed=max(
+                    evidence_context.target_count_range[0] - len(accepted) + 8,
+                    (evidence_context.target_count_range[0] - len(accepted)) * 2,
+                ),
+            )
+            for candidate in supplements:
+                ok, reason = self._review_map_agent_candidate(candidate, evidence_context, subregions)
+                if ok:
+                    accepted.append(candidate)
+                else:
+                    rejected.append({"candidate": candidate.to_dict(), "reason": reason})
+
+        accepted = accepted[:target_count]
+        region_lookup = {region.region_id: region for region in regions}
+        subregion_lookup = {subregion.region_id: subregion for subregion in subregions}
+        profiles: List[EnvAgentProfile] = []
+        for index, candidate in enumerate(accepted):
+            profile = self._build_profile_from_candidate(
+                index=index,
+                candidate=candidate,
+                regions=region_lookup,
+                subregions=subregion_lookup,
+                scenario_mode=scenario_mode,
+            )
+            profiles.append(profile)
+            if profile_created_callback:
+                profile_created_callback(profile)
+
+        role_distribution: Dict[str, int] = defaultdict(int)
+        for profile in profiles:
+            role_distribution[profile.agent_type] += 1
+
+        summary = {
+            "map_evidence_context": evidence_context.to_dict(),
+            "accepted_candidates_count": len(accepted),
+            "rejected_candidates_count": len(rejected),
+            "rejected_candidates": rejected[:80],
+            "role_distribution": dict(role_distribution),
+            "target_count_range": list(evidence_context.target_count_range),
+            "target_agent_count": target_count,
+            "actual_agent_count": len(profiles),
+            "low_confidence_warnings": list(evidence_context.warnings),
+        }
+        return profiles, profiles, summary
+
+    def _plan_map_agent_candidates(
+        self,
+        *,
+        regions: List[RegionNode],
+        subregions: List[RegionNode],
+        diffusion_template: str,
+        evidence_context: MapEvidenceContext,
+    ) -> List[AgentCandidatePlan]:
+        region_lookup = {region.region_id: region for region in regions}
+        candidates: List[AgentCandidatePlan] = []
+        for subregion in subregions:
+            parent_region = region_lookup.get(subregion.parent_region_id or "", regions[0])
+            for blueprint in self._map_seed_agent_blueprints(subregion, parent_region, diffusion_template, evidence_context):
+                evidence_refs = self._candidate_evidence_refs(blueprint, subregion, evidence_context)
+                candidate_id = f"map_{len(candidates)}_{subregion.region_id}_{blueprint['agent_subtype']}"
+                candidates.append(
+                    AgentCandidatePlan(
+                        candidate_id=candidate_id,
+                        role_name=blueprint["name"],
+                        node_family=blueprint["node_family"],
+                        agent_type=blueprint["agent_type"],
+                        agent_subtype=blueprint["agent_subtype"],
+                        role_type=blueprint["role_type"],
+                        home_region_id=parent_region.region_id,
+                        home_subregion_id=subregion.region_id,
+                        evidence_refs=evidence_refs,
+                        confidence=self._candidate_confidence(blueprint, evidence_refs, evidence_context),
+                        why_this_agent=blueprint.get("why") or f"由 {subregion.name} 的 {subregion.land_use_class or 'mixed'} 地图证据推导。",
+                        action_space_hint=list(blueprint.get("action_space_hint") or []),
+                        generation_mode="map_rule",
+                    )
+                )
+        return candidates
+
+    def _map_seed_agent_blueprints(
+        self,
+        subregion: RegionNode,
+        region: RegionNode,
+        diffusion_template: str,
+        evidence_context: MapEvidenceContext,
+    ) -> List[Dict[str, Any]]:
+        diffusion_template = normalize_transport_family(diffusion_template)
+        if evidence_context.environment_archetype == "ocean_sparse":
+            carrier_subtype = "marine_current" if diffusion_template in {"marine", "marine_current", "coastal_inundation"} else (diffusion_template or "water_flow")
+            return [
+                {"name": "水体载体", "node_family": "EnvironmentalCarrier", "agent_type": "carrier", "agent_subtype": carrier_subtype, "role_type": "CarrierNode", "action_space_hint": ["transport_pressure", "retain_pollutant", "dilute"]},
+                {"name": "海洋生态受体", "node_family": "EcologicalReceptor", "agent_type": "ecology", "agent_subtype": "habitat_species", "role_type": "HabitatSpecies", "action_space_hint": ["migrate", "stress_signal"]},
+                {"name": "远程海况监测主体", "node_family": "GovernmentActor", "agent_type": "governance", "agent_subtype": "environment_bureau", "role_type": "EnvironmentBureau", "action_space_hint": ["monitor", "issue_alert"]},
+                {"name": "污染扩散载体", "node_family": "EnvironmentalCarrier", "agent_type": "carrier", "agent_subtype": "surface_runoff" if diffusion_template not in {"marine", "marine_current", "coastal_inundation"} else "coastal_current", "role_type": "CarrierNode", "action_space_hint": ["transport_pressure", "dilute"]},
+            ]
+
+        blueprints = [dict(item) for item in self._synthetic_agent_blueprints(subregion, region, diffusion_template)]
+        if subregion.land_use_class in {"water", "ecology"}:
+            blueprints.append(
+                {"name": "远程监测主体", "node_family": "GovernmentActor", "agent_type": "governance", "agent_subtype": "environment_bureau", "role_type": "EnvironmentBureau", "action_space_hint": ["monitor", "publish_assessment"]}
+            )
+        if evidence_context.agriculture_score >= 2 and subregion.land_use_class in {"open", "ecology", "water"}:
+            blueprints.append(
+                {"name": "农业生产者", "node_family": "HumanActor", "agent_type": "human", "agent_subtype": "field_observer", "role_type": "Farmer", "action_space_hint": ["report_hazard", "adapt"]}
+            )
+        if evidence_context.transport_score >= 2 and subregion.land_use_class not in {"transport"}:
+            blueprints.append(
+                {"name": "交通运维员", "node_family": "HumanActor", "agent_type": "human", "agent_subtype": "worker", "role_type": "TransportWorker", "action_space_hint": ["report_hazard", "reroute"]}
+            )
+        return blueprints
+
+    def _candidate_evidence_refs(
+        self,
+        blueprint: Dict[str, Any],
+        subregion: RegionNode,
+        evidence_context: MapEvidenceContext,
+    ) -> List[str]:
+        subtype = blueprint.get("agent_subtype")
+        agent_type = blueprint.get("agent_type")
+        buckets: List[str] = []
+        if agent_type in {"ecology", "carrier"}:
+            buckets.extend([subregion.land_use_class, "water", "ecology", "open", "weather"])
+        elif subtype in {"resident", "shop_owner", "community_committee", "white_collar", "market_association"}:
+            buckets.extend(["human_activity", "urban", "transport"])
+        elif subtype in {"worker", "plant_operator", "safety_inspector"}:
+            buckets.extend(["industry", "transport", "agriculture", "coastal_work"])
+        elif subtype in {"field_observer"}:
+            buckets.extend(["agriculture", "ecology", "water", "coastal_work", "human_activity"])
+        elif subtype in {"conservation_station", "scientist"}:
+            buckets.extend(["ecology", "water", "governance"])
+        elif agent_type == "governance":
+            buckets.extend(["governance", "admin", "weather", "water", "ecology", "industry", "transport"])
+        else:
+            buckets.extend([subregion.land_use_class, "human_activity", "governance"])
+
+        refs: List[str] = []
+        for bucket in buckets:
+            refs.extend(evidence_context.evidence_refs_by_role.get(str(bucket or ""), []))
+        if subregion.region_id:
+            refs.append(f"subregion::{subregion.region_id}")
+        return list(dict.fromkeys(refs))[:8]
+
+    def _candidate_confidence(
+        self,
+        blueprint: Dict[str, Any],
+        evidence_refs: List[str],
+        evidence_context: MapEvidenceContext,
+    ) -> float:
+        base = {"high": 0.78, "medium": 0.66, "low": 0.52}.get(evidence_context.evidence_level, 0.58)
+        if blueprint.get("agent_type") in {"human", "organization"} and not evidence_refs:
+            base -= 0.25
+        if blueprint.get("agent_type") in {"ecology", "carrier"}:
+            base += 0.08
+        if blueprint.get("agent_type") == "governance":
+            base += 0.04
+        return max(0.1, min(0.95, round(base, 3)))
+
+    def _review_map_agent_candidate(
+        self,
+        candidate: AgentCandidatePlan,
+        evidence_context: MapEvidenceContext,
+        subregions: List[RegionNode],
+    ) -> Tuple[bool, str]:
+        subregion_ids = {item.region_id for item in subregions}
+        if candidate.home_subregion_id not in subregion_ids:
+            return False, "candidate subregion does not exist"
+        if candidate.agent_subtype in evidence_context.forbidden_roles:
+            return False, f"{candidate.agent_subtype} is forbidden for {evidence_context.environment_archetype}"
+        if candidate.confidence < 0.4:
+            return False, "candidate confidence below grounding threshold"
+        if evidence_context.environment_archetype == "ocean_sparse" and candidate.agent_type in {"human", "organization"}:
+            return False, "ocean_sparse context lacks human activity evidence"
+
+        if candidate.agent_type in {"human", "organization"}:
+            environmental_org = candidate.agent_subtype in {"conservation_station"} and evidence_context.environment_archetype != "ocean_sparse"
+            if not environmental_org and not self._candidate_has_social_evidence(candidate, evidence_context):
+                return False, "social or organization agent lacks direct map evidence"
+        return True, "accepted"
+
+    def _candidate_has_social_evidence(
+        self,
+        candidate: AgentCandidatePlan,
+        evidence_context: MapEvidenceContext,
+    ) -> bool:
+        refs = set(candidate.evidence_refs)
+        social_refs = set(evidence_context.evidence_refs_by_role.get("human_activity", []))
+        industry_refs = set(evidence_context.evidence_refs_by_role.get("industry", []))
+        transport_refs = set(evidence_context.evidence_refs_by_role.get("transport", []))
+        agriculture_refs = set(evidence_context.evidence_refs_by_role.get("agriculture", []))
+        coastal_refs = set(evidence_context.evidence_refs_by_role.get("coastal_work", []))
+        if candidate.agent_subtype in {"resident", "shop_owner", "community_committee", "white_collar", "market_association"}:
+            return bool(refs & social_refs)
+        if candidate.agent_subtype in {"worker", "plant_operator", "safety_inspector"}:
+            return bool(refs & (industry_refs | transport_refs | agriculture_refs | coastal_refs))
+        if candidate.agent_subtype == "field_observer":
+            return bool(refs & (social_refs | agriculture_refs | coastal_refs))
+        return bool(refs & (social_refs | industry_refs | transport_refs | agriculture_refs | coastal_refs))
+
+    def _supplement_map_agent_candidates(
+        self,
+        *,
+        accepted: List[AgentCandidatePlan],
+        regions: List[RegionNode],
+        subregions: List[RegionNode],
+        diffusion_template: str,
+        evidence_context: MapEvidenceContext,
+        needed: int,
+    ) -> List[AgentCandidatePlan]:
+        del regions
+        if needed <= 0 or not subregions:
+            return []
+        supplements: List[AgentCandidatePlan] = []
+        existing_keys = {f"{item.agent_type}:{item.agent_subtype}:{item.home_subregion_id}:{item.role_name}" for item in accepted}
+        index = 0
+        while len(supplements) < needed and index < needed * 4 + 12:
+            subregion = subregions[index % len(subregions)]
+            parent_region_id = subregion.parent_region_id or ""
+            if evidence_context.environment_archetype == "ocean_sparse":
+                blueprints = [
+                    {"name": f"海洋状态哨兵{len(supplements) + 1}", "node_family": "EcologicalReceptor", "agent_type": "ecology", "agent_subtype": "habitat_species", "role_type": "HabitatSpecies"},
+                    {"name": f"水动力载体{len(supplements) + 1}", "node_family": "EnvironmentalCarrier", "agent_type": "carrier", "agent_subtype": "coastal_current" if normalize_transport_family(diffusion_template) in {"marine", "marine_current", "coastal_inundation"} else "water_flow", "role_type": "CarrierNode"},
+                    {"name": f"远程监测节点{len(supplements) + 1}", "node_family": "GovernmentActor", "agent_type": "governance", "agent_subtype": "environment_bureau", "role_type": "EnvironmentBureau"},
+                ]
+            else:
+                blueprints = self._map_seed_agent_blueprints(subregion, RegionNode(region_id=parent_region_id, name=parent_region_id), diffusion_template, evidence_context)
+            for blueprint in blueprints:
+                key = f"{blueprint['agent_type']}:{blueprint['agent_subtype']}:{subregion.region_id}:{blueprint['name']}"
+                if key in existing_keys:
+                    blueprint = {
+                        **blueprint,
+                        "name": f"{blueprint['name']}扩展{len(supplements) + 1}",
+                    }
+                    key = f"{blueprint['agent_type']}:{blueprint['agent_subtype']}:{subregion.region_id}:{blueprint['name']}"
+                    if key in existing_keys:
+                        continue
+                refs = self._candidate_evidence_refs(blueprint, subregion, evidence_context)
+                supplements.append(
+                    AgentCandidatePlan(
+                        candidate_id=f"map_supplement_{len(supplements)}_{subregion.region_id}_{blueprint['agent_subtype']}",
+                        role_name=blueprint["name"],
+                        node_family=blueprint["node_family"],
+                        agent_type=blueprint["agent_type"],
+                        agent_subtype=blueprint["agent_subtype"],
+                        role_type=blueprint["role_type"],
+                        home_region_id=parent_region_id,
+                        home_subregion_id=subregion.region_id,
+                        evidence_refs=refs,
+                        confidence=self._candidate_confidence(blueprint, refs, evidence_context),
+                        why_this_agent=f"用于满足 {evidence_context.environment_archetype} 地图场景的最低环境模拟密度。",
+                        action_space_hint=list(blueprint.get("action_space_hint") or []),
+                        generation_mode="map_rule_supplement",
+                    )
+                )
+                existing_keys.add(key)
+                if len(supplements) >= needed:
+                    break
+            index += 1
+        return supplements
+
+    def _build_profile_from_candidate(
+        self,
+        *,
+        index: int,
+        candidate: AgentCandidatePlan,
+        regions: Dict[str, RegionNode],
+        subregions: Dict[str, RegionNode],
+        scenario_mode: str,
+    ) -> EnvAgentProfile:
+        subregion = subregions.get(candidate.home_subregion_id)
+        region = regions.get(candidate.home_region_id)
+        if subregion is None:
+            subregion = next(iter(subregions.values()))
+        if region is None:
+            region = regions.get(subregion.parent_region_id or "") or next(iter(regions.values()))
+        behavior = self._behavior_bundle(
+            node_family=candidate.node_family,
+            agent_subtype=candidate.agent_subtype,
+            region_name=region.name,
+            subregion_name=subregion.name,
+            land_use_class=subregion.land_use_class or "mixed",
+        )
+        if candidate.action_space_hint:
+            behavior["action_space"] = list(dict.fromkeys([*candidate.action_space_hint, *behavior["action_space"]]))
+        display_name = f"{subregion.name}{candidate.role_name}"
+        return EnvAgentProfile(
+            agent_id=index,
+            username=self._username_from_name(display_name, index),
+            name=display_name,
+            node_family=candidate.node_family,
+            role_type=candidate.role_type,
+            bio=behavior["bio"],
+            persona=f"{behavior['persona']} 生成依据：{candidate.why_this_agent}",
+            profession=candidate.role_name,
+            primary_region=region.region_id,
+            agent_type=candidate.agent_type,
+            agent_subtype=candidate.agent_subtype,
+            archetype_key=f"map:{subregion.land_use_class}:{candidate.agent_subtype}",
+            home_region_id=region.region_id,
+            home_subregion_id=subregion.region_id,
+            influenced_regions=[region.region_id, *region.neighbors[:2]],
+            goals=behavior["goals"],
+            sensitivities=behavior["sensitivities"],
+            motivation_stack=behavior["motivation_stack"],
+            capabilities=behavior["capabilities"],
+            constraints=behavior["constraints"],
+            action_space=behavior["action_space"],
+            decision_policy=behavior["decision_policy"],
+            impact_profile=behavior["impact_profile"],
+            stance_profile=behavior["stance_profile"],
+            resource_budget=behavior["resource_budget"],
+            spawn_weight=behavior["spawn_weight"],
+            is_synthesized=True,
+            state_vector=default_state_vector(scenario_mode, candidate.node_family),
+            source_entity_uuid=None,
+            source_entity_type=candidate.role_type,
+            generation_mode=candidate.generation_mode,
+            evidence_refs=list(dict.fromkeys(candidate.evidence_refs)),
+            evidence_confidence=candidate.confidence,
+            review_status="accepted",
+            grounding_reason=candidate.why_this_agent,
+        )
+
+    def _plan_map_agents_with_llm(
+        self,
+        *,
+        regions: List[RegionNode],
+        subregions: List[RegionNode],
+        simulation_requirement: str,
+        evidence_context: MapEvidenceContext,
+        injected_variables: List[InjectedVariable],
+    ) -> List[AgentCandidatePlan]:
+        if not self.llm_client:
+            return []
+        prompt = {
+            "task": "Create grounded EnvFish agent candidates from map evidence only.",
+            "rules": [
+                "Return compact JSON only.",
+                "Do not invent residents, workers, businesses, tourists, or institutions unless allowed_roles supports them.",
+                "Every candidate must include evidence_refs from evidence_refs_by_role or a subregion ref.",
+                "Respect forbidden_roles strictly.",
+            ],
+            "evidence_context": evidence_context.to_dict(),
+            "regions": [region.to_dict() for region in regions[:8]],
+            "subregions": [subregion.to_dict() for subregion in subregions[:16]],
+            "requirement": simulation_requirement[:1200],
+            "injected_variables": self._summarize_injected_variables(injected_variables),
+            "schema": {
+                "candidates": [
+                    {
+                        "role_name": "short role label",
+                        "agent_type": "human|organization|governance|ecology|carrier",
+                        "agent_subtype": "resident|field_observer|environment_bureau|habitat_species|water_flow",
+                        "role_type": "RoleType",
+                        "home_region_id": "region id",
+                        "home_subregion_id": "subregion id",
+                        "evidence_refs": ["uuid or subregion ref"],
+                        "confidence": 0.7,
+                        "why_this_agent": "one sentence",
+                        "action_space_hint": ["monitor"],
+                    }
+                ]
+            },
+        }
+        try:
+            result = self.llm_client.chat_json(
+                messages=[
+                    {"role": "system", "content": "You generate fact-constrained map simulation agent plans as JSON."},
+                    {"role": "user", "content": json.dumps(prompt, ensure_ascii=False)},
+                ],
+                temperature=0.15,
+                max_tokens=2200,
+            )
+        except Exception as exc:
+            logger.warning(f"Map agent LLM planning failed, using deterministic candidates: {exc}")
+            return []
+        raw_candidates = result.get("candidates") if isinstance(result, dict) else None
+        if not isinstance(raw_candidates, list):
+            return []
+        region_ids = {region.region_id for region in regions}
+        subregion_ids = {subregion.region_id for subregion in subregions}
+        candidates: List[AgentCandidatePlan] = []
+        for index, item in enumerate(raw_candidates[:24]):
+            if not isinstance(item, dict):
+                continue
+            home_region_id = str(item.get("home_region_id") or "")
+            home_subregion_id = str(item.get("home_subregion_id") or "")
+            if home_region_id not in region_ids or home_subregion_id not in subregion_ids:
+                continue
+            agent_type = str(item.get("agent_type") or "ecology")
+            agent_subtype = str(item.get("agent_subtype") or "habitat_species")
+            node_family = self._node_family_for_agent_type(agent_type)
+            confidence = self._coerce_float(item.get("confidence")) or 0.55
+            candidates.append(
+                AgentCandidatePlan(
+                    candidate_id=f"map_llm_{index}_{home_subregion_id}_{agent_subtype}",
+                    role_name=str(item.get("role_name") or agent_subtype),
+                    node_family=node_family,
+                    agent_type=agent_type,
+                    agent_subtype=agent_subtype,
+                    role_type=str(item.get("role_type") or agent_subtype.title().replace("_", "")),
+                    home_region_id=home_region_id,
+                    home_subregion_id=home_subregion_id,
+                    evidence_refs=[str(ref) for ref in (item.get("evidence_refs") or []) if ref],
+                    confidence=max(0.0, min(1.0, confidence)),
+                    why_this_agent=str(item.get("why_this_agent") or "LLM planned from constrained map evidence."),
+                    action_space_hint=[str(action) for action in (item.get("action_space_hint") or []) if action],
+                    generation_mode="map_llm_personalized",
+                )
+            )
+        return candidates
+
+    def _critique_map_agent_candidates_with_llm(
+        self,
+        *,
+        evidence_context: MapEvidenceContext,
+        candidates: List[AgentCandidatePlan],
+    ) -> set[str]:
+        if not self.llm_client:
+            return set()
+        prompt = {
+            "task": "Review whether map-generated agent candidates are grounded.",
+            "evidence_context": evidence_context.to_dict(),
+            "candidates": [candidate.to_dict() for candidate in candidates[:60]],
+            "rules": [
+                "Reject agents that are not plausible for the environment_archetype.",
+                "Reject social agents without direct human, industry, transport, agriculture, tourism, or administrative evidence.",
+                "Be conservative when the archetype is ocean_sparse.",
+            ],
+            "schema": {"rejected_candidate_ids": ["candidate_id"]},
+        }
+        try:
+            result = self.llm_client.chat_json(
+                messages=[
+                    {"role": "system", "content": "You are a strict map-grounding critic. Return JSON only."},
+                    {"role": "user", "content": json.dumps(prompt, ensure_ascii=False)},
+                ],
+                temperature=0.0,
+                max_tokens=900,
+            )
+        except Exception as exc:
+            logger.warning(f"Map agent LLM critic failed, keeping deterministic review: {exc}")
+            return set()
+        rejected = result.get("rejected_candidate_ids") if isinstance(result, dict) else []
+        return {str(item) for item in rejected or []}
+
+    def _node_family_for_agent_type(self, agent_type: str) -> str:
+        return {
+            "human": "HumanActor",
+            "organization": "OrganizationActor",
+            "governance": "GovernmentActor",
+            "ecology": "EcologicalReceptor",
+            "carrier": "EnvironmentalCarrier",
+        }.get(agent_type, "EcologicalReceptor")
 
     def _build_subregions(
         self,
@@ -778,6 +2378,8 @@ class EnvProfileGenerator:
                     state_vector["exposure_score"] += 12
                     state_vector["spread_pressure"] += 10
                     state_vector["vulnerability_score"] += 8
+                if blueprint["distance_band"] == "core":
+                    state_vector["spread_pressure"] += 8
                 if blueprint["land_use_class"] == "industrial":
                     state_vector["economic_stress"] += 10
                     state_vector["ecosystem_integrity"] -= 8
@@ -785,6 +2387,16 @@ class EnvProfileGenerator:
                     state_vector["ecosystem_integrity"] += 6
                     state_vector["vulnerability_score"] += 6
                     state_vector["livelihood_stability"] -= 4
+                if blueprint["land_use_class"] == "water":
+                    state_vector["spread_pressure"] += 12
+                    state_vector["ecosystem_integrity"] += 4
+                    state_vector["service_capacity"] -= 2
+                if blueprint["land_use_class"] == "transport":
+                    state_vector["service_capacity"] += 8
+                    state_vector["economic_stress"] += 6
+                if blueprint["land_use_class"] == "open":
+                    state_vector["ecosystem_integrity"] += 2
+                    state_vector["livelihood_stability"] -= 2
                 local_subregions.append(
                     RegionNode(
                         region_id=subregion_id,
@@ -817,101 +2429,460 @@ class EnvProfileGenerator:
         return subregions
 
     def _subregion_blueprints(self, region: RegionNode, diffusion_template: str) -> List[Dict[str, Any]]:
+        diffusion_template = normalize_transport_family(diffusion_template)
         ecology_focus = {
             "marine": {
-                "label": "滨海生态带",
+                "label": "滨海生态缓冲带",
+                "ecology_assets": ["mangrove", "seabird", "shellfish"],
+                "carriers": ["coastal_current", "shore_wind"],
+            },
+            "marine_current": {
+                "label": "滨海生态缓冲带",
                 "ecology_assets": ["mangrove", "seabird", "shellfish"],
                 "carriers": ["coastal_current", "shore_wind"],
             },
             "inland_water": {
-                "label": "河岸生态带",
+                "label": "河岸生态缓冲带",
+                "ecology_assets": ["riparian_plants", "freshwater_fish", "wetland_birds"],
+                "carriers": ["river_segment", "groundwater_exchange"],
+            },
+            "inland_water_network": {
+                "label": "河岸生态缓冲带",
                 "ecology_assets": ["riparian_plants", "freshwater_fish", "wetland_birds"],
                 "carriers": ["river_segment", "groundwater_exchange"],
             },
             "air": {
-                "label": "下风向生态缓冲区",
+                "label": "下风向生态缓冲带",
                 "ecology_assets": ["tree_canopy", "urban_birds", "soil_microbiome"],
                 "carriers": ["air_mass", "dust_pathway"],
             },
+            "atmospheric_plume": {
+                "label": "下风向生态缓冲带",
+                "ecology_assets": ["tree_canopy", "urban_birds", "soil_microbiome"],
+                "carriers": ["air_mass", "dust_pathway"],
+            },
+            "ash_plume": {
+                "label": "火山灰影响带",
+                "ecology_assets": ["tree_canopy", "soil_microbiome", "downstream_fish"],
+                "carriers": ["ash_plume", "lahar_runoff"],
+            },
+            "coastal_inundation": {
+                "label": "沿海淹没缓冲带",
+                "ecology_assets": ["saltmarsh", "estuarine_fish", "shorebirds"],
+                "carriers": ["storm_surge_front", "saline_intrusion"],
+            },
+            "surface_flood_flow": {
+                "label": "洪泛冲积带",
+                "ecology_assets": ["wetland_plants", "freshwater_fish", "soil_microbiome"],
+                "carriers": ["surface_flood_flow", "sewage_overflow"],
+            },
+            "ecological_mobility": {
+                "label": "扩散走廊带",
+                "ecology_assets": ["indicator_species", "edge_species"],
+                "carriers": ["habitat_corridor", "human_transport_vector"],
+            },
+            "bio_ecological_transmission": {
+                "label": "宿主-媒介传播带",
+                "ecology_assets": ["indicator_species", "wild_hosts"],
+                "carriers": ["bio_vector", "host_density"],
+            },
+            "slow_ecosystem_decline": {
+                "label": "慢变量退化带",
+                "ecology_assets": ["tree_canopy", "wetland_plants", "indicator_species"],
+                "carriers": ["ecological_stress_gradient", "water_shortage"],
+            },
+            "infrastructure_failure": {
+                "label": "设施级联系统带",
+                "ecology_assets": ["indicator_species"],
+                "carriers": ["infrastructure_corridor", "service_disruption"],
+            },
+            "impact_blast": {
+                "label": "撞击影响带",
+                "ecology_assets": ["indicator_species", "soil_microbiome"],
+                "carriers": ["impact_wave", "ejecta_fallout"],
+            },
+            "terrestrial_surface": {
+                "label": "地表暴露缓冲带",
+                "ecology_assets": ["indicator_species", "soil_microbiome"],
+                "carriers": ["surface_runoff", "soil_accumulation"],
+            },
             "generic": {
                 "label": "生态缓冲带",
-                "ecology_assets": ["wetland_plants", "indicator_species"],
+                "ecology_assets": ["indicator_species"],
                 "carriers": ["environmental_link"],
             },
         }.get(diffusion_template, {})
 
-        return [
-            {
-                "slug": "near_residential",
-                "label": "近污染居民区",
-                "region_type": "residential_zone",
-                "land_use_class": "residential",
-                "distance_band": "near",
-                "description": f"{region.name} 中最先感知环境异常和生活压力的居住片区。",
-                "ecology_assets": ["street_trees", "pet_animals"],
-                "industry_tags": ["community_services"],
-                "region_constraints": ["密集人口", "信息敏感"],
-                "exposure_channels": ["air", "water", "daily_contact"],
-                "population_capacity": 18,
-                "carriers": list(region.carriers),
-            },
-            {
-                "slug": "commercial_service",
-                "label": "商业服务区",
-                "region_type": "commercial_zone",
-                "land_use_class": "commercial",
-                "distance_band": "transition",
-                "description": f"{region.name} 的办公、零售和物流服务节点。",
-                "ecology_assets": ["urban_birds"],
-                "industry_tags": ["retail", "logistics"],
-                "region_constraints": ["供给波动", "舆情敏感"],
-                "exposure_channels": ["consumer_flow", "supply_chain"],
-                "population_capacity": 14,
-                "carriers": list(region.carriers),
-            },
-            {
-                "slug": "industrial_interface",
-                "label": "工业作业区",
-                "region_type": "industrial_zone",
-                "land_use_class": "industrial",
-                "distance_band": "near",
-                "description": f"{region.name} 中与排放、生产和基础设施相连的工业片区。",
-                "ecology_assets": ["soil_microbiome"],
-                "industry_tags": ["manufacturing", "heavy_equipment"],
-                "region_constraints": ["合规压力", "停工成本"],
-                "exposure_channels": ["waste_stream", "transport", "surface_contact"],
-                "population_capacity": 12,
-                "carriers": list(region.carriers),
-            },
-            {
-                "slug": "civic_response",
-                "label": "治理响应区",
-                "region_type": "civic_zone",
-                "land_use_class": "civic",
-                "distance_band": "transition",
-                "description": f"{region.name} 中公共服务、治理与媒体响应集中的片区。",
-                "ecology_assets": ["monitoring_plots"],
-                "industry_tags": ["governance", "healthcare", "education"],
-                "region_constraints": ["协调摩擦", "资源分配"],
-                "exposure_channels": ["policy", "public_communication"],
-                "population_capacity": 10,
-                "carriers": list(region.carriers),
-            },
-            {
-                "slug": "eco_buffer",
-                "label": ecology_focus.get("label", "生态缓冲带"),
-                "region_type": "ecology_zone",
-                "land_use_class": "ecology",
-                "distance_band": "far",
-                "description": f"{region.name} 中承载典型生态受体和自然修复潜力的生态片区。",
-                "ecology_assets": ecology_focus.get("ecology_assets", ["indicator_species"]),
-                "industry_tags": ["habitat"],
-                "region_constraints": ["恢复缓慢", "阈值脆弱"],
-                "exposure_channels": ecology_focus.get("carriers", list(region.carriers)),
-                "population_capacity": 8,
-                "carriers": ecology_focus.get("carriers", list(region.carriers)),
-            },
-        ]
+        tagset = {str(tag).lower() for tag in (region.tags or []) if tag}
+        carriers = list(region.carriers or [])
+        blueprints: List[Dict[str, Any]] = []
+
+        def add_blueprint(
+            *,
+            slug: str,
+            label: str,
+            region_type: str,
+            land_use_class: str,
+            distance_band: str,
+            description: str,
+            ecology_assets: List[str],
+            industry_tags: List[str],
+            region_constraints: List[str],
+            exposure_channels: List[str],
+            population_capacity: int,
+            carriers_override: Optional[List[str]] = None,
+        ) -> None:
+            if any(item["slug"] == slug for item in blueprints):
+                return
+            blueprints.append(
+                {
+                    "slug": slug,
+                    "label": label,
+                    "region_type": region_type,
+                    "land_use_class": land_use_class,
+                    "distance_band": distance_band,
+                    "description": description,
+                    "ecology_assets": ecology_assets,
+                    "industry_tags": industry_tags,
+                    "region_constraints": region_constraints,
+                    "exposure_channels": exposure_channels,
+                    "population_capacity": population_capacity,
+                    "carriers": carriers_override or carriers,
+                }
+            )
+
+        is_water = region.land_use_class == "water" or region.region_type == "coastal_zone" or "water" in tagset
+        is_transport = region.land_use_class == "transport" or region.region_type == "infrastructure_corridor" or "transport" in tagset
+        is_industrial = region.land_use_class == "industrial" or region.region_type == "industrial_zone" or "industrial" in tagset
+        is_ecology = region.land_use_class == "ecology" or region.region_type == "ecology_zone" or "ecology" in tagset
+        is_urban = region.land_use_class in {"urban", "residential", "commercial"} or region.region_type in {"urban_zone", "residential_zone"} or "urban" in tagset
+        is_open = region.land_use_class == "open" or region.region_type == "open_space_zone" or "open" in tagset
+
+        if is_water:
+            add_blueprint(
+                slug="water_core",
+                label="主水域核心带",
+                region_type="water_core_zone",
+                land_use_class="water",
+                distance_band="core",
+                description=f"{region.name} 中承担主要水体交换与污染输移的核心水域。",
+                ecology_assets=["water_column", "plankton"],
+                industry_tags=["hydrology"],
+                region_constraints=["扩散快", "边界不稳定"],
+                exposure_channels=["water_flow", "shore_contact"],
+                population_capacity=6,
+                carriers_override=["water_flow", *carriers],
+            )
+            add_blueprint(
+                slug="shore_buffer",
+                label=ecology_focus.get("label", "岸线生态缓冲带"),
+                region_type="shore_buffer_zone",
+                land_use_class="ecology",
+                distance_band="transition",
+                description=f"{region.name} 与陆地或岸线过渡的生态缓冲带。",
+                ecology_assets=ecology_focus.get("ecology_assets", ["indicator_species"]),
+                industry_tags=["habitat"],
+                region_constraints=["恢复慢", "受扰敏感"],
+                exposure_channels=ecology_focus.get("carriers", ["water_flow"]),
+                population_capacity=8,
+                carriers_override=ecology_focus.get("carriers", carriers),
+            )
+            if "transport" in tagset or "road_corridor" in tagset or "港" in region.name or "桥" in region.name:
+                add_blueprint(
+                    slug="bridge_interface",
+                    label="桥区扰动带",
+                    region_type="transport_interface_zone",
+                    land_use_class="transport",
+                    distance_band="near",
+                    description=f"{region.name} 中受桥梁、航运或交通活动直接扰动的接口带。",
+                    ecology_assets=["surface_birds"],
+                    industry_tags=["transport", "logistics"],
+                    region_constraints=["线性暴露", "管控复杂"],
+                    exposure_channels=["traffic_flow", "surface_contact", "water_flow"],
+                    population_capacity=10,
+                )
+
+        elif is_transport:
+            add_blueprint(
+                slug="corridor_core",
+                label="交通走廊核心段",
+                region_type="transport_core_zone",
+                land_use_class="transport",
+                distance_band="core",
+                description=f"{region.name} 中承担主要流量与暴露传导的线性核心段。",
+                ecology_assets=["roadside_birds"],
+                industry_tags=["transport", "logistics"],
+                region_constraints=["中断敏感", "联动范围大"],
+                exposure_channels=["traffic_flow", "surface_contact"],
+                population_capacity=12,
+            )
+            add_blueprint(
+                slug="service_node",
+                label="服务接驳节点",
+                region_type="service_node_zone",
+                land_use_class="commercial",
+                distance_band="transition",
+                description=f"{region.name} 周边承接物流、补给和服务转换的节点带。",
+                ecology_assets=["urban_birds"],
+                industry_tags=["services", "logistics"],
+                region_constraints=["舆情敏感", "供给波动"],
+                exposure_channels=["service_flow", "traffic_flow"],
+                population_capacity=10,
+            )
+            add_blueprint(
+                slug="response_interface",
+                label="应急响应接口",
+                region_type="civic_zone",
+                land_use_class="civic",
+                distance_band="near",
+                description=f"{region.name} 中最需要调度、封控或分流的治理接口。",
+                ecology_assets=["monitoring_plots"],
+                industry_tags=["governance", "emergency"],
+                region_constraints=["协调复杂", "跨部门联动"],
+                exposure_channels=["policy", "public_communication", "traffic_flow"],
+                population_capacity=9,
+            )
+            if "water_flow" in carriers or "water" in tagset:
+                add_blueprint(
+                    slug="bridgehead_water",
+                    label="桥头近水接口",
+                    region_type="waterfront_interface_zone",
+                    land_use_class="water",
+                    distance_band="transition",
+                    description=f"{region.name} 与近岸水体相互作用最强的桥头接口带。",
+                    ecology_assets=["nearshore_habitat"],
+                    industry_tags=["transport", "shoreline"],
+                    region_constraints=["跨域耦合", "扰动扩散"],
+                    exposure_channels=["traffic_flow", "water_flow"],
+                    population_capacity=7,
+                )
+
+        elif is_industrial:
+            add_blueprint(
+                slug="operation_core",
+                label="作业核心区",
+                region_type="industrial_core_zone",
+                land_use_class="industrial",
+                distance_band="core",
+                description=f"{region.name} 中生产、排放或设备运行最集中的作业核心区。",
+                ecology_assets=["soil_microbiome"],
+                industry_tags=["manufacturing", "operations"],
+                region_constraints=["停摆成本高", "合规压力大"],
+                exposure_channels=["waste_stream", "surface_contact"],
+                population_capacity=12,
+            )
+            add_blueprint(
+                slug="logistics_edge",
+                label="物流接口带",
+                region_type="industrial_logistics_zone",
+                land_use_class="transport",
+                distance_band="near",
+                description=f"{region.name} 与仓储、运输和装卸相连的物流接口带。",
+                ecology_assets=["roadside_birds"],
+                industry_tags=["logistics", "freight"],
+                region_constraints=["链路脆弱", "扩散外溢"],
+                exposure_channels=["transport", "surface_contact"],
+                population_capacity=10,
+            )
+            add_blueprint(
+                slug="compliance_buffer",
+                label="合规治理带",
+                region_type="civic_zone",
+                land_use_class="civic",
+                distance_band="transition",
+                description=f"{region.name} 中用于监测、执法和应急布设的治理缓冲带。",
+                ecology_assets=["monitoring_plots"],
+                industry_tags=["governance", "compliance"],
+                region_constraints=["协调摩擦", "信息压力"],
+                exposure_channels=["policy", "monitoring"],
+                population_capacity=8,
+            )
+            if "water_flow" in carriers or "ecology" in tagset:
+                add_blueprint(
+                    slug="runoff_buffer",
+                    label="径流生态缓冲带",
+                    region_type="ecology_zone",
+                    land_use_class="ecology",
+                    distance_band="far",
+                    description=f"{region.name} 中承接工业外溢影响的生态与径流缓冲带。",
+                    ecology_assets=["wetland_plants", "indicator_species"],
+                    industry_tags=["habitat"],
+                    region_constraints=["恢复慢", "阈值脆弱"],
+                    exposure_channels=["surface_runoff", "water_flow"],
+                    population_capacity=7,
+                )
+
+        elif is_ecology:
+            add_blueprint(
+                slug="eco_core",
+                label="生态核心区",
+                region_type="ecology_core_zone",
+                land_use_class="ecology",
+                distance_band="core",
+                description=f"{region.name} 中生态受体最集中、恢复价值最高的核心片区。",
+                ecology_assets=ecology_focus.get("ecology_assets", ["indicator_species"]),
+                industry_tags=["habitat"],
+                region_constraints=["阈值脆弱", "恢复缓慢"],
+                exposure_channels=ecology_focus.get("carriers", carriers),
+                population_capacity=7,
+                carriers_override=ecology_focus.get("carriers", carriers),
+            )
+            add_blueprint(
+                slug="observation_edge",
+                label="观测巡护带",
+                region_type="ecology_monitor_zone",
+                land_use_class="civic",
+                distance_band="transition",
+                description=f"{region.name} 中承担巡护、监测和干预观测的边缘带。",
+                ecology_assets=["monitoring_plots"],
+                industry_tags=["conservation", "monitoring"],
+                region_constraints=["资源有限", "进入受限"],
+                exposure_channels=["monitoring", "public_communication"],
+                population_capacity=6,
+            )
+            if "water_flow" in carriers or "water" in tagset:
+                add_blueprint(
+                    slug="wetland_margin",
+                    label="近水生态边缘带",
+                    region_type="shore_buffer_zone",
+                    land_use_class="water",
+                    distance_band="near",
+                    description=f"{region.name} 中与水体交换最强的近水生态边缘带。",
+                    ecology_assets=["nearshore_habitat", "waders"],
+                    industry_tags=["shoreline"],
+                    region_constraints=["受扰敏感", "边界多变"],
+                    exposure_channels=["water_flow", "habitat_disturbance"],
+                    population_capacity=5,
+                )
+
+        elif is_urban:
+            add_blueprint(
+                slug="residential_life",
+                label="居住生活片区",
+                region_type="residential_zone",
+                land_use_class="residential",
+                distance_band="near",
+                description=f"{region.name} 中最先承受日常暴露与生活压力变化的居住片区。",
+                ecology_assets=["street_trees", "pet_animals"],
+                industry_tags=["community_services"],
+                region_constraints=["人口密集", "信息敏感"],
+                exposure_channels=["daily_contact", "service_flow"],
+                population_capacity=18,
+            )
+            add_blueprint(
+                slug="service_cluster",
+                label="服务商业片区",
+                region_type="commercial_zone",
+                land_use_class="commercial",
+                distance_band="transition",
+                description=f"{region.name} 中承担办公、零售、补给与服务流转的片区。",
+                ecology_assets=["urban_birds"],
+                industry_tags=["retail", "services"],
+                region_constraints=["供给波动", "舆情敏感"],
+                exposure_channels=["consumer_flow", "service_flow"],
+                population_capacity=14,
+            )
+            add_blueprint(
+                slug="civic_node",
+                label="治理服务节点",
+                region_type="civic_zone",
+                land_use_class="civic",
+                distance_band="transition",
+                description=f"{region.name} 中承担信息发布、医疗与应急协同的治理服务节点。",
+                ecology_assets=["monitoring_plots"],
+                industry_tags=["governance", "healthcare", "education"],
+                region_constraints=["协调摩擦", "响应压力"],
+                exposure_channels=["policy", "public_communication"],
+                population_capacity=10,
+            )
+            if "transport" in tagset or "transport_flow" in carriers:
+                add_blueprint(
+                    slug="mobility_edge",
+                    label="交通接触带",
+                    region_type="mobility_interface_zone",
+                    land_use_class="transport",
+                    distance_band="near",
+                    description=f"{region.name} 中与交通流、通勤流和物流接口最强的边缘带。",
+                    ecology_assets=["roadside_birds"],
+                    industry_tags=["transport", "mobility"],
+                    region_constraints=["暴露高", "波及快"],
+                    exposure_channels=["traffic_flow", "daily_contact"],
+                    population_capacity=11,
+                )
+            if "water_flow" in carriers or "water" in tagset or "ecology" in tagset:
+                add_blueprint(
+                    slug="urban_eco_edge",
+                    label=ecology_focus.get("label", "城市生态边缘带"),
+                    region_type="ecology_zone",
+                    land_use_class="ecology",
+                    distance_band="far",
+                    description=f"{region.name} 中与生态斑块或岸线交错的城市生态边缘带。",
+                    ecology_assets=ecology_focus.get("ecology_assets", ["indicator_species"]),
+                    industry_tags=["habitat", "urban_edge"],
+                    region_constraints=["边缘效应强", "恢复慢"],
+                    exposure_channels=ecology_focus.get("carriers", carriers),
+                    population_capacity=8,
+                    carriers_override=ecology_focus.get("carriers", carriers),
+                )
+
+        elif is_open:
+            add_blueprint(
+                slug="open_core",
+                label="开放地表核心区",
+                region_type="open_core_zone",
+                land_use_class="open",
+                distance_band="core",
+                description=f"{region.name} 中土地覆盖较裸露或低密度的开放地表核心区。",
+                ecology_assets=["edge_species"],
+                industry_tags=["open_space"],
+                region_constraints=["用途混杂", "边缘效应强"],
+                exposure_channels=["surface_runoff", "wind_rework"],
+                population_capacity=6,
+            )
+            add_blueprint(
+                slug="edge_buffer",
+                label="过渡缓冲带",
+                region_type="transition_buffer_zone",
+                land_use_class="ecology",
+                distance_band="transition",
+                description=f"{region.name} 中连接开放地表与周边建成/生态单元的过渡缓冲带。",
+                ecology_assets=["indicator_species"],
+                industry_tags=["edge_transition"],
+                region_constraints=["功能不稳定", "边界模糊"],
+                exposure_channels=["surface_runoff", "habitat_disturbance"],
+                population_capacity=7,
+            )
+            if "transport" in tagset:
+                add_blueprint(
+                    slug="roadside_fringe",
+                    label="路侧边缘带",
+                    region_type="roadside_zone",
+                    land_use_class="transport",
+                    distance_band="near",
+                    description=f"{region.name} 中与道路或交通边界接触最强的路侧边缘带。",
+                    ecology_assets=["roadside_birds"],
+                    industry_tags=["transport"],
+                    region_constraints=["扰动频繁", "碎片化"],
+                    exposure_channels=["traffic_flow", "surface_contact"],
+                    population_capacity=6,
+                )
+
+        if not blueprints:
+            add_blueprint(
+                slug="general_transition",
+                label="综合过渡区",
+                region_type="transition_zone",
+                land_use_class="urban",
+                distance_band="transition",
+                description=f"{region.name} 中暂未细分出更具体类型的综合过渡片区。",
+                ecology_assets=["indicator_species"],
+                industry_tags=["mixed_use"],
+                region_constraints=["信息有限"],
+                exposure_channels=list(carriers or ["environmental_link"]),
+                population_capacity=8,
+            )
+
+        return blueprints
 
     def _expand_synthetic_agents(
         self,
@@ -956,13 +2927,19 @@ class EnvProfileGenerator:
         diffusion_template: str,
     ) -> List[Dict[str, Any]]:
         ecology_name = {
-            "marine": "红树林观察点" if subregion.land_use_class == "ecology" else "海鸥群",
-            "inland_water": "河岸鱼群" if subregion.land_use_class == "ecology" else "湿地鸟群",
-            "air": "城市树冠层" if subregion.land_use_class == "ecology" else "下风向鸟群",
+            "marine": "红树林观察点" if subregion.land_use_class in {"ecology", "water"} else "海鸥群",
+            "inland_water": "河岸鱼群" if subregion.land_use_class in {"ecology", "water"} else "湿地鸟群",
+            "air": "城市树冠层" if subregion.land_use_class in {"ecology", "open"} else "下风向鸟群",
             "generic": "指示物种群",
         }.get(diffusion_template, "指示物种群")
 
         blueprints_by_land_use = {
+            "urban": [
+                {"name": "居民代表", "node_family": "HumanActor", "agent_type": "human", "agent_subtype": "resident", "role_type": "Resident"},
+                {"name": "社区经营者", "node_family": "HumanActor", "agent_type": "human", "agent_subtype": "shop_owner", "role_type": "ShopOwner"},
+                {"name": "社区委员会", "node_family": "OrganizationActor", "agent_type": "organization", "agent_subtype": "community_committee", "role_type": "CommunityCommittee"},
+                {"name": "城市鸟群", "node_family": "EcologicalReceptor", "agent_type": "ecology", "agent_subtype": "urban_birds", "role_type": "UrbanBirds"},
+            ],
             "residential": [
                 {"name": "居民代表", "node_family": "HumanActor", "agent_type": "human", "agent_subtype": "resident", "role_type": "Resident"},
                 {"name": "环保志愿者", "node_family": "HumanActor", "agent_type": "human", "agent_subtype": "activist", "role_type": "EnvironmentalVolunteer"},
@@ -993,8 +2970,26 @@ class EnvProfileGenerator:
                 {"name": ecology_name, "node_family": "EcologicalReceptor", "agent_type": "ecology", "agent_subtype": "habitat_species", "role_type": "HabitatSpecies"},
                 {"name": "水体/空气载体", "node_family": "EnvironmentalCarrier", "agent_type": "carrier", "agent_subtype": diffusion_template or "environmental_link", "role_type": "CarrierNode"},
             ],
+            "water": [
+                {"name": "近岸观察者", "node_family": "HumanActor", "agent_type": "human", "agent_subtype": "field_observer", "role_type": "FieldObserver"},
+                {"name": "水域巡护站", "node_family": "OrganizationActor", "agent_type": "organization", "agent_subtype": "conservation_station", "role_type": "ConservationStation"},
+                {"name": ecology_name, "node_family": "EcologicalReceptor", "agent_type": "ecology", "agent_subtype": "habitat_species", "role_type": "HabitatSpecies"},
+                {"name": "水体载体", "node_family": "EnvironmentalCarrier", "agent_type": "carrier", "agent_subtype": diffusion_template or "water_flow", "role_type": "CarrierNode"},
+            ],
+            "transport": [
+                {"name": "通道运维员", "node_family": "HumanActor", "agent_type": "human", "agent_subtype": "worker", "role_type": "Worker"},
+                {"name": "交通运营方", "node_family": "OrganizationActor", "agent_type": "organization", "agent_subtype": "plant_operator", "role_type": "PlantOperator"},
+                {"name": "应急协调员", "node_family": "GovernmentActor", "agent_type": "governance", "agent_subtype": "emergency_office", "role_type": "EmergencyOffice"},
+                {"name": "路侧生态哨兵", "node_family": "EcologicalReceptor", "agent_type": "ecology", "agent_subtype": "urban_birds", "role_type": "UrbanBirds"},
+            ],
+            "open": [
+                {"name": "现场观察者", "node_family": "HumanActor", "agent_type": "human", "agent_subtype": "field_observer", "role_type": "FieldObserver"},
+                {"name": "开放空间维护方", "node_family": "OrganizationActor", "agent_type": "organization", "agent_subtype": "community_committee", "role_type": "CommunityCommittee"},
+                {"name": ecology_name, "node_family": "EcologicalReceptor", "agent_type": "ecology", "agent_subtype": "urban_ecology", "role_type": "EcologySentinel"},
+                {"name": "地表载体", "node_family": "EnvironmentalCarrier", "agent_type": "carrier", "agent_subtype": "surface_runoff", "role_type": "CarrierNode"},
+            ],
         }
-        return blueprints_by_land_use.get(subregion.land_use_class, blueprints_by_land_use["residential"])
+        return blueprints_by_land_use.get(subregion.land_use_class, blueprints_by_land_use["urban"])
 
     def _build_synthetic_profile(
         self,
@@ -1344,6 +3339,14 @@ class EnvProfileGenerator:
             merged["decision_policy"] = {**merged["decision_policy"], "economic_weight": 0.85, "ecology_weight": 0.25}
         if land_use_class == "ecology":
             merged["decision_policy"] = {**merged["decision_policy"], "economic_weight": 0.1, "ecology_weight": 0.95}
+        if land_use_class == "transport":
+            merged["decision_policy"] = {**merged["decision_policy"], "economic_weight": 0.75, "ecology_weight": 0.2}
+            merged["capabilities"] = list(dict.fromkeys([*merged["capabilities"], "routing", "traffic_control"]))
+        if land_use_class == "water":
+            merged["decision_policy"] = {**merged["decision_policy"], "economic_weight": 0.15, "ecology_weight": 0.9}
+            merged["capabilities"] = list(dict.fromkeys([*merged["capabilities"], "hydro_observation"]))
+        if land_use_class == "open":
+            merged["decision_policy"] = {**merged["decision_policy"], "economic_weight": 0.2, "ecology_weight": 0.75}
         return merged
 
     def _build_profile(
@@ -1354,13 +3357,25 @@ class EnvProfileGenerator:
         subregions: List[RegionNode],
         scenario_mode: str,
         simulation_requirement: str,
+        injected_variables: List[InjectedVariable],
         use_llm: bool,
     ) -> EnvAgentProfile:
         primary_region = self._match_region(prepared, regions)
         primary_subregion = self._match_subregion(prepared, primary_region, subregions)
-        state_vector = default_state_vector(scenario_mode, prepared.node_family)
+        relevant_variables = self._select_variables_for_profile(prepared, primary_region, primary_subregion, injected_variables)
+        state_vector = self._apply_variable_pressure_to_state_vector(
+            default_state_vector(scenario_mode, prepared.node_family),
+            relevant_variables,
+            prepared.node_family,
+        )
         base_goals = self._default_goals(prepared.node_family, primary_region.name)
         sensitivities = self._default_sensitivities(prepared.node_family, primary_region.name)
+        if relevant_variables:
+            base_goals = self._merge_text_items(base_goals, [f"respond to {item.name}" for item in relevant_variables[:2]])
+            sensitivities = self._merge_text_items(
+                sensitivities,
+                [item.description or item.name for item in relevant_variables[:2]],
+            )
 
         llm_payload = None
         if use_llm and self.llm_client:
@@ -1368,6 +3383,7 @@ class EnvProfileGenerator:
                 prepared=prepared,
                 primary_region=primary_region,
                 simulation_requirement=simulation_requirement,
+                injected_variables=relevant_variables,
             )
 
         username = self._username_from_name(prepared.entity.name, index)
@@ -1438,6 +3454,15 @@ class EnvProfileGenerator:
         for region in regions:
             if region.name.lower() in haystack or region.region_id.replace("_", " ") in haystack:
                 return region
+        lat = self._coerce_float(prepared.entity.attributes.get("lat"))
+        lon = self._coerce_float(prepared.entity.attributes.get("lon"))
+        if lat is not None and lon is not None:
+            geo_candidates = [region for region in regions if region.lat is not None and region.lon is not None]
+            if geo_candidates:
+                return min(
+                    geo_candidates,
+                    key=lambda item: self._haversine_m(lat, lon, float(item.lat), float(item.lon)),
+                )
         return regions[0]
 
     def _match_subregion(
@@ -1471,13 +3496,19 @@ class EnvProfileGenerator:
         haystack = f"{prepared.entity_type} {prepared.entity.name} {prepared.summary}".lower()
         preferred_land_use = "residential"
         if prepared.node_family in {"EcologicalReceptor", "EnvironmentalCarrier"}:
-            preferred_land_use = "ecology"
+            preferred_land_use = "water" if any(item.land_use_class == "water" for item in candidates) else "ecology"
         elif prepared.node_family == "GovernmentActor":
             preferred_land_use = "civic"
         elif prepared.node_family == "OrganizationActor":
-            preferred_land_use = "commercial"
+            preferred_land_use = "transport" if any(token in haystack for token in ("transport", "traffic", "logistics", "bridge", "港", "桥")) else "commercial"
         elif "worker" in haystack or "factory" in haystack or "industrial" in haystack:
             preferred_land_use = "industrial"
+        elif any(token in haystack for token in ("transport", "traffic", "bridge", "corridor", "road", "港珠澳")):
+            preferred_land_use = "transport"
+        elif any(token in haystack for token in ("water", "wetland", "coast", "bay", "shore", "海", "水域", "近岸")):
+            preferred_land_use = "water" if any(item.land_use_class == "water" for item in candidates) else "ecology"
+        elif any(token in haystack for token in ("grass", "meadow", "open", "bare", "草地", "裸地")):
+            preferred_land_use = "open"
         elif "office" in haystack or "company" in haystack or "commerce" in haystack:
             preferred_land_use = "commercial"
 
@@ -1529,6 +3560,7 @@ class EnvProfileGenerator:
         prepared: PreparedEntityContext,
         primary_region: RegionNode,
         simulation_requirement: str,
+        injected_variables: List[InjectedVariable],
     ) -> Optional[Dict[str, Any]]:
         prompt = {
             "task": "Create a compact eco-social simulation role profile as JSON.",
@@ -1540,6 +3572,7 @@ class EnvProfileGenerator:
             "relation_hints": prepared.relation_hints,
             "primary_region": primary_region.to_dict(),
             "requirement": simulation_requirement[:800],
+            "injected_variables": self._summarize_injected_variables(injected_variables),
             "schema": {
                 "profession": "short string",
                 "bio": "1-2 sentences",
@@ -1563,6 +3596,82 @@ class EnvProfileGenerator:
         except Exception as exc:
             logger.debug(f"Profile LLM generation failed for {prepared.entity.name}: {exc}")
             return None
+
+    def _summarize_injected_variables(self, injected_variables: List[InjectedVariable]) -> List[Dict[str, Any]]:
+        summary: List[Dict[str, Any]] = []
+        for item in injected_variables[:8]:
+            summary.append(
+                {
+                    "name": item.name,
+                    "type": item.type,
+                    "description": item.description,
+                    "target_regions": item.target_regions[:4],
+                    "start_round": item.start_round,
+                    "duration_rounds": item.duration_rounds,
+                    "intensity_0_100": item.intensity_0_100,
+                }
+            )
+        return summary
+
+    def _select_variables_for_profile(
+        self,
+        prepared: PreparedEntityContext,
+        primary_region: RegionNode,
+        primary_subregion: RegionNode,
+        injected_variables: List[InjectedVariable],
+    ) -> List[InjectedVariable]:
+        haystack = " ".join(
+            [
+                prepared.entity.name,
+                prepared.entity_type,
+                prepared.summary,
+                primary_region.name,
+                primary_subregion.name,
+            ]
+        ).lower()
+        matched: List[InjectedVariable] = []
+        for item in injected_variables:
+            region_match = not item.target_regions or any(
+                str(region or "").strip().lower() in {
+                    primary_region.region_id.lower(),
+                    primary_region.name.lower(),
+                    primary_subregion.region_id.lower(),
+                    primary_subregion.name.lower(),
+                }
+                for region in item.target_regions
+            )
+            text_match = item.name.lower() in haystack or (item.description and item.description.lower() in haystack)
+            if region_match or text_match:
+                matched.append(item)
+        return matched[:3]
+
+    def _apply_variable_pressure_to_state_vector(
+        self,
+        state_vector: Dict[str, float],
+        injected_variables: List[InjectedVariable],
+        node_family: str,
+    ) -> Dict[str, float]:
+        adjusted = dict(state_vector)
+        if not injected_variables:
+            return adjusted
+        pressure = min(18.0, sum(item.intensity_0_100 for item in injected_variables) / max(len(injected_variables), 1) / 6.0)
+        adjusted["vulnerability_score"] = adjusted.get("vulnerability_score", 0.0) + pressure
+        adjusted["exposure_score"] = adjusted.get("exposure_score", 0.0) + pressure * 0.8
+        if any(item.type == "policy" for item in injected_variables):
+            adjusted["service_capacity"] = adjusted.get("service_capacity", 0.0) + 4.0
+            adjusted["public_trust"] = adjusted.get("public_trust", 0.0) + 2.0
+        if node_family in {"EcologicalReceptor", "EnvironmentalCarrier"} and any(item.type == "disaster" for item in injected_variables):
+            adjusted["ecosystem_integrity"] = adjusted.get("ecosystem_integrity", 0.0) - pressure * 0.7
+            adjusted["spread_pressure"] = adjusted.get("spread_pressure", 0.0) + pressure
+        return adjusted
+
+    def _merge_text_items(self, existing: List[str], additions: List[str]) -> List[str]:
+        merged = [str(item) for item in existing if item]
+        for item in additions:
+            text = str(item or "").strip()
+            if text and text not in merged:
+                merged.append(text)
+        return merged[:6]
 
     def _default_goals(self, node_family: str, region_name: str) -> List[str]:
         defaults = {

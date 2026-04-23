@@ -1,13 +1,13 @@
 <div align="center">
 
-<img src="./static/image/Envfish_logo.svg" alt="Envfish Logo" width="78%"/>
+<img src="./frontend/public/kaleido-favicon.svg" alt="Kaleido Logo" width="96"/>
 
 Multi-agent environmental simulation for ecological foresight
 </br>
-<em>Envfish turns raw materials into an intervenable ecological simulation workspace.</em>
+<em>Kaleido turns raw materials into an intervenable ecological simulation workspace.</em>
 
-[![GitHub Stars](https://img.shields.io/github/stars/crisisjungle/Envfish?style=flat-square&color=6C8F59)](https://github.com/crisisjungle/Envfish/stargazers)
-[![GitHub Forks](https://img.shields.io/github/forks/crisisjungle/Envfish?style=flat-square&color=1F5D45)](https://github.com/crisisjungle/Envfish/network)
+[![GitHub Stars](https://img.shields.io/github/stars/crisisjungle/Kaleido?style=flat-square&color=6C8F59)](https://github.com/crisisjungle/Kaleido/stargazers)
+[![GitHub Forks](https://img.shields.io/github/forks/crisisjungle/Kaleido?style=flat-square&color=1F5D45)](https://github.com/crisisjungle/Kaleido/network)
 [![License](https://img.shields.io/badge/License-AGPL--3.0-173126?style=flat-square)](./LICENSE)
 
 [English](./README-EN.md) | [中文文档](./README.md)
@@ -16,7 +16,7 @@ Multi-agent environmental simulation for ecological foresight
 
 ## Overview
 
-**Envfish** builds an ecological foresight workspace from real-world materials.
+**Kaleido** builds an ecological foresight workspace from real-world materials.
 
 After you upload reports, interviews, policy drafts, research notes, or other unstructured text, the system continues through the existing 5-step workflow:
 
@@ -26,7 +26,7 @@ After you upload reports, interviews, policy drafts, research notes, or other un
 4. Report generation
 5. Deep interaction
 
-The landing page has been fully redesigned around the `Envfish` brand, while the existing workbench pages, graph view, and replay capabilities remain intact.
+The landing page has been fully redesigned around the `Kaleido` brand, while the existing workbench pages, graph view, and replay capabilities remain intact.
 
 ## Core Capabilities
 
@@ -95,14 +95,14 @@ docker compose up -d
 ```text
 .
 ├── backend/    # Flask API, graph building, environment setup, simulation, reports
-├── frontend/   # Vue 3 + Vite frontend with the new Envfish landing page
+├── frontend/   # Vue 3 + Vite frontend with the new Kaleido landing page
 ├── static/     # README assets and screenshots
 └── docker-compose.yml
 ```
 
 ## Routes
 
-- `/`: Envfish landing page for intake and entry orchestration
+- `/`: Kaleido landing page for intake and entry orchestration
 - `/process/:projectId`: graph-building workbench
 - `/simulation/:simulationId`: environment setup
 - `/simulation/:simulationId/start`: live simulation

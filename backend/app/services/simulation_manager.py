@@ -16,9 +16,19 @@ from enum import Enum
 from typing import Any, Dict, List, Optional
 
 from ..utils.logger import get_logger
+from ..models.task import TaskCancelledError
 from .env_profile_generator import EnvProfileGenerator
 from .env_simulation_config_generator import EnvSimulationConfigGenerator, normalize_search_mode
-from .envfish_models import ENVFISH_ENGINE_MODE, InjectedVariable, dump_json, write_profiles_csv
+from .envfish_models import (
+    ENVFISH_ENGINE_MODE,
+    InjectedVariable,
+    build_transport_profile,
+    default_hazard_template_for_family,
+    normalize_time_plan,
+    normalize_transport_family,
+    dump_json,
+    write_profiles_csv,
+)
 from .map_seed_manager import MapSeedManager
 from .risk_artifact_store import write_risk_artifacts
 from .risk_definition_builder import RiskDefinitionBuilder
@@ -54,10 +64,16 @@ class SimulationState:
     engine_mode: str = ENVFISH_ENGINE_MODE
     scenario_mode: str = "baseline_mode"
     diffusion_template: str = "marine"
+    hazard_template_id: str = "generic"
+    hazard_template_mode: str = "auto"
+    hazard_template_reasoning: str = ""
+    transport_profile: Dict[str, Any] = field(default_factory=dict)
     search_mode: str = "fast"
     temporal_preset: str = "standard"
     configured_total_rounds: int = 12
     configured_minutes_per_round: int = 60
+    time_plan_mode: str = "auto"
+    time_plan: Dict[str, Any] = field(default_factory=dict)
     reference_time: str = ""
     diffusion_provider: str = "auto"
     status: SimulationStatus = SimulationStatus.CREATED
@@ -89,10 +105,16 @@ class SimulationState:
             "engine_mode": self.engine_mode,
             "scenario_mode": self.scenario_mode,
             "diffusion_template": self.diffusion_template,
+            "hazard_template_id": self.hazard_template_id,
+            "hazard_template_mode": self.hazard_template_mode,
+            "hazard_template_reasoning": self.hazard_template_reasoning,
+            "transport_profile": self.transport_profile,
             "search_mode": self.search_mode,
             "temporal_preset": self.temporal_preset,
             "configured_total_rounds": self.configured_total_rounds,
             "configured_minutes_per_round": self.configured_minutes_per_round,
+            "time_plan_mode": self.time_plan_mode,
+            "time_plan": self.time_plan,
             "reference_time": self.reference_time,
             "diffusion_provider": self.diffusion_provider,
             "status": self.status.value,
@@ -123,10 +145,15 @@ class SimulationState:
             "engine_mode": self.engine_mode,
             "scenario_mode": self.scenario_mode,
             "diffusion_template": self.diffusion_template,
+            "hazard_template_id": self.hazard_template_id,
+            "hazard_template_mode": self.hazard_template_mode,
+            "transport_profile": self.transport_profile,
             "search_mode": self.search_mode,
             "temporal_preset": self.temporal_preset,
             "configured_total_rounds": self.configured_total_rounds,
             "configured_minutes_per_round": self.configured_minutes_per_round,
+            "time_plan_mode": self.time_plan_mode,
+            "time_plan": self.time_plan,
             "reference_time": self.reference_time,
             "diffusion_provider": self.diffusion_provider,
             "status": self.status.value,
@@ -182,10 +209,16 @@ class SimulationManager:
             engine_mode=data.get("engine_mode", ENVFISH_ENGINE_MODE),
             scenario_mode=data.get("scenario_mode", "baseline_mode"),
             diffusion_template=data.get("diffusion_template", "marine"),
+            hazard_template_id=data.get("hazard_template_id", default_hazard_template_for_family(data.get("diffusion_template"))),
+            hazard_template_mode=data.get("hazard_template_mode", "auto"),
+            hazard_template_reasoning=data.get("hazard_template_reasoning", ""),
+            transport_profile=data.get("transport_profile", {}),
             search_mode=normalize_search_mode(data.get("search_mode", "fast")),
             temporal_preset=data.get("temporal_preset", "standard"),
             configured_total_rounds=data.get("configured_total_rounds", 12),
             configured_minutes_per_round=data.get("configured_minutes_per_round", 60),
+            time_plan_mode=data.get("time_plan_mode", "auto"),
+            time_plan=data.get("time_plan", {}),
             reference_time=data.get("reference_time", ""),
             diffusion_provider=data.get("diffusion_provider", "auto"),
             status=SimulationStatus(data.get("status", "created")),
@@ -219,10 +252,13 @@ class SimulationManager:
         engine_mode: str = ENVFISH_ENGINE_MODE,
         scenario_mode: str = "baseline_mode",
         diffusion_template: str = "marine",
+        hazard_template_id: str = "",
         search_mode: str = "fast",
         temporal_preset: str = "standard",
         configured_total_rounds: int = 12,
         configured_minutes_per_round: int = 60,
+        time_plan_mode: str = "auto",
+        time_plan: Optional[Dict[str, Any]] = None,
         reference_time: str = "",
         diffusion_provider: str = "auto",
         source_mode: str = "graph",
@@ -231,6 +267,15 @@ class SimulationManager:
         import uuid
 
         simulation_id = f"sim_{uuid.uuid4().hex[:12]}"
+        normalized_family = normalize_transport_family(diffusion_template)
+        normalized_time_plan = normalize_time_plan(
+            time_plan,
+            total_rounds=configured_total_rounds,
+            minutes_per_round=configured_minutes_per_round,
+            preset=temporal_preset,
+            reference_time=reference_time,
+            source=time_plan_mode or "auto",
+        )
         state = SimulationState(
             simulation_id=simulation_id,
             project_id=project_id,
@@ -239,11 +284,15 @@ class SimulationManager:
             enable_reddit=enable_reddit,
             engine_mode=engine_mode or ENVFISH_ENGINE_MODE,
             scenario_mode=scenario_mode or "baseline_mode",
-            diffusion_template=diffusion_template or "marine",
+            diffusion_template=normalized_family,
+            hazard_template_id=hazard_template_id or default_hazard_template_for_family(normalized_family),
+            transport_profile=build_transport_profile(normalized_family),
+            time_plan_mode=time_plan_mode or "auto",
+            time_plan=normalized_time_plan,
             search_mode=normalize_search_mode(search_mode),
-            temporal_preset=temporal_preset or "standard",
-            configured_total_rounds=max(4, int(configured_total_rounds or 12)),
-            configured_minutes_per_round=max(10, int(configured_minutes_per_round or 60)),
+            temporal_preset=normalized_time_plan.get("preset", temporal_preset or "standard"),
+            configured_total_rounds=max(4, int(normalized_time_plan.get("total_rounds") or configured_total_rounds or 12)),
+            configured_minutes_per_round=max(10, int(normalized_time_plan.get("minutes_per_round") or configured_minutes_per_round or 60)),
             reference_time=str(reference_time or ""),
             diffusion_provider=diffusion_provider or "auto",
             source_mode=source_mode or "graph",
@@ -264,8 +313,12 @@ class SimulationManager:
         parallel_profile_count: int = 3,
         scenario_mode: str = "baseline_mode",
         diffusion_template: str = "marine",
+        hazard_template_id: str = "",
+        hazard_template_mode: str = "auto",
         search_mode: str = "fast",
         temporal_profile: Optional[Dict[str, Any]] = None,
+        time_plan_mode: str = "auto",
+        time_plan: Optional[Dict[str, Any]] = None,
         reference_time: str = "",
         diffusion_provider: str = "auto",
         injected_variables: Optional[List[Dict[str, Any]]] = None,
@@ -274,14 +327,26 @@ class SimulationManager:
         if not state:
             raise ValueError(f"Simulation not found: {simulation_id}")
 
+        normalized_family = normalize_transport_family(diffusion_template or state.diffusion_template)
+        normalized_time_plan = normalize_time_plan(
+            time_plan,
+            total_rounds=(temporal_profile or {}).get("total_rounds") or state.configured_total_rounds,
+            minutes_per_round=(temporal_profile or {}).get("minutes_per_round") or state.configured_minutes_per_round,
+            preset=(temporal_profile or {}).get("preset") or state.temporal_preset,
+            reference_time=reference_time or state.reference_time,
+            source=time_plan_mode or state.time_plan_mode or "auto",
+        )
         state.status = SimulationStatus.PREPARING
         state.scenario_mode = scenario_mode or state.scenario_mode
-        state.diffusion_template = diffusion_template or state.diffusion_template
+        state.diffusion_template = normalized_family
+        state.hazard_template_id = hazard_template_id or state.hazard_template_id or default_hazard_template_for_family(normalized_family)
+        state.hazard_template_mode = hazard_template_mode or state.hazard_template_mode or "auto"
         state.search_mode = normalize_search_mode(search_mode or state.search_mode)
-        state.temporal_preset = str((temporal_profile or {}).get("preset") or state.temporal_preset or "standard")
-        if temporal_profile:
-            state.configured_total_rounds = max(4, int(temporal_profile.get("total_rounds") or state.configured_total_rounds or 12))
-            state.configured_minutes_per_round = max(10, int(temporal_profile.get("minutes_per_round") or state.configured_minutes_per_round or 60))
+        state.temporal_preset = str(normalized_time_plan.get("preset") or state.temporal_preset or "standard")
+        state.configured_total_rounds = max(4, int(normalized_time_plan.get("total_rounds") or state.configured_total_rounds or 12))
+        state.configured_minutes_per_round = max(10, int(normalized_time_plan.get("minutes_per_round") or state.configured_minutes_per_round or 60))
+        state.time_plan_mode = time_plan_mode or state.time_plan_mode or "auto"
+        state.time_plan = normalized_time_plan
         state.reference_time = str(reference_time or state.reference_time or "")
         state.diffusion_provider = str(diffusion_provider or state.diffusion_provider or "auto")
         state.error = None
@@ -289,6 +354,9 @@ class SimulationManager:
 
         try:
             sim_dir = self._get_simulation_dir(simulation_id)
+            variables = [InjectedVariable.from_dict(item, default_index=index + 1) for index, item in enumerate(injected_variables or [])]
+            state.active_variables_count = len(variables)
+            dump_json(os.path.join(sim_dir, "injected_variables.json"), [variable.to_dict() for variable in variables])
             if progress_callback:
                 progress_callback("reading", 5, "Connecting to graph...")
 
@@ -342,8 +410,10 @@ class SimulationManager:
                 document_text=document_text,
                 scenario_mode=state.scenario_mode,
                 diffusion_template=state.diffusion_template,
+                search_mode=state.search_mode,
                 reference_time=state.reference_time,
                 diffusion_provider=state.diffusion_provider,
+                injected_variables=variables,
                 use_llm=use_llm_for_profiles,
                 progress_callback=profile_progress,
                 profile_created_callback=profile_created,
@@ -368,10 +438,6 @@ class SimulationManager:
             dump_json(os.path.join(sim_dir, "reddit_profiles.json"), reddit_profiles)
             write_profiles_csv(os.path.join(sim_dir, "twitter_profiles.csv"), twitter_profiles)
 
-            variables = [InjectedVariable.from_dict(item, default_index=index + 1) for index, item in enumerate(injected_variables or [])]
-            state.active_variables_count = len(variables)
-            dump_json(os.path.join(sim_dir, "injected_variables.json"), [variable.to_dict() for variable in variables])
-
             risk_builder = RiskDefinitionBuilder()
             risk_result = risk_builder.build(
                 simulation_requirement=simulation_requirement,
@@ -382,6 +448,7 @@ class SimulationManager:
                 injected_variables=variables,
                 scenario_mode=state.scenario_mode,
                 diffusion_template=state.diffusion_template,
+                hazard_template_id=state.hazard_template_id,
             )
             runtime_tracker = RiskRuntimeTracker()
             latest_risk_runtime_state = runtime_tracker.build_initial_bundle(
@@ -419,14 +486,19 @@ class SimulationManager:
                 profiles=result.profiles,
                 agent_relationships=result.agent_relationships,
                 region_agent_index=result.region_agent_index,
+                agent_generation_summary=result.generation_summary,
                 scenario_mode=state.scenario_mode,
                 diffusion_template=state.diffusion_template,
+                hazard_template_id=state.hazard_template_id,
+                hazard_template_mode=state.hazard_template_mode,
                 search_mode=state.search_mode,
                 temporal_profile={
                     "preset": state.temporal_preset,
                     "total_rounds": state.configured_total_rounds,
                     "minutes_per_round": state.configured_minutes_per_round,
                 },
+                time_plan_mode=state.time_plan_mode,
+                time_plan=state.time_plan,
                 reference_time=state.reference_time,
                 diffusion_context=result.diffusion_context,
                 injected_variables=variables,
@@ -446,9 +518,16 @@ class SimulationManager:
 
             state.config_generated = True
             state.config_reasoning = config.generation_reasoning
+            state.hazard_template_id = config.hazard_template_id or state.hazard_template_id
+            state.hazard_template_mode = config.hazard_template_mode or state.hazard_template_mode
+            state.hazard_template_reasoning = config.hazard_template_reasoning or state.hazard_template_reasoning
+            state.transport_profile = dict(config.transport_profile or {})
             state.temporal_preset = config.temporal_profile.get("preset", state.temporal_preset)
             state.configured_total_rounds = int(config.temporal_profile.get("total_rounds", state.configured_total_rounds))
             state.configured_minutes_per_round = int(config.temporal_profile.get("minutes_per_round", state.configured_minutes_per_round))
+            state.time_plan_mode = config.time_plan_mode or state.time_plan_mode
+            state.time_plan = dict(config.time_plan or state.time_plan)
+            state.diffusion_template = config.diffusion_template or state.diffusion_template
             state.status = SimulationStatus.READY
             state.error = None
 
@@ -462,6 +541,12 @@ class SimulationManager:
             )
             return state
 
+        except TaskCancelledError as exc:
+            logger.info(f"Simulation prepare cancelled: {simulation_id}")
+            state.status = SimulationStatus.STOPPED
+            state.error = str(exc)
+            self._save_simulation_state(state)
+            raise
         except Exception as exc:
             logger.exception(f"Simulation prepare failed: {simulation_id}")
             state.status = SimulationStatus.FAILED
@@ -558,6 +643,14 @@ class SimulationManager:
                 state = self._load_simulation_state(sim_id)
                 if state and (project_id is None or state.project_id == project_id):
                     simulations.append(state)
+        simulations.sort(
+            key=lambda item: (
+                str(item.created_at or ""),
+                str(item.updated_at or ""),
+                str(item.simulation_id or ""),
+            ),
+            reverse=True,
+        )
         return simulations
 
     def get_profiles(self, simulation_id: str, platform: str = "reddit") -> List[Dict[str, Any]]:

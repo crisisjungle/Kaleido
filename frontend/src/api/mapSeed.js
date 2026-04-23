@@ -4,6 +4,14 @@ export const createMapSeed = (data) => {
   return requestWithRetry(() => service.post('/api/map/seed', data), 3, 1000)
 }
 
+export const geocodeMapLocation = (data) => {
+  return requestWithRetry(() => service.post('/api/map/geocode', data), 3, 1000)
+}
+
+export const reverseGeocodeMapLocation = (data) => {
+  return requestWithRetry(() => service.post('/api/map/reverse-geocode', data), 3, 1000)
+}
+
 export const getMapSeedStatus = (data) => {
   return service.post('/api/map/seed/status', data)
 }

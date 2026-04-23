@@ -1,13 +1,7 @@
 <template>
   <div class="map-seed-page">
     <header class="topbar">
-      <button class="brand-lockup" type="button" @click="router.push('/')">
-        <span class="brand-mark">EF</span>
-        <span class="brand-copy">
-          <strong>ENVFISH</strong>
-          <small>Map-First Seed Workspace</small>
-        </span>
-      </button>
+      <KaleidoNavBrand to="/" />
 
       <div class="topbar-links">
         <button class="ghost-link" type="button" @click="resetSeed">重新选点</button>
@@ -19,7 +13,7 @@
       <section class="hero-grid">
         <div class="hero-copy">
           <div class="eyebrow-row">
-            <span class="eyebrow-pill">Map First</span>
+            <span class="eyebrow-pill">地图优先</span>
             <span class="eyebrow-note">点选位置，自动生成实景图谱</span>
           </div>
 
@@ -33,12 +27,12 @@
         <div class="hero-stage">
           <div class="status-card">
             <div>
-              <span class="status-label">Seed Status</span>
+              <span class="status-label">种子状态</span>
               <strong>{{ statusText }}</strong>
             </div>
             <div class="status-meta">
-              <span class="mono">{{ seedId || 'no seed yet' }}</span>
-              <span>{{ seedTaskId ? `Task ${seedTaskId.slice(0, 8)}` : '等待选点' }}</span>
+              <span class="mono">{{ seedId || '尚未生成' }}</span>
+              <span>{{ seedTaskId ? `任务 ${seedTaskId.slice(0, 8)}` : '等待选点' }}</span>
             </div>
           </div>
         </div>
@@ -174,27 +168,27 @@
           <section class="card">
             <div class="card-head">
               <div>
-                <span class="panel-kicker">03 / Result</span>
+                <span class="panel-kicker">03 / 结果</span>
                 <h3>实景图谱结果</h3>
               </div>
-              <span class="pill">{{ graphLoading ? 'Loading' : (graphData ? 'Ready' : 'Idle') }}</span>
+              <span class="pill">{{ graphLoading ? '加载中' : (graphData ? '就绪' : '空闲') }}</span>
             </div>
 
             <div class="summary-grid">
               <article class="summary-card">
-                <span>Nodes</span>
+                <span>节点</span>
                 <strong>{{ nodeCount }}</strong>
               </article>
               <article class="summary-card">
-                <span>Edges</span>
+                <span>边</span>
                 <strong>{{ edgeCount }}</strong>
               </article>
               <article class="summary-card">
-                <span>Layers</span>
+                <span>图层</span>
                 <strong>{{ layerCount }}</strong>
               </article>
               <article class="summary-card">
-                <span>Confidence</span>
+                <span>平均置信度</span>
                 <strong>{{ confidenceLabel }}</strong>
               </article>
             </div>
@@ -208,7 +202,7 @@
           <section class="card">
             <div class="card-head">
               <div>
-                <span class="panel-kicker">04 / Layers</span>
+                <span class="panel-kicker">04 / 图层</span>
                 <h3>图层列表</h3>
               </div>
             </div>
@@ -228,7 +222,7 @@
           <section class="card">
             <div class="card-head">
               <div>
-                <span class="panel-kicker">05 / Simulation</span>
+                <span class="panel-kicker">05 / 推演</span>
                 <h3>进入推演</h3>
               </div>
               <button class="primary-btn" type="button" :disabled="!seedId || converting" @click="proceedToSimulation">
@@ -250,9 +244,11 @@
 <script setup>
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
+import KaleidoNavBrand from '../components/KaleidoNavBrand.vue'
 import GraphPanel from '../components/GraphPanel.vue'
 import LeafletMapPicker from '../components/LeafletMapPicker.vue'
 import { convertMapSeedToSimulation, createMapSeed, getMapSeed, getMapSeedLayers, getMapSeedStatus } from '../api/mapSeed'
+import { translateDisplayToken } from '../utils/displayText'
 
 const props = defineProps({
   seedId: {
@@ -290,22 +286,20 @@ const visibleLayers = ref([])
 const radiusMetersDisplay = computed(() => `${Math.round(radiusMeters.value / 1000)} km`)
 
 const statusText = computed(() => {
-  if (converting.value) return 'Converting'
-  if (creatingSeed.value) return 'Seeding'
-  if (!seedId.value) return 'Idle'
-  if (seedData.value?.status) return String(seedData.value.status)
-  return 'Ready'
-})
-
-const confidenceLabel = computed(() => {
-  const raw = seedData.value?.confidence || seedData.value?.confidence_score || seedData.value?.summary?.confidence
-  if (raw === undefined || raw === null || raw === '') return 'n/a'
-  const number = Number(raw)
-  if (Number.isNaN(number)) return String(raw)
-  return number <= 1 ? `${Math.round(number * 100)}%` : `${Math.round(number)}%`
+  if (converting.value) return '转换中'
+  if (creatingSeed.value) return '生成中'
+  if (!seedId.value) return '空闲'
+  if (seedData.value?.status) return translateDisplayToken(seedData.value.status, String(seedData.value.status))
+  return '就绪'
 })
 
 const graphData = computed(() => (seedData.value ? normalizeGraphData(seedData.value) : null))
+
+const confidenceLabel = computed(() => {
+  const explicit = seedData.value?.confidence ?? seedData.value?.confidence_score ?? seedData.value?.summary?.confidence
+  const fallback = averageConfidenceFromGraph(graphData.value)
+  return formatConfidenceLabel(explicit ?? fallback)
+})
 
 const nodeCount = computed(() => graphData.value?.node_count || graphData.value?.nodes?.length || 0)
 const edgeCount = computed(() => graphData.value?.edge_count || graphData.value?.edges?.length || 0)
@@ -332,6 +326,29 @@ function normalizeGraphData(source) {
     node_count: raw.node_count ?? nodes.length,
     edge_count: raw.edge_count ?? edges.length
   }
+}
+
+function averageConfidenceFromGraph(graph) {
+  if (!graph) return null
+
+  const values = []
+  const collect = (value) => {
+    const numeric = Number(value)
+    if (Number.isFinite(numeric)) values.push(numeric)
+  }
+
+  ;(graph.nodes || []).forEach((node) => collect(node?.attributes?.confidence))
+  ;(graph.edges || []).forEach((edge) => collect(edge?.attributes?.confidence ?? edge?.confidence))
+
+  if (values.length === 0) return null
+  return values.reduce((sum, value) => sum + value, 0) / values.length
+}
+
+function formatConfidenceLabel(raw) {
+  if (raw === undefined || raw === null || raw === '') return 'n/a'
+  const number = Number(raw)
+  if (Number.isNaN(number)) return String(raw)
+  return number <= 1 ? `${Math.round(number * 100)}%` : `${Math.round(number)}%`
 }
 
 function normalizeNodes(items) {
@@ -710,9 +727,9 @@ async function pollStatus() {
       if (status === 'completed' || status === 'ready') {
         stopPolling()
         await loadSeedArtifacts()
-      } else if (status === 'failed') {
+      } else if (status === 'failed' || status === 'cancelled') {
         stopPolling()
-        message.value = res.data.error || '地图种子任务失败'
+        message.value = res.data.error || (status === 'cancelled' ? '地图种子任务已停止' : '地图种子任务失败')
       }
     }
   } catch (error) {
@@ -830,54 +847,18 @@ onBeforeUnmount(() => {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 1rem 1.5rem;
-  backdrop-filter: blur(18px);
-  background: rgba(247, 244, 234, 0.84);
-  border-bottom: 1px solid rgba(35, 74, 54, 0.08);
+  min-height: 60px;
+  padding: 0 24px;
+  backdrop-filter: blur(14px);
+  background: rgba(244, 246, 241, 0.92);
+  border-bottom: 1px solid rgba(16, 35, 29, 0.08);
 }
 
-.brand-lockup {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.9rem;
-  padding: 0;
-  background: transparent;
-  border: 0;
-  color: inherit;
-  cursor: pointer;
-}
-
-.brand-mark {
-  display: grid;
-  place-items: center;
-  width: 3rem;
-  height: 3rem;
-  border-radius: 1rem;
-  background: linear-gradient(135deg, #1f5d45, #7faa5d);
-  color: #f6f4eb;
-  font-family: 'IBM Plex Mono', monospace;
-  font-size: 0.95rem;
-  font-weight: 700;
-  letter-spacing: 0.08em;
-}
-
-.brand-copy {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-}
-
-.brand-copy strong,
 .panel-kicker,
 .eyebrow-pill {
   font-family: 'IBM Plex Mono', monospace;
   letter-spacing: 0.08em;
   text-transform: uppercase;
-}
-
-.brand-copy small {
-  font-size: 0.82rem;
-  color: rgba(23, 49, 38, 0.68);
 }
 
 .topbar-links {
@@ -905,7 +886,7 @@ onBeforeUnmount(() => {
 
 .ghost-link,
 .secondary-btn {
-  min-height: 2.6rem;
+  min-height: 2.5rem;
   padding: 0 1rem;
 }
 
@@ -1284,7 +1265,6 @@ input[type='text'] {
   .panel-head,
   .card-head,
   .hero-grid {
-    grid-template-columns: 1fr;
     flex-direction: column;
     align-items: stretch;
   }

@@ -14,7 +14,7 @@ from zep_cloud.client import Zep
 from zep_cloud import EpisodeData, EntityEdgeSourceTarget
 
 from ..config import Config
-from ..models.task import TaskManager, TaskStatus
+from ..models.task import TaskCancelledError, TaskManager, TaskStatus
 from ..utils.zep_paging import fetch_all_nodes, fetch_all_edges
 from .text_processor import TextProcessor
 
@@ -105,15 +105,20 @@ class GraphBuilderService:
     ):
         """图谱构建工作线程"""
         try:
+            def ensure_running():
+                self.task_manager.ensure_not_cancelled(task_id)
+
             self.task_manager.update_task(
                 task_id,
                 status=TaskStatus.PROCESSING,
                 progress=5,
                 message="开始构建图谱..."
             )
+            ensure_running()
             
             # 1. 创建图谱
             graph_id = self.create_graph(graph_name)
+            ensure_running()
             self.task_manager.update_task(
                 task_id,
                 progress=10,
@@ -121,6 +126,7 @@ class GraphBuilderService:
             )
             
             # 2. 设置本体
+            ensure_running()
             self.set_ontology(graph_id, ontology)
             self.task_manager.update_task(
                 task_id,
@@ -129,6 +135,7 @@ class GraphBuilderService:
             )
             
             # 3. 文本分块
+            ensure_running()
             chunks = TextProcessor.split_text(text, chunk_size, chunk_overlap)
             total_chunks = len(chunks)
             self.task_manager.update_task(
@@ -138,16 +145,21 @@ class GraphBuilderService:
             )
             
             # 4. 分批发送数据
+            ensure_running()
             episode_uuids = self.add_text_batches(
                 graph_id, chunks, batch_size,
-                lambda msg, prog: self.task_manager.update_task(
-                    task_id,
-                    progress=20 + int(prog * 0.4),  # 20-60%
-                    message=msg
+                lambda msg, prog: (
+                    ensure_running(),
+                    self.task_manager.update_task(
+                        task_id,
+                        progress=20 + int(prog * 0.4),  # 20-60%
+                        message=msg
+                    )
                 )
             )
             
             # 5. 等待Zep处理完成
+            ensure_running()
             self.task_manager.update_task(
                 task_id,
                 progress=60,
@@ -156,14 +168,18 @@ class GraphBuilderService:
             
             self._wait_for_episodes(
                 episode_uuids,
-                lambda msg, prog: self.task_manager.update_task(
-                    task_id,
-                    progress=60 + int(prog * 0.3),  # 60-90%
-                    message=msg
+                lambda msg, prog: (
+                    ensure_running(),
+                    self.task_manager.update_task(
+                        task_id,
+                        progress=60 + int(prog * 0.3),  # 60-90%
+                        message=msg
+                    )
                 )
             )
             
             # 6. 获取图谱信息
+            ensure_running()
             self.task_manager.update_task(
                 task_id,
                 progress=90,
@@ -171,6 +187,7 @@ class GraphBuilderService:
             )
             
             graph_info = self._get_graph_info(graph_id)
+            ensure_running()
             
             # 完成
             self.task_manager.complete_task(task_id, {
@@ -180,6 +197,9 @@ class GraphBuilderService:
             })
             
         except Exception as e:
+            if isinstance(e, TaskCancelledError) or self.task_manager.is_cancelled(task_id):
+                return
+
             import traceback
             error_msg = f"{str(e)}\n{traceback.format_exc()}"
             self.task_manager.fail_task(task_id, error_msg)
@@ -497,4 +517,3 @@ class GraphBuilderService:
     def delete_graph(self, graph_id: str):
         """删除图谱"""
         self.client.graph.delete(graph_id=graph_id)
-

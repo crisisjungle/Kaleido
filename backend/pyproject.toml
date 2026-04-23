@@ -1,17 +1,18 @@
 [project]
-name = "envfish-backend"
+name = "kaleido-backend"
 version = "0.1.0"
-description = "Envfish - 面向生态推演的多智能体环境仿真引擎"
+description = "Kaleido - 面向生态推演的多智能体环境仿真引擎"
 requires-python = ">=3.11"
 license = { text = "AGPL-3.0" }
 authors = [
-    { name = "Envfish Team" }
+    { name = "Kaleido Team" }
 ]
 
 dependencies = [
     # 核心框架
     "flask>=3.0.0",
     "flask-cors>=6.0.0",
+    "gunicorn>=23.0.0",
     
     # LLM 相关
     "openai>=1.0.0",

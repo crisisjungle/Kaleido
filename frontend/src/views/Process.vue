@@ -2,7 +2,7 @@
   <div class="process-page">
     <!-- 顶部导航栏 -->
     <nav class="navbar">
-      <div class="nav-brand" @click="goHome">ENVFISH</div>
+      <div class="nav-brand" @click="goHome">KALEIDO</div>
       
       <!-- 中间步骤指示器 -->
       <div class="nav-center">
@@ -416,6 +416,7 @@ import { ref, computed, onMounted, onUnmounted, watch, nextTick } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { generateOntology, getProject, buildGraph, getTaskStatus, getGraphData } from '../api/graph'
 import { getPendingUpload, clearPendingUpload } from '../store/pendingUpload'
+import { attachSceneSeedContextToProject } from '../store/sceneSeedBridge'
 import * as d3 from 'd3'
 
 const route = useRoute()
@@ -590,6 +591,14 @@ const handleNewProject = async () => {
     const response = await generateOntology(formDataObj)
     
     if (response.success) {
+      if (response.data?.project_id) {
+        attachSceneSeedContextToProject(response.data.project_id, {
+          initialVariables: pending.initialVariables,
+          selectedPoints: pending.selectedPoints,
+          mapSeedId: pending.mapSeedId,
+          areaLabel: pending.areaLabel
+        })
+      }
       // 清除待上传数据
       clearPendingUpload()
       
@@ -824,10 +833,13 @@ const pollTaskStatus = async (taskId) => {
         
         // 清除进度显示
         buildProgress.value = null
-      } else if (task.status === 'failed') {
+      } else if (task.status === 'failed' || task.status === 'cancelled') {
         stopPolling()
         stopGraphPolling()
-        error.value = '图谱构建失败: ' + (task.error || '未知错误')
+        const stopReason = task.error || (task.status === 'cancelled' ? '用户强制停止' : '未知错误')
+        error.value = task.status === 'cancelled'
+          ? '图谱构建已停止: ' + stopReason
+          : '图谱构建失败: ' + stopReason
         buildProgress.value = null
       }
     }

@@ -51,6 +51,7 @@ class RiskDefinitionBuilder:
         injected_variables: Optional[List[InjectedVariable]] = None,
         scenario_mode: str = "baseline_mode",
         diffusion_template: str = "marine",
+        hazard_template_id: str = "generic",
     ) -> RiskDefinitionBuildResult:
         legacy_result = self.legacy_builder.build(
             simulation_requirement=simulation_requirement,
@@ -61,6 +62,7 @@ class RiskDefinitionBuilder:
             injected_variables=injected_variables,
             scenario_mode=scenario_mode,
             diffusion_template=diffusion_template,
+            hazard_template_id=hazard_template_id,
         )
         definitions = risk_objects_to_definitions(
             risk_objects=[item.to_dict() for item in legacy_result.risk_objects],

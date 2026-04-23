@@ -828,6 +828,81 @@ class SimulationRunner:
         
         logger.info(f"模拟已停止: {simulation_id}")
         return state
+
+    @classmethod
+    def force_stop_all(cls, reason: str = "用户强制停止") -> List[Dict[str, Any]]:
+        """
+        强制停止当前进程内所有模拟运行器。
+
+        与 cleanup_all_simulations 不同，这个方法可被用户反复触发，
+        不会设置服务退出专用的 _cleanup_done 标志。
+        """
+        stopped: List[Dict[str, Any]] = []
+
+        try:
+            ZepGraphMemoryManager.stop_all()
+        except Exception as e:
+            logger.error(f"停止图谱记忆更新器失败: {e}")
+        finally:
+            cls._graph_memory_enabled.clear()
+
+        for simulation_id, process in list(cls._processes.items()):
+            entry: Dict[str, Any] = {
+                "simulation_id": simulation_id,
+                "pid": getattr(process, "pid", None),
+                "stopped": False,
+            }
+            try:
+                if process and process.poll() is None:
+                    logger.info(f"强制停止模拟进程: simulation={simulation_id}, pid={process.pid}")
+                    try:
+                        cls._terminate_process(process, simulation_id, timeout=3)
+                    except (ProcessLookupError, OSError):
+                        try:
+                            process.terminate()
+                            process.wait(timeout=3)
+                        except Exception:
+                            process.kill()
+                    entry["stopped"] = True
+                else:
+                    entry["stopped"] = True
+
+                state = cls.get_run_state(simulation_id)
+                if state:
+                    state.runner_status = RunnerStatus.STOPPED
+                    state.twitter_running = False
+                    state.reddit_running = False
+                    state.twitter_completed = False
+                    state.reddit_completed = False
+                    state.completed_at = datetime.now().isoformat()
+                    state.error = reason
+                    cls._save_run_state(state)
+                    entry["runner_status"] = state.runner_status.value
+            except Exception as e:
+                logger.error(f"强制停止模拟失败: simulation={simulation_id}, error={e}")
+                entry["error"] = str(e)
+            finally:
+                stopped.append(entry)
+
+        for simulation_id, file_handle in list(cls._stdout_files.items()):
+            try:
+                if file_handle:
+                    file_handle.close()
+            except Exception:
+                pass
+            cls._stdout_files.pop(simulation_id, None)
+
+        for simulation_id, file_handle in list(cls._stderr_files.items()):
+            try:
+                if file_handle:
+                    file_handle.close()
+            except Exception:
+                pass
+            cls._stderr_files.pop(simulation_id, None)
+
+        cls._processes.clear()
+        cls._action_queues.clear()
+        return stopped
     
     @classmethod
     def _read_actions_from_file(

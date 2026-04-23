@@ -1,0 +1,30 @@
+services:
+  backend:
+    image: ghcr.io/crisisjungle/kaleido-backend:latest
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    container_name: kaleido-backend
+    env_file:
+      - .env
+    restart: unless-stopped
+    expose:
+      - "5001"
+    volumes:
+      - ./backend/uploads:/app/backend/uploads
+      - ./backend/logs:/app/backend/logs
+
+  frontend:
+    image: ghcr.io/crisisjungle/kaleido-frontend:latest
+    build:
+      context: .
+      dockerfile: frontend/Dockerfile
+      args:
+        VITE_PUBLIC_LAUNCH_MODE: space_only
+        VITE_API_BASE_URL: ""
+    container_name: kaleido-frontend
+    restart: unless-stopped
+    depends_on:
+      - backend
+    ports:
+      - "127.0.0.1:8088:80"

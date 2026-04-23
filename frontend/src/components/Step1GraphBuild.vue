@@ -137,7 +137,7 @@
             </div>
             <div class="stat-card">
               <span class="stat-value">{{ graphStats.types }}</span>
-              <span class="stat-label">SCHEMA类型</span>
+              <span class="stat-label">实体类型</span>
             </div>
           </div>
         </div>
@@ -190,6 +190,7 @@
 import { computed, ref, watch, nextTick } from 'vue'
 import { useRouter } from 'vue-router'
 import { createSimulation } from '../api/simulation'
+import { attachSceneSeedContextToSimulation, getSceneSeedContextByProject } from '../store/sceneSeedBridge'
 
 const router = useRouter()
 
@@ -218,14 +219,20 @@ const handleEnterEnvSetup = async () => {
   creatingSimulation.value = true
   
   try {
+    const sceneSeedContext = getSceneSeedContextByProject(props.projectData.project_id)
     const res = await createSimulation({
       project_id: props.projectData.project_id,
       graph_id: props.projectData.graph_id,
       enable_twitter: true,
-      enable_reddit: true
+      enable_reddit: true,
+      source_mode: sceneSeedContext?.mapSeedId ? 'map_seed' : 'graph',
+      map_seed_id: sceneSeedContext?.mapSeedId || undefined
     })
     
     if (res.success && res.data?.simulation_id) {
+      if (sceneSeedContext) {
+        attachSceneSeedContextToSimulation(res.data.simulation_id, sceneSeedContext)
+      }
       // 跳转到 simulation 页面
       router.push({
         name: 'Simulation',
@@ -250,8 +257,8 @@ const selectOntologyItem = (item, type) => {
 const graphStats = computed(() => {
   const nodes = props.graphData?.node_count || props.graphData?.nodes?.length || 0
   const edges = props.graphData?.edge_count || props.graphData?.edges?.length || 0
-  const types = props.projectData?.ontology?.entity_types?.length || 0
-  return { nodes, edges, types }
+  const entityTypes = props.projectData?.ontology?.entity_types?.length || 0
+  return { nodes, edges, types: entityTypes }
 })
 
 const formatDate = (dateStr) => {

@@ -1,5 +1,5 @@
 """
-Envfish Backend - Flask应用工厂
+Kaleido Backend - Flask应用工厂
 """
 
 import os
@@ -36,7 +36,7 @@ def create_app(config_class=Config):
     
     if should_log_startup:
         logger.info("=" * 50)
-        logger.info("Envfish Backend 启动中...")
+        logger.info("Kaleido Backend 启动中...")
         logger.info("=" * 50)
     
     # 启用CORS
@@ -63,18 +63,20 @@ def create_app(config_class=Config):
         return response
     
     # 注册蓝图
-    from .api import graph_bp, simulation_bp, report_bp, map_bp
+    from .api import graph_bp, simulation_bp, report_bp, map_bp, scene_bp, control_bp
     app.register_blueprint(graph_bp, url_prefix='/api/graph')
     app.register_blueprint(simulation_bp, url_prefix='/api/simulation')
     app.register_blueprint(report_bp, url_prefix='/api/report')
     app.register_blueprint(map_bp, url_prefix='/api/map')
+    app.register_blueprint(scene_bp, url_prefix='/api/scene')
+    app.register_blueprint(control_bp, url_prefix='/api/control')
     
     # 健康检查
     @app.route('/health')
     def health():
-        return {'status': 'ok', 'service': 'Envfish Backend'}
+        return {'status': 'ok', 'service': 'Kaleido Backend'}
     
     if should_log_startup:
-        logger.info("Envfish Backend 启动完成")
+        logger.info("Kaleido Backend 启动完成")
     
     return app

@@ -13,16 +13,23 @@ from ..config import Config
 from ..utils.llm_client import LLMClient
 from ..utils.logger import get_logger
 from .envfish_models import (
-    DEFAULT_TEMPLATE_RULES,
     ENVFISH_ENGINE_MODE,
     EnvAgentProfile,
+    HAZARD_TEMPLATE_CATALOG,
     InjectedVariable,
     RegionNode,
     RiskDefinition,
     RiskObject,
     STATE_VECTOR_SCHEMA,
     TransportEdge,
+    build_transport_profile,
+    compatibility_diffusion_template,
+    default_hazard_template_for_family,
+    get_hazard_template_definition,
+    normalize_hazard_template_id,
     normalize_temporal_profile,
+    normalize_time_plan,
+    normalize_transport_family,
 )
 
 logger = get_logger("envfish.envfish_config")
@@ -88,6 +95,11 @@ class EnvSimulationConfig:
     engine_mode: str = ENVFISH_ENGINE_MODE
     scenario_mode: str = "baseline_mode"
     diffusion_template: str = "marine"
+    hazard_template_id: str = "generic"
+    hazard_template_mode: str = "auto"
+    hazard_template_reasoning: str = ""
+    hazard_template_recommendation: Dict[str, Any] = field(default_factory=dict)
+    transport_profile: Dict[str, Any] = field(default_factory=dict)
     search_mode: str = "fast"
     simulation_requirement: str = ""
     document_digest: str = ""
@@ -96,6 +108,8 @@ class EnvSimulationConfig:
     generated_at: str = field(default_factory=lambda: datetime.now().isoformat())
     llm_model: str = field(default_factory=lambda: Config.LLM_MODEL_NAME)
     reference_time: str = ""
+    time_plan_mode: str = "auto"
+    time_plan: Dict[str, Any] = field(default_factory=dict)
     temporal_profile: Dict[str, Any] = field(default_factory=dict)
     time_config: Dict[str, Any] = field(default_factory=dict)
     round_policies: Dict[str, Any] = field(default_factory=dict)
@@ -108,6 +122,7 @@ class EnvSimulationConfig:
     agent_relationship_graph: List[Dict[str, Any]] = field(default_factory=list)
     region_agent_index: Dict[str, Any] = field(default_factory=dict)
     agent_archetypes: List[Dict[str, Any]] = field(default_factory=list)
+    agent_generation_summary: Dict[str, Any] = field(default_factory=dict)
     interaction_policies: Dict[str, Any] = field(default_factory=dict)
     agent_action_catalog: List[Dict[str, Any]] = field(default_factory=list)
     runtime_limits: Dict[str, Any] = field(default_factory=dict)
@@ -131,6 +146,11 @@ class EnvSimulationConfig:
             "engine_mode": self.engine_mode,
             "scenario_mode": self.scenario_mode,
             "diffusion_template": self.diffusion_template,
+            "hazard_template_id": self.hazard_template_id,
+            "hazard_template_mode": self.hazard_template_mode,
+            "hazard_template_reasoning": self.hazard_template_reasoning,
+            "hazard_template_recommendation": self.hazard_template_recommendation,
+            "transport_profile": self.transport_profile,
             "search_mode": self.search_mode,
             "simulation_requirement": self.simulation_requirement,
             "document_digest": self.document_digest,
@@ -139,6 +159,8 @@ class EnvSimulationConfig:
             "generated_at": self.generated_at,
             "llm_model": self.llm_model,
             "reference_time": self.reference_time,
+            "time_plan_mode": self.time_plan_mode,
+            "time_plan": self.time_plan,
             "temporal_profile": self.temporal_profile,
             "time_config": self.time_config,
             "round_policies": self.round_policies,
@@ -151,6 +173,7 @@ class EnvSimulationConfig:
             "agent_relationship_graph": self.agent_relationship_graph,
             "region_agent_index": self.region_agent_index,
             "agent_archetypes": self.agent_archetypes,
+            "agent_generation_summary": self.agent_generation_summary,
             "interaction_policies": self.interaction_policies,
             "agent_action_catalog": self.agent_action_catalog,
             "runtime_limits": self.runtime_limits,
@@ -193,10 +216,15 @@ class EnvSimulationConfigGenerator:
         profiles: List[EnvAgentProfile],
         agent_relationships: List[Dict[str, Any]],
         region_agent_index: Optional[Dict[str, Any]] = None,
+        agent_generation_summary: Optional[Dict[str, Any]] = None,
         scenario_mode: str = "baseline_mode",
         diffusion_template: str = "marine",
+        hazard_template_id: str = "",
+        hazard_template_mode: str = "auto",
         search_mode: str = "fast",
         temporal_profile: Optional[Dict[str, Any]] = None,
+        time_plan_mode: str = "auto",
+        time_plan: Optional[Dict[str, Any]] = None,
         reference_time: str = "",
         diffusion_context: Optional[Dict[str, Any]] = None,
         injected_variables: Optional[List[InjectedVariable]] = None,
@@ -208,6 +236,7 @@ class EnvSimulationConfigGenerator:
         primary_active_risk_id: str = "",
     ) -> EnvSimulationConfig:
         search_mode = normalize_search_mode(search_mode)
+        canonical_diffusion_template = normalize_transport_family(diffusion_template)
         llm_plan = self._generate_plan_with_llm(
             simulation_requirement=simulation_requirement,
             document_text=document_text,
@@ -215,43 +244,96 @@ class EnvSimulationConfigGenerator:
             subregions=subregions,
             profiles=profiles,
             scenario_mode=scenario_mode,
-            diffusion_template=diffusion_template,
+            diffusion_template=canonical_diffusion_template,
+            reference_time=reference_time,
+            injected_variables=injected_variables or [],
         )
         fallback = self._fallback_plan(
             scenario_mode=scenario_mode,
             region_count=len(regions),
             actor_count=len(profiles),
+            simulation_requirement=simulation_requirement,
+            document_text=document_text,
+            diffusion_template=canonical_diffusion_template,
+            injected_variables=injected_variables or [],
         )
         plan = {**fallback, **(llm_plan or {})}
-
-        template_rules = DEFAULT_TEMPLATE_RULES.get(diffusion_template, DEFAULT_TEMPLATE_RULES["generic"])
-        search_profile = build_search_mode_profile(search_mode, len(profiles))
+        hazard_template_id, hazard_template_reasoning = self._resolve_hazard_template(
+            plan=plan,
+            simulation_requirement=simulation_requirement,
+            document_text=document_text,
+            injected_variables=injected_variables or [],
+            fallback_family=canonical_diffusion_template,
+            override_hazard_template_id=hazard_template_id,
+            hazard_template_mode=hazard_template_mode,
+        )
+        template_definition = get_hazard_template_definition(hazard_template_id)
+        primary_family = self._resolve_primary_family(
+            hazard_template_id=hazard_template_id,
+            plan=plan,
+            fallback_family=canonical_diffusion_template,
+        )
+        transport_profile = build_transport_profile(
+            primary_family=primary_family,
+            secondary_channels=template_definition.get("secondary_channels"),
+            context_provider=(plan.get("transport_profile") or {}).get("context_provider"),
+        )
+        time_plan = self._resolve_time_plan(
+            plan=plan,
+            hazard_template_id=hazard_template_id,
+            scenario_mode=scenario_mode,
+            temporal_profile=temporal_profile,
+            override_time_plan=time_plan,
+            time_plan_mode=time_plan_mode,
+            reference_time=reference_time,
+            injected_variables=injected_variables or [],
+        )
         normalized_temporal = normalize_temporal_profile(
-            temporal_profile,
-            total_rounds=max(4, int((temporal_profile or {}).get("total_rounds") or plan.get("total_rounds", fallback["total_rounds"]))),
+            {
+                "preset": time_plan.get("preset"),
+                "total_rounds": time_plan.get("total_rounds"),
+                "minutes_per_round": time_plan.get("minutes_per_round"),
+            },
+            total_rounds=max(4, int(time_plan.get("total_rounds") or 12)),
         )
         total_rounds = normalized_temporal["total_rounds"]
         minutes_per_round = normalized_temporal["minutes_per_round"]
         total_hours = normalized_temporal["total_simulation_hours"]
+        search_profile = build_search_mode_profile(search_mode, len(profiles))
 
         config = EnvSimulationConfig(
             simulation_id=simulation_id,
             project_id=project_id,
             graph_id=graph_id,
             scenario_mode=scenario_mode,
-            diffusion_template=diffusion_template,
+            diffusion_template=transport_profile["primary_family"],
+            hazard_template_id=hazard_template_id,
+            hazard_template_mode=hazard_template_mode or "auto",
+            hazard_template_reasoning=hazard_template_reasoning,
+            hazard_template_recommendation={
+                "hazard_template_id": hazard_template_id,
+                "label": template_definition.get("label"),
+                "description": template_definition.get("description"),
+                "impact_chain": template_definition.get("impact_chain"),
+                "primary_family": transport_profile["primary_family"],
+                "secondary_channels": transport_profile.get("secondary_channels", []),
+                "reasoning_summary": hazard_template_reasoning,
+            },
+            transport_profile=transport_profile,
             search_mode=search_mode,
             simulation_requirement=simulation_requirement,
             document_digest=document_text[:2000],
             generation_reasoning=str(
                 plan.get("generation_reasoning")
-                or f"Used {diffusion_template} template with {len(regions)} regions and {len(profiles)} actors."
+                or f"Used {hazard_template_id} with {transport_profile['primary_family']} for {len(regions)} regions and {len(profiles)} actors."
             ),
             scenario_summary=str(
                 plan.get("scenario_summary")
-                or f"Region-level eco-social stress test in {scenario_mode} using {diffusion_template} diffusion."
+                or f"Region-level eco-social stress test in {scenario_mode} using {template_definition.get('label')}."
             ),
             reference_time=str(reference_time or ""),
+            time_plan_mode=time_plan_mode or "auto",
+            time_plan=time_plan,
             temporal_profile=normalized_temporal,
             time_config={
                 "total_rounds": total_rounds,
@@ -261,10 +343,10 @@ class EnvSimulationConfigGenerator:
                 "temporal_preset": normalized_temporal["preset"],
             },
             round_policies={
-                "diffusion_decay": template_rules["default_decay"],
-                "default_lag_rounds": template_rules["default_lag_rounds"],
-                "default_persistence": template_rules["default_persistence"],
-                "max_neighbor_spread": template_rules["max_neighbor_spread"],
+                "diffusion_decay": transport_profile["default_decay"],
+                "default_lag_rounds": transport_profile["default_lag_rounds"],
+                "default_persistence": transport_profile["default_persistence"],
+                "max_neighbor_spread": transport_profile["max_neighbor_spread"],
                 "score_update_limit": 18,
             },
             region_graph=[region.to_dict() for region in regions],
@@ -277,6 +359,7 @@ class EnvSimulationConfigGenerator:
             ],
             region_agent_index=region_agent_index or {},
             agent_archetypes=self._build_agent_archetypes(profiles),
+            agent_generation_summary=agent_generation_summary or {},
             interaction_policies={
                 "activation_mode": "stress_weighted_round_robin",
                 "max_actions_per_round": search_profile["max_active_agents_per_round"],
@@ -349,6 +432,8 @@ class EnvSimulationConfigGenerator:
         profiles: List[EnvAgentProfile],
         scenario_mode: str,
         diffusion_template: str,
+        reference_time: str,
+        injected_variables: List[InjectedVariable],
     ) -> Optional[Dict[str, Any]]:
         if not self.llm_client:
             return None
@@ -362,17 +447,39 @@ class EnvSimulationConfigGenerator:
             "region_graph": [region.to_dict() for region in regions[:6]],
             "subregion_graph": [region.to_dict() for region in subregions[:8]],
             "actor_samples": [profile.to_agent_config() for profile in profiles[:12]],
+            "reference_time": reference_time,
+            "hazard_templates": {
+                key: {
+                    "label": value.get("label"),
+                    "description": value.get("description"),
+                    "primary_family": value.get("primary_family"),
+                    "secondary_channels": value.get("secondary_channels"),
+                }
+                for key, value in HAZARD_TEMPLATE_CATALOG.items()
+            },
+            "injected_variables": [item.to_dict() if hasattr(item, "to_dict") else item for item in injected_variables[:8]],
             "schema": {
                 "scenario_summary": "string",
                 "generation_reasoning": "string",
-                "total_rounds": 8,
-                "minutes_per_round": 30,
+                "hazard_template_id": "string",
+                "hazard_template_reasoning": "string",
+                "transport_profile": {
+                    "primary_family": "string",
+                    "context_provider": "string",
+                },
+                "time_plan": {
+                    "step_unit": "day",
+                    "step_size": 1,
+                    "total_rounds": 12,
+                    "reasoning_summary": "string",
+                },
                 "round_label": "string",
                 "report_focus": ["item 1", "item 2"],
             },
             "rules": [
-                "Keep total_rounds between 4 and 16.",
-                "Keep minutes_per_round between 10 and 180.",
+                "Choose exactly one hazard_template_id from the provided catalog.",
+                "Use the hazard template to recommend one primary transport family.",
+                "Pick a time plan that matches fast, medium, or slow ecological change.",
                 "Favor explainability over realism.",
                 "Return valid JSON only.",
             ],
@@ -398,18 +505,34 @@ class EnvSimulationConfigGenerator:
         scenario_mode: str,
         region_count: int,
         actor_count: int,
+        simulation_requirement: str,
+        document_text: str,
+        diffusion_template: str,
+        injected_variables: List[InjectedVariable],
     ) -> Dict[str, Any]:
-        total_rounds = 10 if scenario_mode == "baseline_mode" else 8
+        hazard_template_id, hazard_reasoning = self._heuristic_hazard_template(
+            simulation_requirement=simulation_requirement,
+            document_text=document_text,
+            injected_variables=injected_variables,
+            fallback_family=diffusion_template,
+        )
+        time_plan = self._heuristic_time_plan(hazard_template_id, scenario_mode, injected_variables)
         return {
             "scenario_summary": (
                 f"Semi-quantitative scenario with "
                 f"{region_count} regions and {actor_count} eco-social actors."
             ),
             "generation_reasoning": (
-                "Fallback deterministic plan: keep the simulation short, region-level, and centered on "
-                "spread, vulnerability, intervention friction, and human-nature feedback."
+                "Fallback deterministic plan: recommend a hazard template, transport family, and time plan "
+                "from scenario wording, variable cadence, and hazard speed."
             ),
-            "total_rounds": total_rounds,
+            "hazard_template_id": hazard_template_id,
+            "hazard_template_reasoning": hazard_reasoning,
+            "transport_profile": {
+                "primary_family": get_hazard_template_definition(hazard_template_id).get("primary_family"),
+                "context_provider": "auto",
+            },
+            "time_plan": time_plan,
             "round_label": "EnvFish simulation round",
             "report_focus": [
                 "regional spread forecast",
@@ -418,6 +541,195 @@ class EnvSimulationConfigGenerator:
                 "intervention deltas",
                 "uncertainty bands",
             ],
+        }
+
+    def _resolve_hazard_template(
+        self,
+        *,
+        plan: Dict[str, Any],
+        simulation_requirement: str,
+        document_text: str,
+        injected_variables: List[InjectedVariable],
+        fallback_family: str,
+        override_hazard_template_id: str = "",
+        hazard_template_mode: str = "auto",
+    ) -> tuple[str, str]:
+        if str(hazard_template_mode or "auto") == "manual" and str(override_hazard_template_id or "").strip():
+            planned_id = normalize_hazard_template_id(override_hazard_template_id)
+            return planned_id, f"用户手动选择危机模板：{get_hazard_template_definition(planned_id).get('label')}。"
+        planned_id = normalize_hazard_template_id(plan.get("hazard_template_id"))
+        if planned_id != "generic" or str(plan.get("hazard_template_id") or "").strip():
+            reasoning = str(plan.get("hazard_template_reasoning") or plan.get("generation_reasoning") or "")
+            return planned_id, reasoning or get_hazard_template_definition(planned_id).get("description", "")
+        return self._heuristic_hazard_template(
+            simulation_requirement=simulation_requirement,
+            document_text=document_text,
+            injected_variables=injected_variables,
+            fallback_family=fallback_family,
+        )
+
+    def _resolve_primary_family(
+        self,
+        *,
+        hazard_template_id: str,
+        plan: Dict[str, Any],
+        fallback_family: str,
+    ) -> str:
+        planned_family = normalize_transport_family((plan.get("transport_profile") or {}).get("primary_family"))
+        if planned_family != "generic" or str((plan.get("transport_profile") or {}).get("primary_family") or "").strip():
+            return planned_family
+        definition = get_hazard_template_definition(hazard_template_id)
+        primary_family = normalize_transport_family(definition.get("primary_family"))
+        if definition.get("allow_auto_primary_family"):
+            fallback_normalized = normalize_transport_family(fallback_family)
+            if fallback_normalized != "generic":
+                return fallback_normalized
+        return primary_family
+
+    def _resolve_time_plan(
+        self,
+        *,
+        plan: Dict[str, Any],
+        hazard_template_id: str,
+        scenario_mode: str,
+        temporal_profile: Optional[Dict[str, Any]],
+        override_time_plan: Optional[Dict[str, Any]],
+        time_plan_mode: str,
+        reference_time: str,
+        injected_variables: List[InjectedVariable],
+    ) -> Dict[str, Any]:
+        if str(time_plan_mode or "auto") == "manual" and isinstance(override_time_plan, dict) and override_time_plan:
+            return normalize_time_plan(
+                override_time_plan,
+                total_rounds=(temporal_profile or {}).get("total_rounds"),
+                minutes_per_round=(temporal_profile or {}).get("minutes_per_round"),
+                preset=(temporal_profile or {}).get("preset"),
+                reference_time=reference_time,
+                reasoning_summary=str(override_time_plan.get("reasoning_summary") or "用户手动设置时间计划。"),
+                source="manual",
+            )
+        raw_plan = plan.get("time_plan")
+        if isinstance(raw_plan, dict) and raw_plan:
+            return normalize_time_plan(
+                raw_plan,
+                total_rounds=(temporal_profile or {}).get("total_rounds"),
+                minutes_per_round=(temporal_profile or {}).get("minutes_per_round"),
+                preset=(temporal_profile or {}).get("preset"),
+                reference_time=reference_time,
+                reasoning_summary=str(raw_plan.get("reasoning_summary") or plan.get("generation_reasoning") or ""),
+                source="auto",
+            )
+        heuristic = self._heuristic_time_plan(
+            hazard_template_id=hazard_template_id,
+            scenario_mode=scenario_mode,
+            injected_variables=injected_variables,
+            temporal_profile=temporal_profile,
+        )
+        return normalize_time_plan(
+            heuristic,
+            total_rounds=(temporal_profile or {}).get("total_rounds"),
+            minutes_per_round=(temporal_profile or {}).get("minutes_per_round"),
+            preset=(temporal_profile or {}).get("preset"),
+            reference_time=reference_time,
+            reasoning_summary=str(heuristic.get("reasoning_summary") or plan.get("generation_reasoning") or ""),
+            source="auto",
+        )
+
+    def _heuristic_hazard_template(
+        self,
+        *,
+        simulation_requirement: str,
+        document_text: str,
+        injected_variables: List[InjectedVariable],
+        fallback_family: str,
+    ) -> tuple[str, str]:
+        corpus = " ".join(
+            [
+                simulation_requirement or "",
+                document_text[:5000] or "",
+                " ".join(f"{item.name} {item.description}" for item in injected_variables),
+            ]
+        ).lower()
+        checks = [
+            ("coastal_radioactive_release", ("核废水", "海洋放射", "福岛", "treated water")),
+            ("radioactive_fallout", ("核爆", "核弹", "辐射沉降", "fallout")),
+            ("industrial_toxic_release", ("化工", "危险品", "有毒", "chemical spill", "toxic release")),
+            ("inland_water_contamination", ("河流污染", "湖库", "尾矿", "污水", "流域污染")),
+            ("marine_pollution_bloom", ("赤潮", "富营养化", "近海污染", "藻华", "bloom")),
+            ("wildfire_smoke_ash", ("山火", "野火", "烟尘", "灰烬", "wildfire")),
+            ("volcanic_eruption", ("火山", "火山灰", "火山泥流", "volcanic", "lahar")),
+            ("earthquake_secondary_cascade", ("地震", "滑坡", "液化", "earthquake")),
+            ("tsunami_inundation", ("海啸", "盐水入侵", "tsunami")),
+            ("flood_storm_surge", ("洪水", "风暴潮", "内涝", "flood", "storm surge")),
+            ("drought_ecosystem_stress", ("干旱", "热浪", "缺水", "drought", "heatwave")),
+            ("invasive_species_spread", ("外来物种", "入侵物种", "invasive", "扩散走廊")),
+            ("pest_disease_ecology", ("虫害", "疫病", "病害", "pest", "disease")),
+            ("asteroid_impact_cascade", ("小行星", "陨石", "撞击", "asteroid", "impact")),
+        ]
+        for template_id, tokens in checks:
+            if any(token in corpus for token in tokens):
+                return template_id, get_hazard_template_definition(template_id).get("description", "")
+        family = normalize_transport_family(fallback_family)
+        template_id = default_hazard_template_for_family(family)
+        return template_id, f"根据当前传播介质偏好，回退到 {get_hazard_template_definition(template_id).get('label')}。"
+
+    def _heuristic_time_plan(
+        self,
+        hazard_template_id: str,
+        scenario_mode: str,
+        injected_variables: List[InjectedVariable],
+        temporal_profile: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        fast_templates = {
+            "radioactive_fallout",
+            "tsunami_inundation",
+            "earthquake_secondary_cascade",
+            "flood_storm_surge",
+            "industrial_toxic_release",
+            "asteroid_impact_cascade",
+        }
+        medium_templates = {
+            "volcanic_eruption",
+            "wildfire_smoke_ash",
+            "inland_water_contamination",
+            "marine_pollution_bloom",
+        }
+        slow_templates = {
+            "coastal_radioactive_release",
+            "drought_ecosystem_stress",
+            "invasive_species_spread",
+            "pest_disease_ecology",
+        }
+        preferred = {
+            "fast": ("hour", 6, 16 if scenario_mode == "crisis_mode" else 12, "快过程危机优先使用小时级步长观察级联响应。"),
+            "medium": ("day", 1, 14 if scenario_mode == "crisis_mode" else 10, "中过程危机使用天级步长平衡扩散和恢复过程。"),
+            "slow": ("week", 1, 16 if injected_variables else 12, "慢过程危机使用周级步长覆盖建立、累积和长期反馈。"),
+        }
+        speed = "medium"
+        if hazard_template_id in fast_templates:
+            speed = "fast"
+        elif hazard_template_id in slow_templates:
+            speed = "slow"
+        elif hazard_template_id in medium_templates:
+            speed = "medium"
+        step_unit, step_size, total_rounds, reasoning = preferred[speed]
+        if temporal_profile and temporal_profile.get("minutes_per_round"):
+            return normalize_time_plan(
+                {
+                    "total_rounds": temporal_profile.get("total_rounds"),
+                    "minutes_per_round": temporal_profile.get("minutes_per_round"),
+                    "reasoning_summary": reasoning,
+                },
+                total_rounds=temporal_profile.get("total_rounds"),
+                minutes_per_round=temporal_profile.get("minutes_per_round"),
+                preset=temporal_profile.get("preset"),
+                source="auto",
+            )
+        return {
+            "step_unit": step_unit,
+            "step_size": step_size,
+            "total_rounds": total_rounds,
+            "reasoning_summary": reasoning,
         }
 
     def _build_agent_archetypes(self, profiles: List[EnvAgentProfile]) -> List[Dict[str, Any]]:

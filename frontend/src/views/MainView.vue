@@ -3,7 +3,7 @@
     <!-- Header -->
     <header class="app-header">
       <div class="header-left">
-        <div class="brand" @click="router.push('/')">ENVFISH</div>
+        <KaleidoNavBrand to="/" />
       </div>
       
       <div class="header-center">
@@ -77,11 +77,13 @@
 <script setup>
 import { ref, computed, onMounted, onUnmounted, nextTick } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
+import KaleidoNavBrand from '../components/KaleidoNavBrand.vue'
 import GraphPanel from '../components/GraphPanel.vue'
 import Step1GraphBuild from '../components/Step1GraphBuild.vue'
 import Step2EnvSetup from '../components/Step2EnvSetup.vue'
 import { generateOntology, getProject, buildGraph, getTaskStatus, getGraphData } from '../api/graph'
 import { getPendingUpload, clearPendingUpload } from '../store/pendingUpload'
+import { attachSceneSeedContextToProject } from '../store/sceneSeedBridge'
 
 const route = useRoute()
 const router = useRouter()
@@ -206,6 +208,14 @@ const handleNewProject = async () => {
     
     const res = await generateOntology(formData)
     if (res.success) {
+      if (res.data?.project_id) {
+        attachSceneSeedContextToProject(res.data.project_id, {
+          initialVariables: pending.initialVariables,
+          selectedPoints: pending.selectedPoints,
+          mapSeedId: pending.mapSeedId,
+          areaLabel: pending.areaLabel
+        })
+      }
       clearPendingUpload()
       currentProjectId.value = res.data.project_id
       projectData.value = res.data
@@ -343,10 +353,12 @@ const pollTaskStatus = async (taskId) => {
             projectData.value = projRes.data
             await loadGraph(projRes.data.graph_id)
         }
-      } else if (task.status === 'failed') {
+      } else if (task.status === 'failed' || task.status === 'cancelled') {
         stopPolling()
-        error.value = task.error
-        addLog(`Graph build task failed: ${task.error}`)
+        error.value = task.error || (task.status === 'cancelled' ? '用户强制停止' : '未知错误')
+        addLog(task.status === 'cancelled'
+          ? `Graph build task cancelled: ${error.value}`
+          : `Graph build task failed: ${error.value}`)
       }
     }
   } catch (e) {
@@ -417,12 +429,13 @@ onUnmounted(() => {
 /* Header */
 .app-header {
   height: 60px;
-  border-bottom: 1px solid #EAEAEA;
+  border-bottom: 1px solid rgba(16, 35, 29, 0.08);
   display: flex;
   align-items: center;
   justify-content: space-between;
   padding: 0 24px;
-  background: #FFF;
+  background: rgba(244, 246, 241, 0.92);
+  backdrop-filter: blur(14px);
   z-index: 100;
   position: relative;
 }
@@ -433,19 +446,12 @@ onUnmounted(() => {
   transform: translateX(-50%);
 }
 
-.brand {
-  font-family: 'JetBrains Mono', monospace;
-  font-weight: 800;
-  font-size: 18px;
-  letter-spacing: 1px;
-  cursor: pointer;
-}
-
 .view-switcher {
   display: flex;
-  background: #F5F5F5;
+  background: rgba(255, 255, 255, 0.78);
   padding: 4px;
-  border-radius: 6px;
+  border: 1px solid rgba(16, 35, 29, 0.08);
+  border-radius: 10px;
   gap: 4px;
 }
 
@@ -464,7 +470,7 @@ onUnmounted(() => {
 .switch-btn.active {
   background: #FFF;
   color: #000;
-  box-shadow: 0 2px 4px rgba(0,0,0,0.05);
+  box-shadow: 0 6px 16px rgba(16, 35, 29, 0.08);
 }
 
 .status-indicator {

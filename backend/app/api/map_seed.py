@@ -11,12 +11,68 @@ import traceback
 from flask import jsonify, request
 
 from . import map_bp
-from ..models.task import TaskManager, TaskStatus
+from ..models.task import TaskCancelledError, TaskManager, TaskStatus
 from ..services.map_seed_manager import MapSeedManager
 from ..services.simulation_manager import SimulationManager
 from ..utils.logger import get_logger
 
 logger = get_logger("envfish.api.map_seed")
+
+
+@map_bp.route("/geocode", methods=["POST"])
+def geocode_location():
+    try:
+        data = request.get_json() or {}
+        query = str(data.get("query") or data.get("location") or "").strip()
+        radius_m = int(data.get("radius_m") or 3000)
+        if not query:
+            return jsonify({"success": False, "error": "请提供 query 或 location"}), 400
+
+        seed_manager = MapSeedManager()
+        candidates = seed_manager.geocode_location(query, limit=int(data.get("limit") or 5), radius_m=radius_m)
+        return jsonify(
+            {
+                "success": True,
+                "data": {
+                    "query": query,
+                    "candidates": candidates,
+                    "primary": candidates[0] if candidates else None,
+                },
+            }
+        )
+    except Exception as exc:
+        logger.error(f"地点地理编码失败: {exc}")
+        return jsonify(
+            {
+                "success": False,
+                "error": str(exc),
+                "traceback": traceback.format_exc(),
+            }
+        ), 500
+
+
+@map_bp.route("/reverse-geocode", methods=["POST"])
+def reverse_geocode_location():
+    try:
+        data = request.get_json() or {}
+        lat = data.get("lat")
+        lon = data.get("lon")
+        radius_m = int(data.get("radius_m") or 3000)
+        if lat is None or lon is None:
+            return jsonify({"success": False, "error": "请提供 lat 和 lon"}), 400
+
+        seed_manager = MapSeedManager()
+        context = seed_manager.resolve_area_context(lat=float(lat), lon=float(lon), radius_m=radius_m)
+        return jsonify({"success": True, "data": context})
+    except Exception as exc:
+        logger.error(f"点位逆地理解析失败: {exc}")
+        return jsonify(
+            {
+                "success": False,
+                "error": str(exc),
+                "traceback": traceback.format_exc(),
+            }
+        ), 500
 
 
 @map_bp.route("/seed", methods=["POST"])
@@ -47,14 +103,19 @@ def create_map_seed():
 
         def run_seed() -> None:
             try:
+                def ensure_running() -> None:
+                    task_manager.ensure_not_cancelled(task_id)
+
                 task_manager.update_task(
                     task_id,
                     status=TaskStatus.PROCESSING,
                     progress=2,
                     message="启动地图种子任务",
                 )
+                ensure_running()
 
                 def progress_callback(stage: str, progress: int, message: str) -> None:
+                    ensure_running()
                     task_manager.update_task(
                         task_id,
                         progress=max(0, min(100, int(progress))),
@@ -67,7 +128,9 @@ def create_map_seed():
                         },
                     )
 
+                ensure_running()
                 result = seed_manager.build_seed(seed["seed_id"], progress_callback=progress_callback)
+                ensure_running()
                 task_manager.complete_task(
                     task_id,
                     result={
@@ -77,6 +140,12 @@ def create_map_seed():
                     },
                 )
             except Exception as exc:
+                if isinstance(exc, TaskCancelledError) or task_manager.is_cancelled(task_id):
+                    cancel_reason = str(exc) or "用户强制停止"
+                    logger.info(f"Map seed build cancelled: task_id={task_id}, seed_id={seed['seed_id']}")
+                    seed_manager.update_seed(seed["seed_id"], status="failed", error=cancel_reason)
+                    return
+
                 logger.exception("Map seed build failed")
                 task_manager.fail_task(task_id, str(exc))
 
@@ -276,7 +345,7 @@ def map_seed_to_simulation(seed_id: str):
 def _suggest_diffusion_template(seed: Dict[str, Any]) -> str:
     scene = (seed.get("scene_classification") or {}).get("primary_scene")
     if scene == "coastal":
-        return "marine"
+        return "marine_current"
     if scene in {"wetland", "inland_water"}:
-        return "inland_water"
+        return "inland_water_network"
     return "generic"

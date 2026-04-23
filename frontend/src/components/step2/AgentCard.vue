@@ -60,6 +60,7 @@
 
 <script setup>
 import { computed } from 'vue'
+import { translateDisplayToken } from '../../utils/displayText'
 
 const props = defineProps({
   agent: {
@@ -75,9 +76,9 @@ const props = defineProps({
 const displayIndex = computed(() => props.index || 0)
 const familyClass = computed(() => props.agent?.familyClass || 'other')
 const summaryText = computed(() => props.agent?.summary || props.agent?.bio || props.agent?.persona || '暂无简介')
-const primaryRegionLabel = computed(() => props.agent?.primaryRegionLabel || 'Unknown region')
-const goals = computed(() => Array.isArray(props.agent?.goals) ? props.agent.goals.slice(0, 3) : [])
-const sensitivities = computed(() => Array.isArray(props.agent?.sensitivities) ? props.agent.sensitivities.slice(0, 2) : [])
+const primaryRegionLabel = computed(() => props.agent?.primaryRegionLabel || '未知区域')
+const goals = computed(() => Array.isArray(props.agent?.goals) ? props.agent.goals.slice(0, 3).map(item => translateDisplayToken(item, item)) : [])
+const sensitivities = computed(() => Array.isArray(props.agent?.sensitivities) ? props.agent.sensitivities.slice(0, 2).map(item => translateDisplayToken(item, item)) : [])
 </script>
 
 <style scoped>

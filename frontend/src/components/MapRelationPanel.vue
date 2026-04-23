@@ -1,12 +1,12 @@
 <template>
-  <div class="map-relation-panel" :class="{ loading: loading }">
-    <header class="panel-header">
+  <div class="map-relation-panel" :class="{ loading: loading, embedded: embedded }">
+    <header v-if="!embedded" class="panel-header">
       <div class="title-group">
-        <h3>Map Relationship Visualization</h3>
+        <h3>地图关系可视化</h3>
         <span class="phase-pill">运行态地图关系</span>
       </div>
       <div class="panel-actions">
-        <button type="button" class="ghost-btn" @click="$emit('refresh')">Refresh</button>
+        <button type="button" class="ghost-btn" @click="$emit('refresh')">刷新</button>
         <button type="button" class="ghost-btn" @click="$emit('toggle-maximize')">⛶</button>
       </div>
     </header>
@@ -27,19 +27,19 @@
 
     <footer class="panel-footer">
       <div class="stat-chip">
-        <span>Nodes</span>
+        <span>节点</span>
         <strong>{{ nodeCount }}</strong>
       </div>
       <div class="stat-chip">
-        <span>Edges</span>
-        <strong>{{ edgeCount }}</strong>
+        <span>边</span>
+        <strong>{{ shownEdgeCount }}/{{ edgeCount }}</strong>
       </div>
       <div class="stat-chip">
-        <span>Key</span>
-        <strong>{{ keyEdgeCount }}</strong>
+        <span>隐藏</span>
+        <strong>{{ suppressedEdgeCount }}</strong>
       </div>
       <div class="stat-chip">
-        <span>Focus</span>
+        <span>聚焦</span>
         <strong>{{ highlightModeLabel }}</strong>
       </div>
     </footer>
@@ -78,6 +78,10 @@ const props = defineProps({
   highlightMode: {
     type: String,
     default: ''
+  },
+  embedded: {
+    type: Boolean,
+    default: false
   }
 })
 
@@ -95,7 +99,6 @@ const edgeList = computed(() => {
 
 const nodeCount = computed(() => nodeList.value.length)
 const edgeCount = computed(() => edgeList.value.length)
-const keyEdgeCount = computed(() => edgeList.value.filter((edge) => edge?.is_key_interaction || edge?.attributes?.is_key_interaction).length)
 const hasData = computed(() => nodeCount.value > 0 || edgeCount.value > 0)
 
 const mapCenter = computed(() => {
@@ -184,6 +187,7 @@ const nodeLayers = computed(() => {
     grouped.get(kind).push({
       lat,
       lon,
+      tooltip: nodeTooltip(node),
       label: showNodeLabel(node, isHighlighted) ? node?.name : '',
       radius: isHighlighted ? nodeRadius(kind) + 2 : nodeRadius(kind),
       fillColor: isHighlighted ? '#dc2626' : nodeColor(kind),
@@ -210,12 +214,13 @@ const nodeLayers = computed(() => {
 })
 
 const edgeLayer = computed(() => {
+  const { edges: visibleEdges } = compactedEdgeResult.value
   const features = []
-  for (const edge of edgeList.value) {
+  for (const edge of visibleEdges) {
     const source = nodeById.value.get(String(edge?.source_node_uuid || ''))
     const target = nodeById.value.get(String(edge?.target_node_uuid || ''))
     if (!source || !target) continue
-    const highlighted = isEdgeHighlighted(edge) || (isNodeHighlighted(source.node) && isNodeHighlighted(target.node))
+    const highlighted = isEdgeHighlighted(edge)
     features.push({
       type: 'Feature',
       geometry: {
@@ -228,8 +233,8 @@ const edgeLayer = computed(() => {
       properties: {
         name: edge?.name || edge?.fact_type || 'relation',
         color: edgeColor(edge, highlighted),
-        weight: highlighted ? 3 : 2,
-        opacity: highlighted ? 0.95 : 0.7,
+        weight: highlighted ? 3 : 1.35,
+        opacity: highlighted ? 0.95 : 0.38,
         fillOpacity: 0
       }
     })
@@ -257,8 +262,60 @@ const leafletLayers = computed(() => {
 })
 
 const highlightModeLabel = computed(() => {
+  if (props.highlightMode === 'focus') return '聚焦'
+  if (props.highlightMode === 'none') return '无'
   if (props.highlightMode) return props.highlightMode
-  return props.highlightLabel ? 'focus' : 'none'
+  return props.highlightLabel ? '聚焦' : '无'
+})
+
+const HUB_EDGE_CAP = 24
+const HUB_PRIORITY_KEEP = 8
+
+const shownEdgeCount = computed(() => compactedEdgeResult.value.edges.length)
+const suppressedEdgeCount = computed(() => compactedEdgeResult.value.suppressedCount)
+
+const compactedEdgeResult = computed(() => {
+  const alwaysVisible = []
+  const directEdges = []
+  const hubGroups = new Map()
+
+  for (const edge of edgeList.value) {
+    const source = nodeById.value.get(String(edge?.source_node_uuid || ''))
+    const target = nodeById.value.get(String(edge?.target_node_uuid || ''))
+    if (!source || !target) continue
+
+    const highlighted = isEdgeHighlighted(edge)
+    if (highlighted) {
+      alwaysVisible.push(edge)
+      continue
+    }
+
+    const hubNodeId = resolveHubNodeId(edge, source.node, target.node)
+    if (!hubNodeId) {
+      directEdges.push(edge)
+      continue
+    }
+
+    if (!hubGroups.has(hubNodeId)) hubGroups.set(hubNodeId, [])
+    hubGroups.get(hubNodeId).push(edge)
+  }
+
+  const hubVisible = []
+  let suppressedCount = 0
+  hubGroups.forEach((edges, hubNodeId) => {
+    if (edges.length <= HUB_EDGE_CAP) {
+      hubVisible.push(...edges)
+      return
+    }
+    const kept = pickHubEdges(edges, hubNodeId, HUB_EDGE_CAP, HUB_PRIORITY_KEEP)
+    suppressedCount += Math.max(0, edges.length - kept.length)
+    hubVisible.push(...kept)
+  })
+
+  return {
+    edges: dedupeEdges([...alwaysVisible, ...directEdges, ...hubVisible]),
+    suppressedCount
+  }
 })
 
 function isNodeHighlighted(node) {
@@ -272,6 +329,110 @@ function isNodeHighlighted(node) {
 function isEdgeHighlighted(edge) {
   const edgeId = String(edge?.uuid || '').trim()
   return edgeId ? highlightedEdgeIdSet.value.has(edgeId) : false
+}
+
+function resolveHubNodeId(edge, sourceNode, targetNode) {
+  const type = String(edge?.fact_type || edge?.name || '').toLowerCase()
+  if (!['agent_influence', 'influences_region', 'agent_anchor', 'located_in', 'depends_on', 'affects'].includes(type)) {
+    return ''
+  }
+  const sourceKind = nodeKind(sourceNode)
+  const targetKind = nodeKind(targetNode)
+  if (isHubKind(sourceKind) && targetKind === 'agent') return String(sourceNode?.uuid || '')
+  if (isHubKind(targetKind) && sourceKind === 'agent') return String(targetNode?.uuid || '')
+  return ''
+}
+
+function pickHubEdges(edges, hubNodeId, cap, mustKeepCount) {
+  const sorted = [...edges].sort((left, right) => edgeScore(right) - edgeScore(left))
+  const mustKeep = sorted.slice(0, Math.min(mustKeepCount, cap))
+  const selected = new Set(mustKeep.map((edge) => String(edge?.uuid || '')))
+  const rest = sorted.filter((edge) => !selected.has(String(edge?.uuid || '')))
+  if (mustKeep.length >= cap) return mustKeep
+  const spread = sampleEdgesByAngle(rest, hubNodeId, cap - mustKeep.length)
+  return dedupeEdges([...mustKeep, ...spread])
+}
+
+function sampleEdgesByAngle(edges, hubNodeId, limit) {
+  if (limit <= 0 || edges.length === 0) return []
+  if (edges.length <= limit) return edges
+  const projected = edges
+    .map((edge) => {
+      const sourceId = String(edge?.source_node_uuid || '')
+      const targetId = String(edge?.target_node_uuid || '')
+      const source = nodeById.value.get(sourceId)
+      const target = nodeById.value.get(targetId)
+      if (!source || !target) return null
+      const hub = sourceId === hubNodeId ? source : target
+      const peer = sourceId === hubNodeId ? target : source
+      const angle = Math.atan2(peer.lat - hub.lat, peer.lon - hub.lon)
+      return { edge, angle }
+    })
+    .filter(Boolean)
+    .sort((a, b) => a.angle - b.angle)
+  if (projected.length <= limit) return projected.map((item) => item.edge)
+  const selected = []
+  const step = projected.length / limit
+  for (let i = 0; i < limit; i += 1) {
+    const idx = Math.min(projected.length - 1, Math.floor(i * step))
+    selected.push(projected[idx].edge)
+  }
+  return selected
+}
+
+function edgeScore(edge) {
+  const attrs = edge?.attributes || {}
+  let score = 0
+  const factType = String(edge?.fact_type || edge?.name || '').toLowerCase()
+  if (factType === 'dynamic_edge') score += 0.5
+  if (isEdgeHighlighted(edge)) score += 1
+  score += Number(attrs?.strength || 0) * 0.9
+  score += Number(attrs?.confidence || 0) * 0.8
+  return score
+}
+
+function dedupeEdges(edges) {
+  const map = new Map()
+  for (const edge of edges) {
+    const key = String(edge?.uuid || '')
+    if (!key || map.has(key)) continue
+    map.set(key, edge)
+  }
+  return [...map.values()]
+}
+
+function nodeKind(node) {
+  return String(node?.kind || node?.attributes?.map_kind || '').toLowerCase()
+}
+
+function isHubKind(kind) {
+  return kind === 'region' || kind === 'subregion'
+}
+
+function nodeTooltip(node) {
+  const placeholderNames = new Set([
+    'agent node',
+    'agent nodes',
+    'region node',
+    'region nodes',
+    'subregion node',
+    'subregion nodes',
+    'entity node',
+    'entity nodes',
+    'node',
+    'nodes'
+  ])
+  const name = String(node?.name || '').trim()
+  if (name && !placeholderNames.has(name.toLowerCase())) return name
+  const attrs = node?.attributes || {}
+  const displayName = String(attrs?.display_name || attrs?.actor_name || attrs?.title || '').trim()
+  if (displayName) return displayName
+  const summary = String(node?.summary || '').trim()
+  if (summary) return summary.length > 56 ? `${summary.slice(0, 53)}...` : summary
+  const nodeId = String(node?.uuid || '').trim()
+  if (nodeId.includes('::')) return nodeId.split('::').slice(-1)[0]
+  if (nodeId) return nodeId
+  return 'node'
 }
 
 function showNodeLabel(node, highlighted) {
@@ -314,6 +475,12 @@ function edgeColor(edge, highlighted) {
   border: 1px solid #e2e8f0;
   border-radius: 14px;
   overflow: hidden;
+}
+
+.map-relation-panel.embedded {
+  border: none;
+  border-radius: 0;
+  background: transparent;
 }
 
 .panel-header {

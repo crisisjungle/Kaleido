@@ -3,7 +3,7 @@
     <!-- Header -->
     <header class="app-header">
       <div class="header-left">
-        <div class="brand" @click="router.push('/')">ENVFISH</div>
+        <KaleidoNavBrand to="/" />
       </div>
       
       <div class="header-center">
@@ -37,32 +37,34 @@
     <main class="content-area">
       <!-- Left Panel: Graph -->
       <div class="panel-wrapper left" :style="leftPanelStyle">
-        <MapRelationPanel
-          v-if="viewMode === 'map'"
-          :mapData="mapProjection"
-          :loading="graphLoading"
-          :highlightNodeIds="graphHighlight.nodeIds"
-          :highlightNodeNames="graphHighlight.nodeNames"
-          :highlightEdgeIds="graphHighlight.edgeIds"
-          :highlightLabel="graphHighlight.label"
-          :highlightMode="graphHighlight.mode"
-          @refresh="refreshGraph"
-          @toggle-maximize="toggleMaximize('map')"
-        />
-        <GraphPanel
-          v-else
-          :graphData="graphData"
-          :loading="graphLoading"
-          :currentPhase="3"
-          :isSimulating="isSimulating"
-          :highlightNodeIds="graphHighlight.nodeIds"
-          :highlightNodeNames="graphHighlight.nodeNames"
-          :highlightEdgeIds="graphHighlight.edgeIds"
-          :highlightLabel="graphHighlight.label"
-          :highlightMode="graphHighlight.mode"
-          @refresh="refreshGraph"
-          @toggle-maximize="toggleMaximize('graph')"
-        />
+        <template v-if="graphPanelVisible">
+          <MapRelationPanel
+            v-if="viewMode === 'map'"
+            :mapData="mapProjection"
+            :loading="graphLoading"
+            :highlightNodeIds="graphHighlight.nodeIds"
+            :highlightNodeNames="graphHighlight.nodeNames"
+            :highlightEdgeIds="graphHighlight.edgeIds"
+            :highlightLabel="graphHighlight.label"
+            :highlightMode="graphHighlight.mode"
+            @refresh="refreshGraph"
+            @toggle-maximize="toggleMaximize('map')"
+          />
+          <GraphPanel
+            v-else
+            :graphData="displayGraphData"
+            :loading="graphLoading"
+            :currentPhase="3"
+            :isSimulating="isSimulating"
+            :highlightNodeIds="graphHighlight.nodeIds"
+            :highlightNodeNames="graphHighlight.nodeNames"
+            :highlightEdgeIds="graphHighlight.edgeIds"
+            :highlightLabel="graphHighlight.label"
+            :highlightMode="graphHighlight.mode"
+            @refresh="refreshGraph"
+            @toggle-maximize="toggleMaximize('graph')"
+          />
+        </template>
       </div>
 
       <!-- Right Panel: Step3 开始模拟 -->
@@ -91,6 +93,7 @@
 <script setup>
 import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
+import KaleidoNavBrand from '../components/KaleidoNavBrand.vue'
 import GraphPanel from '../components/GraphPanel.vue'
 import MapRelationPanel from '../components/MapRelationPanel.vue'
 import Step3Simulation from '../components/Step3Simulation.vue'
@@ -115,6 +118,7 @@ const maxRounds = ref(route.query.maxRounds ? parseInt(route.query.maxRounds) : 
 const minutesPerRound = ref(30) // 默认每轮30分钟
 const projectData = ref(null)
 const graphData = ref(null)
+const displayGraphData = ref(null)
 const mapProjection = ref(null)
 const graphLoading = ref(false)
 const systemLogs = ref([])
@@ -146,6 +150,12 @@ const statusText = computed(() => {
 })
 
 const isSimulating = computed(() => currentStatus.value === 'processing')
+const graphPanelVisible = computed(() => viewMode.value !== 'workbench')
+const shouldRefreshGraph = computed(() => isSimulating.value && graphPanelVisible.value)
+
+const GRAPH_REFRESH_INTERVAL_MS = 7000
+const GRAPH_COMPACT_NODE_THRESHOLD = 220
+const GRAPH_COMPACT_EDGE_THRESHOLD = 260
 
 // --- Helpers ---
 const addLog = (msg) => {
@@ -168,6 +178,122 @@ const updateGraphHighlight = (payload = {}) => {
     label: payload.label || '',
     mode: payload.mode || ''
   }
+}
+
+const buildGraphSignature = (graph) => {
+  const nodes = Array.isArray(graph?.nodes) ? graph.nodes : []
+  const edges = Array.isArray(graph?.edges) ? graph.edges : []
+  const nodePart = nodes
+    .map((node) => String(node?.uuid || node?.id || ''))
+    .filter(Boolean)
+    .join('|')
+  const edgePart = edges
+    .map((edge) => {
+      const attrs = edge?.attributes || {}
+      return [
+        edge?.uuid || edge?.id || '',
+        edge?.source_node_uuid || edge?.source || '',
+        edge?.target_node_uuid || edge?.target || '',
+        edge?.fact_type || edge?.name || '',
+        attrs?.status || '',
+        attrs?.last_activated_round || attrs?.created_round || '',
+        attrs?.strength || '',
+        attrs?.confidence || ''
+      ].join(':')
+    })
+    .join('|')
+  return `${nodes.length}:${edges.length}:${nodePart}::${edgePart}`
+}
+
+const buildMapProjectionSignature = (projection) => {
+  if (!projection) return ''
+  const nodes = Array.isArray(projection?.nodes) ? projection.nodes : []
+  const edges = Array.isArray(projection?.edges) ? projection.edges : []
+  const center = projection?.center || {}
+  return [
+    Number(center.lat || 0).toFixed(5),
+    Number(center.lon || 0).toFixed(5),
+    nodes.map((node) => `${node?.uuid || ''}:${node?.attributes?.lat || ''}:${node?.attributes?.lon || ''}`).join('|'),
+    edges.map((edge) => `${edge?.uuid || ''}:${edge?.source_node_uuid || ''}:${edge?.target_node_uuid || ''}`).join('|')
+  ].join('::')
+}
+
+const compactGraphForDisplay = (graph) => {
+  const nodes = Array.isArray(graph?.nodes) ? graph.nodes : []
+  const edges = Array.isArray(graph?.edges) ? graph.edges : []
+  if (nodes.length <= GRAPH_COMPACT_NODE_THRESHOLD && edges.length <= GRAPH_COMPACT_EDGE_THRESHOLD) {
+    return graph
+  }
+
+  const keyEdges = edges.filter(isKeyEdge)
+  const displayEdges = keyEdges.length > 0 ? keyEdges : edges.slice(0, GRAPH_COMPACT_EDGE_THRESHOLD)
+  const visibleNodeIds = new Set()
+  displayEdges.forEach((edge) => {
+    const sourceId = String(edge?.source_node_uuid || edge?.source || '')
+    const targetId = String(edge?.target_node_uuid || edge?.target || '')
+    if (sourceId) visibleNodeIds.add(sourceId)
+    if (targetId) visibleNodeIds.add(targetId)
+  })
+
+  const displayNodes = nodes.filter((node) => {
+    const nodeId = String(node?.uuid || node?.id || '')
+    if (visibleNodeIds.has(nodeId)) return true
+    const kind = nodeKindFromNode(node)
+    return kind === 'region' || kind === 'subregion'
+  })
+  const displayNodeIds = new Set(displayNodes.map((node) => String(node?.uuid || node?.id || '')))
+  const safeEdges = displayEdges.filter((edge) => {
+    const sourceId = String(edge?.source_node_uuid || edge?.source || '')
+    const targetId = String(edge?.target_node_uuid || edge?.target || '')
+    return displayNodeIds.has(sourceId) && displayNodeIds.has(targetId)
+  })
+
+  return {
+    ...graph,
+    nodes: displayNodes,
+    edges: safeEdges,
+    meta: {
+      ...(graph?.meta || {}),
+      display_compacted: true,
+      input_node_count: nodes.length,
+      input_edge_count: edges.length,
+      node_count: displayNodes.length,
+      edge_count: safeEdges.length
+    }
+  }
+}
+
+let lastGraphSignature = ''
+let lastDisplayGraphSignature = ''
+let lastMapProjectionSignature = ''
+
+const applyGraphData = (graph, { compact = false } = {}) => {
+  const fullSignature = buildGraphSignature(graph)
+  let graphChanged = false
+  if (!fullSignature || fullSignature !== lastGraphSignature) {
+    graphData.value = graph
+    lastGraphSignature = fullSignature
+    graphChanged = true
+  }
+
+  const nextDisplayGraph = compact ? compactGraphForDisplay(graph) : graph
+  const displaySignature = buildGraphSignature(nextDisplayGraph)
+  let displayChanged = false
+  if (!displaySignature || displaySignature !== lastDisplayGraphSignature) {
+    displayGraphData.value = nextDisplayGraph
+    lastDisplayGraphSignature = displaySignature
+    displayChanged = true
+  }
+
+  return graphChanged || displayChanged
+}
+
+const applyMapProjection = (projection) => {
+  const signature = buildMapProjectionSignature(projection)
+  if (signature && signature === lastMapProjectionSignature) return false
+  mapProjection.value = projection
+  lastMapProjectionSignature = signature
+  return true
 }
 
 const extractGraphData = (payload) => {
@@ -411,12 +537,12 @@ const loadSimulationData = async () => {
         if (realtimeRes.success) {
           const realtimeGraph = extractGraphData(realtimeRes.data)
           if (realtimeGraph) {
-            graphData.value = realtimeGraph
+            applyGraphData(realtimeGraph, { compact: true })
             graphLoaded = true
             addLog('实时图谱加载成功')
           }
           if (realtimeRes.data?.map_projection) {
-            mapProjection.value = realtimeRes.data.map_projection
+            applyMapProjection(realtimeRes.data.map_projection)
           }
         }
       } catch (realtimeErr) {
@@ -453,12 +579,12 @@ const loadSimulationData = async () => {
         applyMapSeedGraph(simData)
       }
       if (!mapProjection.value) {
-        mapProjection.value = buildMapProjectionFallback({
+        applyMapProjection(buildMapProjectionFallback({
           graph: graphData.value,
           layersPayload: simData?.map_layers || null,
           sourceMode: simData?.source_mode || 'graph',
           mapSeedId: simData?.map_seed_id || ''
-        })
+        }))
       }
     } else {
       addLog(`加载模拟数据失败: ${simRes.error || '未知错误'}`)
@@ -477,13 +603,13 @@ const applyMapSeedGraph = (simData) => {
     return false
   }
 
-  graphData.value = mapGraph
-  mapProjection.value = buildMapProjectionFallback({
+  applyGraphData(mapGraph, { compact: true })
+  applyMapProjection(buildMapProjectionFallback({
     graph: mapGraph,
     layersPayload: simData?.map_layers || null,
     sourceMode: simData?.source_mode || 'map_seed',
     mapSeedId: simData?.map_seed_id || ''
-  })
+  }))
   if (!isSimulating.value) {
     addLog('地图图谱加载成功')
   }
@@ -500,12 +626,12 @@ const loadGraph = async (graphId) => {
   try {
     const res = await getGraphData(graphId)
     if (res.success) {
-      graphData.value = res.data
-      mapProjection.value = buildMapProjectionFallback({
+      applyGraphData(res.data, { compact: true })
+      applyMapProjection(buildMapProjectionFallback({
         graph: res.data,
         layersPayload: null,
         sourceMode: 'graph'
-      })
+      }))
       if (!isSimulating.value) {
         addLog('图谱数据加载成功')
       }
@@ -529,17 +655,17 @@ const refreshGraph = async () => {
     if (realtimeRes.success) {
       const realtimeGraph = extractGraphData(realtimeRes.data)
       if (realtimeGraph) {
-        graphData.value = realtimeGraph
+        const graphChanged = applyGraphData(realtimeGraph, { compact: true })
         if (realtimeRes.data?.map_projection) {
-          mapProjection.value = realtimeRes.data.map_projection
+          applyMapProjection(realtimeRes.data.map_projection)
         } else {
-          mapProjection.value = buildMapProjectionFallback({
+          applyMapProjection(buildMapProjectionFallback({
             graph: realtimeGraph,
             layersPayload: null,
             sourceMode: 'graph'
-          })
+          }))
         }
-        if (!isSimulating.value) {
+        if (graphChanged && !isSimulating.value) {
           addLog('实时图谱刷新成功')
         }
         return
@@ -575,9 +701,9 @@ let graphRefreshInFlight = false
 
 const startGraphRefresh = () => {
   if (graphRefreshTimer) return
-  addLog('开启图谱实时刷新 (2.5s)')
+  addLog(`开启图谱实时刷新 (${Math.round(GRAPH_REFRESH_INTERVAL_MS / 1000)}s)`)
   refreshGraph()
-  graphRefreshTimer = setInterval(refreshGraph, 2500)
+  graphRefreshTimer = setInterval(refreshGraph, GRAPH_REFRESH_INTERVAL_MS)
 }
 
 const stopGraphRefresh = () => {
@@ -588,7 +714,7 @@ const stopGraphRefresh = () => {
   }
 }
 
-watch(isSimulating, (newValue) => {
+watch(shouldRefreshGraph, (newValue) => {
   if (newValue) {
     startGraphRefresh()
   } else {
@@ -602,8 +728,11 @@ onMounted(() => {
   if (route.query.scenario_mode) {
     addLog(`场景模式: ${route.query.scenario_mode}`)
   }
+  if (route.query.hazard_template_id) {
+    addLog(`危机模板: ${route.query.hazard_template_id}`)
+  }
   if (route.query.diffusion_template) {
-    addLog(`扩散模板: ${route.query.diffusion_template}`)
+    addLog(`主传播族: ${route.query.diffusion_template}`)
   }
   if (route.query.search_mode) {
     addLog(`搜索模式: ${route.query.search_mode}`)
@@ -641,12 +770,13 @@ onUnmounted(() => {
 /* Header */
 .app-header {
   height: 60px;
-  border-bottom: 1px solid #EAEAEA;
+  border-bottom: 1px solid rgba(16, 35, 29, 0.08);
   display: flex;
   align-items: center;
   justify-content: space-between;
   padding: 0 24px;
-  background: #FFF;
+  background: rgba(244, 246, 241, 0.92);
+  backdrop-filter: blur(14px);
   z-index: 100;
   position: relative;
 }
@@ -657,19 +787,12 @@ onUnmounted(() => {
   transform: translateX(-50%);
 }
 
-.brand {
-  font-family: 'JetBrains Mono', monospace;
-  font-weight: 800;
-  font-size: 18px;
-  letter-spacing: 1px;
-  cursor: pointer;
-}
-
 .view-switcher {
   display: flex;
-  background: #F5F5F5;
+  background: rgba(255, 255, 255, 0.78);
   padding: 4px;
-  border-radius: 6px;
+  border: 1px solid rgba(16, 35, 29, 0.08);
+  border-radius: 10px;
   gap: 4px;
 }
 
@@ -688,7 +811,7 @@ onUnmounted(() => {
 .switch-btn.active {
   background: #FFF;
   color: #000;
-  box-shadow: 0 2px 4px rgba(0,0,0,0.05);
+  box-shadow: 0 6px 16px rgba(16, 35, 29, 0.08);
 }
 
 .header-right {

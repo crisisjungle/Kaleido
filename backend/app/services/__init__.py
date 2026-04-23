@@ -37,6 +37,13 @@ from .simulation_ipc import (
     CommandType,
     CommandStatus
 )
+from .style_v2 import (
+    StyleProfileV2,
+    StyleBindingV2,
+    ReviewPolicyV2,
+    StyleLibraryV2Manager,
+    StyleWritingEngineV2,
+)
 
 __all__ = [
     'OntologyGenerator', 
@@ -71,4 +78,9 @@ __all__ = [
     'IPCResponse',
     'CommandType',
     'CommandStatus',
+    'StyleProfileV2',
+    'StyleBindingV2',
+    'ReviewPolicyV2',
+    'StyleLibraryV2Manager',
+    'StyleWritingEngineV2',
 ]

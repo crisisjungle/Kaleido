@@ -16,7 +16,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from ..utils.logger import get_logger
-from .envfish_models import DIFFUSION_PROVIDER_DEFAULTS, RegionNode
+from .envfish_models import DIFFUSION_PROVIDER_DEFAULTS, RegionNode, normalize_transport_family
 
 logger = get_logger("envfish.transport_context")
 
@@ -79,6 +79,7 @@ class TransportContextResolver:
         preferred_provider: str = "auto",
     ) -> Dict[str, Any]:
         region_list = list(regions)
+        diffusion_template = normalize_transport_family(diffusion_template)
         provider = self._resolve_provider(diffusion_template, preferred_provider)
         centroid = self._centroid(region_list)
         reference_dt = _parse_reference_time(reference_time)
@@ -91,11 +92,11 @@ class TransportContextResolver:
             "centroid": {"lat": centroid[0], "lon": centroid[1]} if centroid else None,
         }
 
-        if provider in {"topology", "heuristic"} and diffusion_template in {"air", "marine"}:
+        if provider in {"topology", "heuristic"} and diffusion_template in {"air", "marine", "atmospheric_plume", "marine_current", "coastal_inundation", "ash_plume"}:
             payload["note"] = f"{provider} provider selected; using topology-first directional inference."
             return payload
 
-        if diffusion_template == "inland_water":
+        if diffusion_template in {"inland_water", "inland_water_network", "surface_flood_flow"}:
             payload["status"] = "ok"
             payload["note"] = "Inland-water routing is topology-first; no external flow lookup was required."
             return payload
@@ -104,9 +105,9 @@ class TransportContextResolver:
             payload["note"] = "Regions do not have coordinates; using topology-only transport inference."
             return payload
 
-        if diffusion_template == "air":
+        if diffusion_template in {"air", "atmospheric_plume", "ash_plume"}:
             return self._resolve_air_context(payload, centroid, reference_dt)
-        if diffusion_template == "marine":
+        if diffusion_template in {"marine", "marine_current", "coastal_inundation"}:
             return self._resolve_marine_context(payload, centroid, reference_dt)
 
         payload["note"] = "Generic template falls back to topology-only routing."

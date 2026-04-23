@@ -1,13 +1,13 @@
 <div align="center">
 
-<img src="./static/image/Envfish_logo.svg" alt="Envfish Logo" width="78%"/>
+<img src="./frontend/public/kaleido-favicon.svg" alt="Kaleido Logo" width="96"/>
 
 面向生态推演的多智能体环境仿真引擎
 </br>
 <em>Multi-agent environmental simulation for ecological foresight</em>
 
-[![GitHub Stars](https://img.shields.io/github/stars/crisisjungle/Envfish?style=flat-square&color=6C8F59)](https://github.com/crisisjungle/Envfish/stargazers)
-[![GitHub Forks](https://img.shields.io/github/forks/crisisjungle/Envfish?style=flat-square&color=1F5D45)](https://github.com/crisisjungle/Envfish/network)
+[![GitHub Stars](https://img.shields.io/github/stars/crisisjungle/Kaleido?style=flat-square&color=6C8F59)](https://github.com/crisisjungle/Kaleido/stargazers)
+[![GitHub Forks](https://img.shields.io/github/forks/crisisjungle/Kaleido?style=flat-square&color=1F5D45)](https://github.com/crisisjungle/Kaleido/network)
 [![License](https://img.shields.io/badge/License-AGPL--3.0-173126?style=flat-square)](./LICENSE)
 
 [English](./README-EN.md) | [中文文档](./README.md)
@@ -16,7 +16,7 @@
 
 ## 概述
 
-**Envfish** 用真实世界材料构建一个可干预、可回放、可继续追问的生态推演场。
+**Kaleido (万象)** 用真实世界材料构建一个可干预、可回放、可继续追问的生态推演场。
 
 你上传报告、访谈、政策草案、研究笔记或其他非结构化文本后，系统会沿着现有 5 步工作流继续执行：
 
@@ -26,7 +26,7 @@
 4. 报告生成
 5. 深度互动
 
-首页已经重做为新的 `Envfish` 控制台，但原有流程页、图谱视图和历史回放能力仍然保留，没有额外引入新的用户入口。
+首页已经重做为新的 `Kaleido` 控制台，但原有流程页、图谱视图和历史回放能力仍然保留，没有额外引入新的用户入口。
 
 ## 核心能力
 
@@ -95,14 +95,14 @@ docker compose up -d
 ```text
 .
 ├── backend/    # Flask API、图谱构建、环境搭建、模拟与报告能力
-├── frontend/   # Vue 3 + Vite 前端，包含全新 Envfish 首页与现有工作台
+├── frontend/   # Vue 3 + Vite 前端，包含全新 Kaleido 首页与现有工作台
 ├── static/     # README 资源与项目截图
 └── docker-compose.yml
 ```
 
 ## 页面流转
 
-- `/`：Envfish 首页，负责材料采集与入口重排
+- `/`：Kaleido 首页，负责材料采集与入口重排
 - `/process/:projectId`：图谱构建工作台
 - `/simulation/:simulationId`：环境搭建
 - `/simulation/:simulationId/start`：模拟运行

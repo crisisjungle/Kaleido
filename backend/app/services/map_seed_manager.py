@@ -59,7 +59,7 @@ def _safe_http_json(
     timeout: float = 20.0,
 ) -> Any:
     request_headers = {
-        "User-Agent": "Envfish/0.1 map-seed (+https://github.com/crisisjungle/Envfish)",
+        "User-Agent": "Kaleido/0.1 map-seed (+https://github.com/crisisjungle/Kaleido)",
         "Accept": "application/json",
     }
     if headers:
@@ -155,6 +155,94 @@ class MapSeedManager:
                 self._llm_client = LLMClient()
             except Exception as exc:
                 logger.warning(f"MapSeed LLM init failed, using rule-based inference only: {exc}")
+
+    def geocode_location(self, query: str, *, limit: int = 5, radius_m: int = 3000) -> List[Dict[str, Any]]:
+        text = str(query or "").strip()
+        if not text:
+            return []
+        url = (
+            "https://nominatim.openstreetmap.org/search?"
+            + urllib.parse.urlencode(
+                {
+                    "format": "jsonv2",
+                    "q": text,
+                    "limit": max(1, min(int(limit or 5), 8)),
+                    "addressdetails": 1,
+                }
+            )
+        )
+        try:
+            payload = _safe_http_json(url, timeout=15.0)
+        except Exception as exc:
+            logger.warning(f"Forward geocode failed for '{text}': {exc}")
+            return []
+
+        candidates: List[Dict[str, Any]] = []
+        for item in payload if isinstance(payload, list) else []:
+            try:
+                lat = round(float(item.get("lat")), 6)
+                lon = round(float(item.get("lon")), 6)
+            except Exception:
+                continue
+            admin_context = self._normalize_admin_context(
+                address=item.get("address") or {},
+                display_name=str(item.get("display_name") or text),
+                lat=lat,
+                lon=lon,
+            )
+            candidates.append(
+                {
+                    "lat": lat,
+                    "lon": lon,
+                    "display_name": admin_context.get("display_name") or text,
+                    "area_label": self.describe_area_label(lat=lat, lon=lon, radius_m=radius_m, admin_context=admin_context),
+                    "admin_context": admin_context,
+                }
+            )
+        return candidates
+
+    def resolve_area_context(self, lat: float, lon: float, radius_m: int) -> Dict[str, Any]:
+        admin_context = self._reverse_geocode(lat, lon)
+        return {
+            "lat": round(float(lat), 6),
+            "lon": round(float(lon), 6),
+            "radius_m": max(500, int(radius_m or 3000)),
+            "admin_context": admin_context,
+            "area_label": self.describe_area_label(
+                lat=float(lat),
+                lon=float(lon),
+                radius_m=max(500, int(radius_m or 3000)),
+                admin_context=admin_context,
+            ),
+        }
+
+    def describe_area_label(self, lat: float, lon: float, radius_m: int, admin_context: Optional[Dict[str, Any]] = None) -> str:
+        context = dict(admin_context or self._reverse_geocode(lat, lon) or {})
+        city = str(context.get("city") or "").strip()
+        district = str(context.get("district") or "").strip()
+        road = str(context.get("road") or "").strip()
+        locality = self._select_locality_name(context, radius_m)
+        display_name = str(context.get("display_name") or "").strip()
+        radius_m = max(500, int(radius_m or 3000))
+        base_label = self._join_place_tokens(city, district, locality)
+        if base_label:
+            if locality and road and locality == road:
+                return f"{base_label}周边" if radius_m <= 1800 else base_label
+            if locality and radius_m <= 1800:
+                return f"{base_label}周边"
+            if radius_m >= 15000 and not locality:
+                return f"{base_label}重点区域"
+            if radius_m >= 6000 and not locality and district:
+                return f"{base_label}片区"
+            return base_label
+
+        if city:
+            return f"{city}周边区域"
+
+        primary = self._display_name_to_place(display_name)
+        if primary:
+            return primary
+        return "选定区域"
 
     @classmethod
     def _seed_dir(cls, seed_id: str) -> str:
@@ -428,7 +516,7 @@ class MapSeedManager:
                 "type": "Polygon",
                 "coordinates": [_circle_polygon(lat, lon, radius_m)],
             },
-            "label": admin_context.get("display_name") or f"{lat:.4f}, {lon:.4f}",
+            "label": self.describe_area_label(lat=lat, lon=lon, radius_m=radius_m, admin_context=admin_context),
         }
 
     def _reverse_geocode(self, lat: float, lon: float) -> Dict[str, Any]:
@@ -450,18 +538,137 @@ class MapSeedManager:
             logger.warning(f"Reverse geocode failed, using coordinate fallback: {exc}")
             payload = {}
 
-        address = payload.get("address") or {}
+        return self._normalize_admin_context(
+            address=payload.get("address") or {},
+            display_name=str(payload.get("display_name") or f"{lat:.4f}, {lon:.4f}"),
+            lat=lat,
+            lon=lon,
+        )
+
+    def _normalize_admin_context(
+        self,
+        *,
+        address: Dict[str, Any],
+        display_name: str,
+        lat: float,
+        lon: float,
+    ) -> Dict[str, Any]:
+        city = (
+            address.get("city")
+            or address.get("municipality")
+            or address.get("town")
+            or address.get("county")
+            or ""
+        )
+        district = (
+            address.get("city_district")
+            or address.get("district")
+            or address.get("suburb")
+            or address.get("borough")
+            or address.get("county")
+            or ""
+        )
         return {
-            "display_name": payload.get("display_name") or f"{lat:.4f}, {lon:.4f}",
+            "display_name": display_name or f"{lat:.4f}, {lon:.4f}",
             "country": address.get("country", ""),
             "state": address.get("state", address.get("province", "")),
-            "city": address.get("city", address.get("town", address.get("county", ""))),
-            "district": address.get("suburb", address.get("city_district", address.get("county", ""))),
+            "city": city,
+            "district": district,
+            "town": address.get("town", ""),
+            "suburb": address.get("suburb", ""),
+            "neighbourhood": address.get("neighbourhood", ""),
+            "quarter": address.get("quarter", ""),
+            "borough": address.get("borough", ""),
+            "village": address.get("village", ""),
+            "hamlet": address.get("hamlet", ""),
+            "poi": (
+                address.get("attraction")
+                or address.get("building")
+                or address.get("amenity")
+                or address.get("leisure")
+                or address.get("tourism")
+                or address.get("shop")
+                or ""
+            ),
             "road": address.get("road", ""),
             "address": address,
             "lat": lat,
             "lon": lon,
         }
+
+    def _select_locality_name(self, context: Dict[str, Any], radius_m: int) -> str:
+        fine_grained = [
+            context.get("poi"),
+            context.get("road"),
+            context.get("neighbourhood"),
+            context.get("quarter"),
+            context.get("suburb"),
+            context.get("town"),
+            context.get("village"),
+            context.get("hamlet"),
+        ]
+        medium_grained = [
+            context.get("suburb"),
+            context.get("neighbourhood"),
+            context.get("quarter"),
+            context.get("town"),
+            context.get("district"),
+            context.get("village"),
+        ]
+        coarse_grained = [
+            context.get("district"),
+            context.get("suburb"),
+            context.get("town"),
+        ]
+        candidates = fine_grained if radius_m <= 1800 else medium_grained if radius_m <= 8000 else coarse_grained
+        for item in candidates:
+            text = str(item or "").strip()
+            if text:
+                return text
+        return ""
+
+    def _join_place_tokens(self, *parts: Any) -> str:
+        tokens: List[str] = []
+        for part in parts:
+            text = str(part or "").strip()
+            if not text:
+                continue
+            if self._looks_like_coordinate_text(text):
+                continue
+            if any(text == existing or text in existing or existing in text for existing in tokens):
+                if any(existing in text and existing != text for existing in tokens):
+                    tokens = [existing for existing in tokens if existing not in text]
+                    tokens.append(text)
+                continue
+            tokens.append(text)
+        return "".join(tokens)
+
+    def _display_name_to_place(self, display_name: str) -> str:
+        if not display_name or self._looks_like_coordinate_text(display_name):
+            return ""
+        tokens: List[str] = []
+        for raw in display_name.split(","):
+            text = raw.strip()
+            if not text or self._looks_like_coordinate_text(text):
+                continue
+            tokens.append(text)
+            if len(tokens) >= 3:
+                break
+        if not tokens:
+            return ""
+        return "".join(tokens[:2]) if len(tokens) >= 2 else tokens[0]
+
+    @staticmethod
+    def _looks_like_coordinate_text(text: str) -> bool:
+        value = str(text or "").strip()
+        if not value:
+            return True
+        compact = value.replace(" ", "")
+        if compact.count(",") == 1:
+            left, right = compact.split(",", 1)
+            if left.replace(".", "", 1).replace("-", "", 1).isdigit() and right.replace(".", "", 1).replace("-", "", 1).isdigit():
+                return True
+        return False
 
     def _collect_spatial_features(self, lat: float, lon: float, radius_m: int) -> List[Dict[str, Any]]:
         query = f"""

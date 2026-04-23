@@ -3,19 +3,19 @@
     <!-- Header -->
     <header class="app-header">
       <div class="header-left">
-        <div class="brand" @click="router.push('/')">ENVFISH</div>
+        <KaleidoNavBrand to="/" />
       </div>
       
       <div class="header-center">
         <div class="view-switcher">
           <button 
-            v-for="mode in ['map', 'graph', 'split', 'workbench']" 
+            v-for="mode in ['graph', 'split', 'workbench']" 
             :key="mode"
             class="switch-btn"
             :class="{ active: viewMode === mode }"
             @click="viewMode = mode"
           >
-            {{ { map: '地图', graph: '图谱', split: '双栏', workbench: '工作台' }[mode] }}
+            {{ { graph: '图谱', split: '双栏', workbench: '工作台' }[mode] }}
           </button>
         </div>
       </div>
@@ -37,21 +37,9 @@
     <main class="content-area">
       <!-- Left Panel: Graph -->
       <div class="panel-wrapper left" :style="leftPanelStyle">
-        <MapRelationPanel
-          v-if="viewMode === 'map'"
-          :mapData="mapProjection"
-          :loading="graphLoading"
-          :highlightNodeIds="graphHighlight.nodeIds"
-          :highlightNodeNames="graphHighlight.nodeNames"
-          :highlightEdgeIds="graphHighlight.edgeIds"
-          :highlightLabel="graphHighlight.label"
-          :highlightMode="graphHighlight.mode"
-          @refresh="refreshGraph"
-          @toggle-maximize="toggleMaximize('map')"
-        />
         <GraphPanel
-          v-else
           :graphData="graphData"
+          :mapData="mapProjection"
           :loading="graphLoading"
           :currentPhase="2"
           :highlightNodeIds="graphHighlight.nodeIds"
@@ -74,6 +62,7 @@
           :initialScenarioMode="route.query.scenario_mode"
           :initialDiffusionTemplate="route.query.diffusion_template"
           :initialSearchMode="route.query.search_mode"
+          :initialInjectedVariables="initialInjectedVariables"
           @go-back="handleGoBack"
           @next-step="handleNextStep"
           @add-log="addLog"
@@ -88,11 +77,12 @@
 <script setup>
 import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
+import KaleidoNavBrand from '../components/KaleidoNavBrand.vue'
 import GraphPanel from '../components/GraphPanel.vue'
-import MapRelationPanel from '../components/MapRelationPanel.vue'
 import Step2EnvSetup from '../components/Step2EnvSetup.vue'
 import { getProject, getGraphData } from '../api/graph'
 import { getSimulation, getSimulationGraphRealtime, stopSimulation, getEnvStatus, closeSimulationEnv } from '../api/simulation'
+import { getSceneSeedContextBySimulation } from '../store/sceneSeedBridge'
 
 const route = useRoute()
 const router = useRouter()
@@ -114,17 +104,19 @@ const graphLoading = ref(false)
 const systemLogs = ref([])
 const currentStatus = ref('idle') // idle | processing | completed | error
 const graphHighlight = ref({ nodeIds: [], nodeNames: [], edgeIds: [], label: '', mode: '' })
+const initialInjectedVariables = ref([])
+const sceneSeedContext = ref(null)
 
 // --- Computed Layout Styles ---
 const leftPanelStyle = computed(() => {
-  if (viewMode.value === 'graph' || viewMode.value === 'map') return { width: '100%', opacity: 1, transform: 'translateX(0)' }
+  if (viewMode.value === 'graph') return { width: '100%', opacity: 1, transform: 'translateX(0)' }
   if (viewMode.value === 'workbench') return { width: '0%', opacity: 0, transform: 'translateX(-20px)' }
   return { width: '50%', opacity: 1, transform: 'translateX(0)' }
 })
 
 const rightPanelStyle = computed(() => {
   if (viewMode.value === 'workbench') return { width: '100%', opacity: 1, transform: 'translateX(0)' }
-  if (viewMode.value === 'graph' || viewMode.value === 'map') return { width: '0%', opacity: 0, transform: 'translateX(20px)' }
+  if (viewMode.value === 'graph') return { width: '0%', opacity: 0, transform: 'translateX(20px)' }
   return { width: '50%', opacity: 1, transform: 'translateX(0)' }
 })
 
@@ -288,12 +280,15 @@ const buildMapProjectionFallback = ({ graph, layersPayload = null, sourceMode = 
     const lon = toNumber(layersPayload.center.lon)
     if (Number.isFinite(lat) && Number.isFinite(lon)) center = { lat, lon }
   }
+  if (!center) {
+    center = resolveSceneSeedCenter()
+  }
   if (!center && projectedNodes.length > 0) {
     const lat = projectedNodes.reduce((sum, item) => sum + item.attributes.lat, 0) / projectedNodes.length
     const lon = projectedNodes.reduce((sum, item) => sum + item.attributes.lon, 0) / projectedNodes.length
     center = { lat, lon }
   }
-  if (!center) center = { lat: 20, lon: 0 }
+  if (!center) center = inferKnownMapCenter({ graph, project: projectData.value }) || { lat: 20, lon: 0 }
 
   return {
     simulation_id: currentSimulationId.value,
@@ -315,6 +310,99 @@ const buildMapProjectionFallback = ({ graph, layersPayload = null, sourceMode = 
       key_edge_count: projectedEdges.length
     }
   }
+}
+
+const resolveSceneSeedCenter = () => {
+  const point = sceneSeedContext.value?.selectedPoints?.[0]
+  const lat = toNumber(point?.lat)
+  const lon = toNumber(point?.lon)
+  if (Number.isFinite(lat) && Number.isFinite(lon)) {
+    return { lat, lon }
+  }
+  return null
+}
+
+const inferKnownMapCenter = ({ graph, project }) => {
+  const tokens = [
+    project?.project_name,
+    project?.simulation_requirement,
+    project?.extracted_text,
+    ...(Array.isArray(graph?.nodes) ? graph.nodes.flatMap((node) => [
+      node?.name,
+      node?.summary,
+      ...(Array.isArray(node?.labels) ? node.labels : [])
+    ]) : [])
+  ].filter(Boolean).join(' ')
+
+  if (/南沙|Nansha|珠江口|Pearl River|广州|Guangzhou/i.test(tokens)) {
+    return { lat: 22.7946, lon: 113.5531 }
+  }
+  return null
+}
+
+const normalizeMapProjection = (projection, graph) => {
+  if (!projection) return projection
+  const desiredCenter = resolveSceneSeedCenter() || inferKnownMapCenter({ graph, project: projectData.value })
+  if (!desiredCenter) return projection
+
+  const currentLat = toNumber(projection.center?.lat)
+  const currentLon = toNumber(projection.center?.lon)
+  if (!Number.isFinite(currentLat) || !Number.isFinite(currentLon)) {
+    return { ...projection, center: desiredCenter }
+  }
+
+  const hasMapSeedContext = Boolean(projection.meta?.has_map_seed_context || projection.map_seed_id)
+  const distanceFromDesired = haversineKm(currentLat, currentLon, desiredCenter.lat, desiredCenter.lon)
+  if (hasMapSeedContext || distanceFromDesired < 30) return projection
+
+  const latDelta = desiredCenter.lat - currentLat
+  const lonDelta = desiredCenter.lon - currentLon
+  return {
+    ...projection,
+    center: desiredCenter,
+    nodes: (projection.nodes || []).map((node) => {
+      const attrs = node?.attributes || {}
+      const lat = toNumber(attrs.lat)
+      const lon = toNumber(attrs.lon)
+      if (!Number.isFinite(lat) || !Number.isFinite(lon)) return node
+      return {
+        ...node,
+        attributes: {
+          ...attrs,
+          lat: Number((lat + latDelta).toFixed(6)),
+          lon: Number((lon + lonDelta).toFixed(6))
+        }
+      }
+    }),
+    edges: (projection.edges || []).map((edge) => ({
+      ...edge,
+      source_lat: shiftCoord(edge.source_lat, latDelta),
+      source_lon: shiftCoord(edge.source_lon, lonDelta),
+      target_lat: shiftCoord(edge.target_lat, latDelta),
+      target_lon: shiftCoord(edge.target_lon, lonDelta)
+    })),
+    meta: {
+      ...(projection.meta || {}),
+      center_rebased_from: { lat: currentLat, lon: currentLon },
+      center_rebased_reason: 'scene_seed_or_known_location'
+    }
+  }
+}
+
+const shiftCoord = (value, delta) => {
+  const number = toNumber(value)
+  return Number.isFinite(number) ? Number((number + delta).toFixed(6)) : value
+}
+
+const haversineKm = (lat1, lon1, lat2, lon2) => {
+  const toRad = (value) => (value * Math.PI) / 180
+  const earthKm = 6371
+  const dLat = toRad(lat2 - lat1)
+  const dLon = toRad(lon2 - lon1)
+  const a =
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon / 2) ** 2
+  return earthKm * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a))
 }
 
 let graphRefreshTimer = null
@@ -385,6 +473,7 @@ const handleNextStep = (params = {}) => {
   const query = {}
   if (params.maxRounds) query.maxRounds = params.maxRounds
   if (params.scenarioMode) query.scenario_mode = params.scenarioMode
+  if (params.hazardTemplateId) query.hazard_template_id = params.hazardTemplateId
   if (params.diffusionTemplate) query.diffusion_template = params.diffusionTemplate
   if (params.searchMode) query.search_mode = params.searchMode
   if (params.temporalPreset) query.temporal_preset = params.temporalPreset
@@ -464,6 +553,8 @@ const forceStopSimulation = async () => {
 const loadSimulationData = async () => {
   try {
     addLog(`加载模拟数据: ${currentSimulationId.value}`)
+    sceneSeedContext.value = getSceneSeedContextBySimulation(currentSimulationId.value)
+    initialInjectedVariables.value = sceneSeedContext.value?.initialVariables || []
     
     // 获取 simulation 信息
     const simRes = await getSimulation(currentSimulationId.value)
@@ -484,7 +575,7 @@ const loadSimulationData = async () => {
             addLog('实时图谱加载成功')
           }
           if (realtimeRes.data?.map_projection) {
-            mapProjection.value = realtimeRes.data.map_projection
+            mapProjection.value = normalizeMapProjection(realtimeRes.data.map_projection, realtimeGraph)
           }
         }
       } catch (realtimeErr) {
@@ -496,6 +587,9 @@ const loadSimulationData = async () => {
         const projRes = await getProject(simData.project_id)
         if (projRes.success && projRes.data) {
           projectData.value = projRes.data
+          if (mapProjection.value) {
+            mapProjection.value = normalizeMapProjection(mapProjection.value, graphData.value)
+          }
           addLog(`项目加载成功: ${projRes.data.project_id}`)
           
           // 获取 graph 数据
@@ -510,12 +604,12 @@ const loadSimulationData = async () => {
         applyMapSeedGraph(simData)
       }
       if (!mapProjection.value) {
-        mapProjection.value = buildMapProjectionFallback({
+        mapProjection.value = normalizeMapProjection(buildMapProjectionFallback({
           graph: graphData.value,
           layersPayload: simData?.map_layers || null,
           sourceMode: simData?.source_mode || 'graph',
           mapSeedId: simData?.map_seed_id || ''
-        })
+        }), graphData.value)
       }
     } else {
       addLog(`加载模拟数据失败: ${simRes.error || '未知错误'}`)
@@ -535,12 +629,12 @@ const applyMapSeedGraph = (simData) => {
   }
 
   graphData.value = mapGraph
-  mapProjection.value = buildMapProjectionFallback({
+  mapProjection.value = normalizeMapProjection(buildMapProjectionFallback({
     graph: mapGraph,
     layersPayload: simData?.map_layers || null,
     sourceMode: simData?.source_mode || 'map_seed',
     mapSeedId: simData?.map_seed_id || ''
-  })
+  }), mapGraph)
   addLog('地图图谱加载成功')
   return true
 }
@@ -551,11 +645,11 @@ const loadGraph = async (graphId) => {
     const res = await getGraphData(graphId)
     if (res.success) {
       graphData.value = res.data
-      mapProjection.value = buildMapProjectionFallback({
+      mapProjection.value = normalizeMapProjection(buildMapProjectionFallback({
         graph: res.data,
         layersPayload: null,
         sourceMode: 'graph'
-      })
+      }), res.data)
       addLog('图谱数据加载成功')
     }
   } catch (err) {
@@ -583,13 +677,13 @@ const refreshGraph = async (options = {}) => {
           addLog('实时图谱刷新成功')
         }
         if (realtimeRes.data?.map_projection) {
-          mapProjection.value = realtimeRes.data.map_projection
+          mapProjection.value = normalizeMapProjection(realtimeRes.data.map_projection, realtimeGraph)
         } else {
-          mapProjection.value = buildMapProjectionFallback({
+          mapProjection.value = normalizeMapProjection(buildMapProjectionFallback({
             graph: realtimeGraph,
             layersPayload: null,
             sourceMode: 'graph'
-          })
+          }), realtimeGraph)
         }
         graphRefreshInFlight = false
         return
@@ -677,22 +771,15 @@ onUnmounted(() => {
 /* Header */
 .app-header {
   height: 60px;
-  border-bottom: 1px solid #EAEAEA;
+  border-bottom: 1px solid rgba(16, 35, 29, 0.08);
   display: flex;
   align-items: center;
   justify-content: space-between;
   padding: 0 24px;
-  background: #FFF;
+  background: rgba(244, 246, 241, 0.92);
+  backdrop-filter: blur(14px);
   z-index: 100;
   position: relative;
-}
-
-.brand {
-  font-family: 'JetBrains Mono', monospace;
-  font-weight: 800;
-  font-size: 18px;
-  letter-spacing: 1px;
-  cursor: pointer;
 }
 
 .header-center {
@@ -703,9 +790,10 @@ onUnmounted(() => {
 
 .view-switcher {
   display: flex;
-  background: #F5F5F5;
+  background: rgba(255, 255, 255, 0.78);
   padding: 4px;
-  border-radius: 6px;
+  border: 1px solid rgba(16, 35, 29, 0.08);
+  border-radius: 10px;
   gap: 4px;
 }
 
@@ -724,7 +812,7 @@ onUnmounted(() => {
 .switch-btn.active {
   background: #FFF;
   color: #000;
-  box-shadow: 0 2px 4px rgba(0,0,0,0.05);
+  box-shadow: 0 6px 16px rgba(16, 35, 29, 0.08);
 }
 
 .header-right {

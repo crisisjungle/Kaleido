@@ -28,12 +28,13 @@ sys.path.insert(0, _backend_dir)
 from dotenv import load_dotenv
 
 from app.services.envfish_models import (  # noqa: E402
-    DEFAULT_TEMPLATE_RULES,
     clamp_probability,
     clamp_score,
     dump_json,
+    get_template_rules,
     merge_state_vectors,
     normalize_state_vector,
+    normalize_transport_family,
     score_band,
 )
 from app.services.risk_artifact_store import load_risk_artifacts, write_risk_artifacts  # noqa: E402
@@ -69,8 +70,11 @@ class EnvFishRuntime:
 
         self.sim_dir = os.path.dirname(self.config_path)
         self.no_wait = no_wait
-        self.template = self.config.get("diffusion_template", "generic")
-        self.template_rules = DEFAULT_TEMPLATE_RULES.get(self.template, DEFAULT_TEMPLATE_RULES["generic"])
+        self.transport_profile = deepcopy(self.config.get("transport_profile") or {})
+        self.template = normalize_transport_family(
+            self.transport_profile.get("primary_family") or self.config.get("diffusion_template", "generic")
+        )
+        self.template_rules = get_template_rules(self.template)
         total_rounds = int(self.config.get("time_config", {}).get("total_rounds", 8))
         self.total_rounds = min(total_rounds, max_rounds) if max_rounds else total_rounds
         self.minutes_per_round = int(self.config.get("time_config", {}).get("minutes_per_round", 60))
@@ -152,11 +156,15 @@ class EnvFishRuntime:
         self.agents_by_subtype: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
         self.agents_by_influence_region: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
         self.relationships_by_source: Dict[int, List[Dict[str, Any]]] = defaultdict(list)
+        self.relationships_by_target: Dict[int, List[Dict[str, Any]]] = defaultdict(list)
         for edge in self.agent_relationship_graph:
             try:
-                self.relationships_by_source[int(edge.get("source_agent_id"))].append(edge)
+                source_agent_id = int(edge.get("source_agent_id"))
+                target_agent_id = int(edge.get("target_agent_id"))
             except Exception:
                 continue
+            self.relationships_by_source[source_agent_id].append(edge)
+            self.relationships_by_target[target_agent_id].append(edge)
         for actor in self.actor_profiles:
             primary_region = str(actor.get("primary_region") or actor.get("home_region_id") or "")
             if primary_region:
@@ -644,7 +652,7 @@ class EnvFishRuntime:
                     turning_points.append(
                         f"{actor.get('name') or actor.get('username')} 与 {target_name} 建立了新的跨区 {edge.get('edge_type')}。"
                     )
-            relation_edges = self.relationships_by_source.get(actor_id, []) + self._dynamic_edges_for_source(actor_id)
+            relation_edges = self._candidate_relationship_edges(actor)
 
             actor["state_vector"] = merge_state_vectors(actor.get("state_vector") or {}, action_bundle["actor_delta"])
             if action_bundle["region_delta"]:
@@ -879,6 +887,91 @@ class EnvFishRuntime:
 
     def _dynamic_edges_for_source(self, source_agent_id: int) -> List[Dict[str, Any]]:
         return list(self.dynamic_edges_by_source.get(int(source_agent_id), []))
+
+    def _candidate_relationship_edges(self, actor: Dict[str, Any]) -> List[Dict[str, Any]]:
+        actor_id = int(actor.get("agent_id", -1))
+        if actor_id < 0:
+            return []
+
+        relation_edges = list(self.relationships_by_source.get(actor_id, []))
+        relation_edges.extend(self._dynamic_edges_for_source(actor_id))
+
+        seen_targets = {
+            int(edge.get("target_agent_id"))
+            for edge in relation_edges
+            if str(edge.get("target_agent_id") or "").isdigit()
+        }
+
+        for link_field in ("counterpart_agent_ids", "social_links", "ecology_links"):
+            for raw_target_id in actor.get(link_field) or []:
+                if not str(raw_target_id or "").isdigit():
+                    continue
+                target_id = int(raw_target_id)
+                if target_id == actor_id or target_id in seen_targets:
+                    continue
+                target_actor = self.actor_lookup.get(target_id)
+                if not target_actor:
+                    continue
+                relation_edges.append(
+                    self._make_fallback_relationship_edge(
+                        source_actor=actor,
+                        target_actor=target_actor,
+                        rationale=f"{actor.get('name') or actor.get('username')} 与 {target_actor.get('name') or target_actor.get('username')} 共享结构化 counterpart 关联。",
+                        route_sources=[link_field],
+                    )
+                )
+                seen_targets.add(target_id)
+
+        for inbound_edge in self.relationships_by_target.get(actor_id, []):
+            if not str(inbound_edge.get("source_agent_id") or "").isdigit():
+                continue
+            target_id = int(inbound_edge.get("source_agent_id"))
+            if target_id == actor_id or target_id in seen_targets:
+                continue
+            target_actor = self.actor_lookup.get(target_id)
+            if not target_actor:
+                continue
+            relation_edges.append(
+                self._make_fallback_relationship_edge(
+                    source_actor=actor,
+                    target_actor=target_actor,
+                    rationale=inbound_edge.get("rationale")
+                    or f"{actor.get('name') or actor.get('username')} 对 {target_actor.get('name') or target_actor.get('username')} 形成反馈影响。",
+                    route_sources=["reverse_structural_link"],
+                )
+            )
+            seen_targets.add(target_id)
+
+        return relation_edges
+
+    def _make_fallback_relationship_edge(
+        self,
+        source_actor: Dict[str, Any],
+        target_actor: Dict[str, Any],
+        rationale: str,
+        route_sources: Optional[List[str]] = None,
+    ) -> Dict[str, Any]:
+        source_agent_id = int(source_actor.get("agent_id", -1))
+        target_agent_id = int(target_actor.get("agent_id", -1))
+        edge_type, interaction_channel = self._infer_dynamic_edge_type(
+            source_actor,
+            target_actor,
+            route_sources or ["counterpart_link"],
+        )
+        return {
+            "edge_id": f"fallback::{source_agent_id}::{target_agent_id}::{edge_type}",
+            "source_agent_id": source_agent_id,
+            "target_agent_id": target_agent_id,
+            "relation_type": edge_type,
+            "edge_type": edge_type,
+            "interaction_channel": interaction_channel,
+            "rationale": rationale,
+            "source_region_id": source_actor.get("primary_region") or source_actor.get("home_region_id"),
+            "target_region_id": target_actor.get("primary_region") or target_actor.get("home_region_id"),
+            "strength": 0.44,
+            "confidence": 0.42,
+            "layer": "fallback",
+        }
 
     def _infer_dynamic_edge_type(
         self,
@@ -1423,11 +1516,17 @@ class EnvFishRuntime:
                 "spread_pressure": 1.0 if action in {"transport_pressure", "retain_pollutant"} else 0.4,
                 "vulnerability_score": 0.9,
             }
+            target_delta = {
+                "vulnerability_score": 0.8,
+                "response_capacity": -0.4 if action in {"stress_signal", "bioaccumulate", "retain_pollutant"} else -0.2,
+                "panic_level": 0.4 if action in {"stress_signal", "migration_shift", "migrate", "signal_loss"} else 0.1,
+            }
             channel = "ecology"
             turning_point = f"{actor.get('name')} 显示出生态系统已进入更脆弱状态。"
         elif action == "dilute" or action == "partial_recovery":
             actor_delta = {"vulnerability_score": -0.6}
             region_delta = {"exposure_score": -0.8, "ecosystem_integrity": 0.8}
+            target_delta = {"vulnerability_score": -0.4, "response_capacity": 0.3}
             channel = "ecology"
         else:
             actor_delta = {"response_capacity": 0.4}
@@ -1449,7 +1548,17 @@ class EnvFishRuntime:
     ) -> tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
         if not relation_edges:
             return None, None
-        preferred_channel = "media" if action_type in {"broadcast", "public_campaign"} else "governance"
+        action = str(action_type or "").lower()
+        if action in {"broadcast", "public_campaign", "panic_buy", "question_authority"}:
+            preferred_channel = "media"
+        elif action in {"issue_alert", "publish_assessment", "public_briefing", "monitor", "report_hazard", "verify"}:
+            preferred_channel = "information"
+        elif action in {"continue_output", "continue_production", "market_shift", "adjust_supply", "price_signal"}:
+            preferred_channel = "market"
+        elif action in {"stress_signal", "migration_shift", "migrate", "breed_decline", "signal_loss", "bioaccumulate", "transport_pressure", "retain_pollutant", "dilute", "partial_recovery"}:
+            preferred_channel = "ecology"
+        else:
+            preferred_channel = "governance"
         ordered = sorted(
             relation_edges,
             key=lambda item: (

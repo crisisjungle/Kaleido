@@ -14,6 +14,7 @@ from ..config import Config
 from ..services.map_seed_manager import MapSeedManager
 from ..services.graph_builder import GraphBuilderService
 from ..services.env_simulation_config_generator import normalize_search_mode
+from ..services.envfish_models import normalize_time_plan, normalize_transport_family
 from ..services.risk_artifact_store import load_risk_artifacts, write_risk_artifacts
 from ..services.risk_definition_builder import RiskDefinitionBuilder
 from ..services.risk_event_engine import RiskEventEngine
@@ -254,6 +255,14 @@ def create_simulation():
             }), 400
         
         manager = SimulationManager()
+        time_plan = normalize_time_plan(
+            data.get('time_plan'),
+            total_rounds=data.get('configured_total_rounds', data.get('max_rounds', 12)),
+            minutes_per_round=data.get('configured_minutes_per_round', data.get('minutes_per_round', 60)),
+            preset=data.get('temporal_preset', 'standard'),
+            reference_time=data.get('reference_time', ''),
+            source=data.get('time_plan_mode', 'auto'),
+        )
         state = manager.create_simulation(
             project_id=project_id,
             graph_id=graph_id,
@@ -261,13 +270,18 @@ def create_simulation():
             enable_reddit=data.get('enable_reddit', True),
             engine_mode=data.get('engine_mode', 'envfish'),
             scenario_mode=data.get('scenario_mode', 'baseline_mode'),
-            diffusion_template=data.get('diffusion_template', 'marine'),
+            diffusion_template=normalize_transport_family(data.get('diffusion_template', 'marine')),
+            hazard_template_id=data.get('hazard_template_id', ''),
             search_mode=normalize_search_mode(data.get('search_mode', 'fast')),
-            temporal_preset=data.get('temporal_preset', 'standard'),
-            configured_total_rounds=data.get('configured_total_rounds', data.get('max_rounds', 12)),
-            configured_minutes_per_round=data.get('configured_minutes_per_round', data.get('minutes_per_round', 60)),
+            temporal_preset=time_plan.get('preset', data.get('temporal_preset', 'standard')),
+            configured_total_rounds=time_plan.get('total_rounds', data.get('configured_total_rounds', data.get('max_rounds', 12))),
+            configured_minutes_per_round=time_plan.get('minutes_per_round', data.get('configured_minutes_per_round', data.get('minutes_per_round', 60))),
+            time_plan_mode=data.get('time_plan_mode', 'auto'),
+            time_plan=time_plan,
             reference_time=data.get('reference_time', ''),
             diffusion_provider=data.get('diffusion_provider', 'auto'),
+            source_mode=data.get('source_mode', 'graph'),
+            map_seed_id=data.get('map_seed_id'),
         )
         
         return jsonify({
@@ -446,7 +460,7 @@ def prepare_simulation():
     """
     import threading
     import os
-    from ..models.task import TaskManager, TaskStatus
+    from ..models.task import TaskCancelledError, TaskManager, TaskStatus
     from ..config import Config
     
     try:
@@ -523,7 +537,9 @@ def prepare_simulation():
         use_llm_for_profiles = data.get('use_llm_for_profiles', True)
         parallel_profile_count = data.get('parallel_profile_count', 5)
         scenario_mode = data.get('scenario_mode', state.scenario_mode or 'baseline_mode')
-        diffusion_template = data.get('diffusion_template', state.diffusion_template or 'marine')
+        diffusion_template = normalize_transport_family(data.get('diffusion_template', state.diffusion_template or 'marine'))
+        hazard_template_id = str(data.get('hazard_template_id') or state.hazard_template_id or '')
+        hazard_template_mode = str(data.get('hazard_template_mode') or state.hazard_template_mode or 'auto')
         search_mode = normalize_search_mode(data.get('search_mode', state.search_mode or 'fast'))
         temporal_profile = dict(data.get('temporal_profile') or {})
         if data.get('temporal_preset') and not temporal_profile.get('preset'):
@@ -536,15 +552,28 @@ def prepare_simulation():
         temporal_profile.setdefault('total_rounds', state.configured_total_rounds or 12)
         temporal_profile.setdefault('minutes_per_round', state.configured_minutes_per_round or 60)
         reference_time = str(data.get('reference_time') or state.reference_time or '')
+        time_plan_mode = str(data.get('time_plan_mode') or state.time_plan_mode or 'auto')
+        time_plan = normalize_time_plan(
+            data.get('time_plan'),
+            total_rounds=temporal_profile.get('total_rounds'),
+            minutes_per_round=temporal_profile.get('minutes_per_round'),
+            preset=temporal_profile.get('preset'),
+            reference_time=reference_time,
+            source=time_plan_mode,
+        )
         diffusion_provider = str(data.get('diffusion_provider') or state.diffusion_provider or 'auto')
         injected_variables = data.get('injected_variables') or []
 
         state.scenario_mode = scenario_mode
         state.diffusion_template = diffusion_template
+        state.hazard_template_id = hazard_template_id or state.hazard_template_id
+        state.hazard_template_mode = hazard_template_mode
         state.search_mode = search_mode
-        state.temporal_preset = str(temporal_profile.get('preset') or 'standard')
-        state.configured_total_rounds = max(4, int(temporal_profile.get('total_rounds') or 12))
-        state.configured_minutes_per_round = max(10, int(temporal_profile.get('minutes_per_round') or 60))
+        state.temporal_preset = str(time_plan.get('preset') or temporal_profile.get('preset') or 'standard')
+        state.configured_total_rounds = max(4, int(time_plan.get('total_rounds') or temporal_profile.get('total_rounds') or 12))
+        state.configured_minutes_per_round = max(10, int(time_plan.get('minutes_per_round') or temporal_profile.get('minutes_per_round') or 60))
+        state.time_plan_mode = time_plan_mode
+        state.time_plan = time_plan
         state.reference_time = reference_time
         state.diffusion_provider = diffusion_provider
 
@@ -584,18 +613,24 @@ def prepare_simulation():
         # 定义后台任务
         def run_prepare():
             try:
+                def ensure_running():
+                    task_manager.ensure_not_cancelled(task_id)
+
                 task_manager.update_task(
                     task_id,
                     status=TaskStatus.PROCESSING,
                     progress=0,
                     message="开始准备模拟环境..."
                 )
+                ensure_running()
                 
                 # 准备模拟（带进度回调）
                 # 存储阶段进度详情
                 stage_details = {}
                 
                 def progress_callback(stage, progress, message, **kwargs):
+                    ensure_running()
+
                     # 计算总进度
                     stage_weights = {
                         "reading": (0, 20),           # 0-20%
@@ -656,6 +691,7 @@ def prepare_simulation():
                         progress_detail=progress_detail_data
                     )
                 
+                ensure_running()
                 result_state = manager.prepare_simulation(
                     simulation_id=simulation_id,
                     simulation_requirement=simulation_requirement,
@@ -666,12 +702,17 @@ def prepare_simulation():
                     parallel_profile_count=parallel_profile_count,
                     scenario_mode=scenario_mode,
                     diffusion_template=diffusion_template,
+                    hazard_template_id=hazard_template_id,
+                    hazard_template_mode=hazard_template_mode,
                     search_mode=search_mode,
                     temporal_profile=temporal_profile,
+                    time_plan_mode=time_plan_mode,
+                    time_plan=time_plan,
                     reference_time=reference_time,
                     diffusion_provider=diffusion_provider,
                     injected_variables=injected_variables,
                 )
+                ensure_running()
                 
                 # 任务完成
                 task_manager.complete_task(
@@ -680,6 +721,15 @@ def prepare_simulation():
                 )
                 
             except Exception as e:
+                if isinstance(e, TaskCancelledError) or task_manager.is_cancelled(task_id):
+                    logger.info(f"准备模拟已取消: task_id={task_id}, simulation_id={simulation_id}")
+                    state = manager.get_simulation(simulation_id)
+                    if state:
+                        state.status = SimulationStatus.STOPPED
+                        state.error = str(e) or "用户强制停止"
+                        manager._save_simulation_state(state)
+                    return
+
                 logger.error(f"准备模拟失败: {str(e)}")
                 task_manager.fail_task(task_id, str(e))
                 
@@ -706,8 +756,12 @@ def prepare_simulation():
                 "entity_types": state.entity_types,  # 实体类型列表
                 "scenario_mode": scenario_mode,
                 "diffusion_template": diffusion_template,
+                "hazard_template_id": hazard_template_id,
+                "hazard_template_mode": hazard_template_mode,
                 "search_mode": search_mode,
                 "temporal_profile": temporal_profile,
+                "time_plan_mode": time_plan_mode,
+                "time_plan": time_plan,
                 "reference_time": reference_time,
                 "diffusion_provider": diffusion_provider,
                 "injected_variables_count": len(injected_variables),
@@ -1715,7 +1769,14 @@ def get_simulation_config_realtime(simulation_id: str):
             response_data["engine_mode"] = config.get("engine_mode")
             response_data["scenario_mode"] = config.get("scenario_mode")
             response_data["diffusion_template"] = config.get("diffusion_template")
+            response_data["hazard_template_id"] = config.get("hazard_template_id")
+            response_data["hazard_template_mode"] = config.get("hazard_template_mode")
+            response_data["hazard_template_reasoning"] = config.get("hazard_template_reasoning")
+            response_data["hazard_template_recommendation"] = config.get("hazard_template_recommendation")
+            response_data["transport_profile"] = config.get("transport_profile")
             response_data["search_mode"] = config.get("search_mode")
+            response_data["time_plan_mode"] = config.get("time_plan_mode")
+            response_data["time_plan"] = config.get("time_plan")
             response_data["temporal_profile"] = config.get("temporal_profile")
             response_data["reference_time"] = config.get("reference_time")
             response_data["diffusion_context"] = config.get("diffusion_context")
@@ -2367,6 +2428,8 @@ def get_run_status_detail(simulation_id: str):
     try:
         run_state = SimulationRunner.get_run_state(simulation_id)
         platform_filter = request.args.get('platform')
+        include_actions = request.args.get("include_actions", "true").lower() not in {"0", "false", "no", "off"}
+        include_envfish_raw = request.args.get("include_envfish_raw", "true").lower() not in {"0", "false", "no", "off"}
         
         if not run_state:
             return jsonify({
@@ -2389,30 +2452,35 @@ def get_run_status_detail(simulation_id: str):
             or "oasis"
         )
 
-        # 获取完整的动作列表
-        all_actions = SimulationRunner.get_all_actions(
-            simulation_id=simulation_id,
-            platform=platform_filter
-        )
-        
-        # 分平台获取动作
-        twitter_actions = SimulationRunner.get_all_actions(
-            simulation_id=simulation_id,
-            platform="twitter"
-        ) if not platform_filter or platform_filter == "twitter" else []
-        
-        reddit_actions = SimulationRunner.get_all_actions(
-            simulation_id=simulation_id,
-            platform="reddit"
-        ) if not platform_filter or platform_filter == "reddit" else []
-        
-        # 获取当前轮次的动作（recent_actions 只展示最新一轮）
         current_round = run_state.current_round
-        recent_actions = SimulationRunner.get_all_actions(
-            simulation_id=simulation_id,
-            platform=platform_filter,
-            round_num=current_round
-        ) if current_round > 0 else []
+        all_actions = []
+        twitter_actions = []
+        reddit_actions = []
+        recent_actions = []
+        if include_actions:
+            # 获取完整的动作列表
+            all_actions = SimulationRunner.get_all_actions(
+                simulation_id=simulation_id,
+                platform=platform_filter
+            )
+
+            # 分平台获取动作
+            twitter_actions = SimulationRunner.get_all_actions(
+                simulation_id=simulation_id,
+                platform="twitter"
+            ) if not platform_filter or platform_filter == "twitter" else []
+
+            reddit_actions = SimulationRunner.get_all_actions(
+                simulation_id=simulation_id,
+                platform="reddit"
+            ) if not platform_filter or platform_filter == "reddit" else []
+
+            # 获取当前轮次的动作（recent_actions 只展示最新一轮）
+            recent_actions = SimulationRunner.get_all_actions(
+                simulation_id=simulation_id,
+                platform=platform_filter,
+                round_num=current_round
+            ) if current_round > 0 else []
         
         # 获取基础状态信息
         result = run_state.to_dict()
@@ -2426,7 +2494,8 @@ def get_run_status_detail(simulation_id: str):
 
         if engine_mode == "envfish":
             envfish_artifacts = SimulationRunner.get_envfish_artifacts(simulation_id)
-            result["envfish"] = envfish_artifacts
+            if include_envfish_raw:
+                result["envfish"] = envfish_artifacts
             result["region_graph"] = envfish_artifacts.get("region_graph", [])
             result["subregion_graph"] = envfish_artifacts.get("subregion_graph", [])
             result["risk_definitions"] = envfish_artifacts.get("risk_definitions", [])

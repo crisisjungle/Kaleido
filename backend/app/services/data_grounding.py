@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from typing import Any, Dict, Iterable, List, Optional
 
 from ..utils.logger import get_logger
+from .envfish_models import normalize_transport_family
 
 logger = get_logger("envfish.envfish_grounding")
 
@@ -68,15 +69,16 @@ class PublicDataGroundingService:
         document_text: str = "",
     ) -> Dict[str, Any]:
         region_list = list(regions)
+        diffusion_template = normalize_transport_family(diffusion_template)
         records: List[GroundingRecord] = []
         aggregate_priors: Dict[str, float] = {}
 
         for region in region_list:
-            if diffusion_template == "air":
+            if diffusion_template in {"air", "atmospheric_plume", "ash_plume"}:
                 record = self._ground_air_region(region)
-            elif diffusion_template == "inland_water":
+            elif diffusion_template in {"inland_water", "inland_water_network", "surface_flood_flow"}:
                 record = self._ground_inland_water_region(region)
-            elif diffusion_template == "marine":
+            elif diffusion_template in {"marine", "marine_current", "coastal_inundation"}:
                 record = self._ground_marine_region(region, document_text=document_text)
             else:
                 record = self._ground_noaa_incident(region, document_text=document_text)

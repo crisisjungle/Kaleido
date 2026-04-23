@@ -11,12 +11,17 @@ from typing import Dict, Any, Optional
 from dataclasses import dataclass, field
 
 
+class TaskCancelledError(RuntimeError):
+    """任务被用户强制停止。"""
+
+
 class TaskStatus(str, Enum):
     """任务状态枚举"""
     PENDING = "pending"          # 等待中
     PROCESSING = "processing"    # 处理中
     COMPLETED = "completed"      # 已完成
     FAILED = "failed"            # 失败
+    CANCELLED = "cancelled"      # 已取消
 
 
 @dataclass
@@ -112,7 +117,7 @@ class TaskManager:
         result: Optional[Dict] = None,
         error: Optional[str] = None,
         progress_detail: Optional[Dict] = None
-    ):
+    ) -> bool:
         """
         更新任务状态
         
@@ -127,20 +132,31 @@ class TaskManager:
         """
         with self._task_lock:
             task = self._tasks.get(task_id)
-            if task:
-                task.updated_at = datetime.now()
-                if status is not None:
-                    task.status = status
-                if progress is not None:
-                    task.progress = progress
-                if message is not None:
-                    task.message = message
-                if result is not None:
-                    task.result = result
-                if error is not None:
-                    task.error = error
-                if progress_detail is not None:
-                    task.progress_detail = progress_detail
+            if not task:
+                return False
+
+            if status is not None and not isinstance(status, TaskStatus):
+                status = TaskStatus(status)
+
+            # 强制停止后，后台线程可能稍后才从 LLM/API 调用中返回。
+            # 这里阻止它们把 cancelled 终态覆盖成 completed/failed。
+            if task.status == TaskStatus.CANCELLED and status != TaskStatus.CANCELLED:
+                return False
+
+            task.updated_at = datetime.now()
+            if status is not None:
+                task.status = status
+            if progress is not None:
+                task.progress = progress
+            if message is not None:
+                task.message = message
+            if result is not None:
+                task.result = result
+            if error is not None:
+                task.error = error
+            if progress_detail is not None:
+                task.progress_detail = progress_detail
+            return True
     
     def complete_task(self, task_id: str, result: Dict):
         """标记任务完成"""
@@ -160,6 +176,51 @@ class TaskManager:
             message="任务失败",
             error=error
         )
+
+    def cancel_task(self, task_id: str, reason: str = "用户强制停止") -> Optional[Dict[str, Any]]:
+        """取消仍在执行的任务。"""
+        with self._task_lock:
+            task = self._tasks.get(task_id)
+            if not task or task.status in [TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELLED]:
+                return None
+
+            task.status = TaskStatus.CANCELLED
+            task.progress = min(task.progress or 0, 99)
+            task.message = reason
+            task.error = reason
+            task.updated_at = datetime.now()
+            return task.to_dict()
+
+    def cancel_active_tasks(
+        self,
+        reason: str = "用户强制停止",
+        task_type: Optional[str] = None
+    ) -> list:
+        """取消所有非终态任务。"""
+        cancelled = []
+        with self._task_lock:
+            for task in self._tasks.values():
+                if task_type and task.task_type != task_type:
+                    continue
+                if task.status in [TaskStatus.PENDING, TaskStatus.PROCESSING]:
+                    task.status = TaskStatus.CANCELLED
+                    task.progress = min(task.progress or 0, 99)
+                    task.message = reason
+                    task.error = reason
+                    task.updated_at = datetime.now()
+                    cancelled.append(task.to_dict())
+        return cancelled
+
+    def is_cancelled(self, task_id: str) -> bool:
+        """检查任务是否已取消。"""
+        with self._task_lock:
+            task = self._tasks.get(task_id)
+            return bool(task and task.status == TaskStatus.CANCELLED)
+
+    def ensure_not_cancelled(self, task_id: str):
+        """如果任务已取消，抛出可被后台任务捕获的异常。"""
+        if self.is_cancelled(task_id):
+            raise TaskCancelledError("用户强制停止")
     
     def list_tasks(self, task_type: Optional[str] = None) -> list:
         """列出任务"""
@@ -177,8 +238,7 @@ class TaskManager:
         with self._task_lock:
             old_ids = [
                 tid for tid, task in self._tasks.items()
-                if task.created_at < cutoff and task.status in [TaskStatus.COMPLETED, TaskStatus.FAILED]
+                if task.created_at < cutoff and task.status in [TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELLED]
             ]
             for tid in old_ids:
                 del self._tasks[tid]
-

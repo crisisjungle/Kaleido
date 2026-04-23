@@ -1,16 +1,29 @@
 import { createRouter, createWebHistory } from 'vue-router'
 import Home from '../views/Home.vue'
+import HistoryView from '../views/HistoryView.vue'
 import Process from '../views/MainView.vue'
 import MapSeedView from '../views/MapSeedView.vue'
+import SceneComposerView from '../views/SceneComposerView.vue'
 import SimulationView from '../views/SimulationView.vue'
 import SimulationRunView from '../views/SimulationRunView.vue'
 import AnalysisView from '../views/AnalysisView.vue'
+import SpaceForecastView from '../views/SpaceForecastView.vue'
 
 const routes = [
   {
     path: '/',
     name: 'Home',
     component: Home
+  },
+  {
+    path: '/history',
+    name: 'History',
+    component: HistoryView
+  },
+  {
+    path: '/space-forecast',
+    name: 'SpaceForecast',
+    component: SpaceForecastView
   },
   {
     path: '/process/:projectId',
@@ -23,6 +36,11 @@ const routes = [
     name: 'MapSeed',
     component: MapSeedView,
     props: true
+  },
+  {
+    path: '/scene-composer',
+    name: 'SceneComposer',
+    component: SceneComposerView
   },
   {
     path: '/simulation/:simulationId',
@@ -59,6 +77,11 @@ const routes = [
       params: { reportId: to.params.reportId },
       query: { ...to.query, tab: 'node-explore' }
     })
+  },
+  {
+    path: '/:pathMatch(.*)*',
+    name: 'NotFound',
+    redirect: { name: 'Home' }
   }
 ]
 

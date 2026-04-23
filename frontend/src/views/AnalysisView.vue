@@ -2,7 +2,7 @@
   <div class="main-view">
     <header class="app-header">
       <div class="header-left">
-        <div class="brand" @click="router.push('/')">ENVFISH</div>
+        <KaleidoNavBrand to="/" />
       </div>
 
       <div class="header-center">
@@ -63,7 +63,7 @@
             <section class="analysis-hero">
               <div class="hero-main">
                 <div class="hero-kicker">Result Analysis</div>
-                <h1 class="hero-title">{{ overview.report_title || 'EnvFish 结果分析' }}</h1>
+                <h1 class="hero-title">{{ overview.report_title || 'Kaleido 结果分析' }}</h1>
                 <p class="hero-summary">
                   {{ overview.report_summary || '基于多轮区域状态、反馈链、角色透镜与节点探索的统一结果输出。' }}
                 </p>
@@ -486,6 +486,7 @@
 <script setup>
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
+import KaleidoNavBrand from '../components/KaleidoNavBrand.vue'
 import GraphPanel from '../components/GraphPanel.vue'
 import Step4Report from '../components/Step4Report.vue'
 import {
@@ -979,21 +980,14 @@ onBeforeUnmount(() => {
 }
 
 .app-header {
-  height: 72px;
+  height: 60px;
   display: flex;
   align-items: center;
   justify-content: space-between;
   padding: 0 24px;
-  border-bottom: 1px solid rgba(15, 23, 42, 0.08);
-  background: linear-gradient(90deg, #ffffff 0%, #f8fafc 100%);
-}
-
-.brand {
-  font-size: 22px;
-  font-weight: 800;
-  letter-spacing: 0.08em;
-  cursor: pointer;
-  color: #0f172a;
+  border-bottom: 1px solid rgba(16, 35, 29, 0.08);
+  background: rgba(244, 246, 241, 0.92);
+  backdrop-filter: blur(14px);
 }
 
 .view-switcher {
@@ -1001,7 +995,8 @@ onBeforeUnmount(() => {
   gap: 8px;
   padding: 4px;
   border-radius: 999px;
-  background: #e2e8f0;
+  background: rgba(255, 255, 255, 0.8);
+  border: 1px solid rgba(16, 35, 29, 0.08);
 }
 
 .switch-btn {

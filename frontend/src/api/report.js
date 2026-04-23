@@ -101,3 +101,55 @@ export const chatWithReportNode = (reportId, data) => {
 export const chatWithReport = (data) => {
   return requestWithRetry(() => service.post('/api/report/chat', data), 3, 1000)
 }
+
+/**
+ * ============== 风格库 V2 ==============
+ */
+
+export const listStyleProfilesV2 = () => {
+  return service.get('/api/report/style/v2/profiles')
+}
+
+export const saveStyleProfileV2 = (profile) => {
+  return requestWithRetry(() => service.post('/api/report/style/v2/profile', { profile }), 2, 500)
+}
+
+export const getStyleProfileV2 = (styleId) => {
+  return service.get(`/api/report/style/v2/profile/${styleId}`)
+}
+
+export const deleteStyleProfileV2 = (styleId) => {
+  return service.delete(`/api/report/style/v2/profile/${styleId}`)
+}
+
+export const saveStyleBindingV2 = (binding) => {
+  return requestWithRetry(() => service.post('/api/report/style/v2/binding', { binding }), 2, 500)
+}
+
+export const getStyleBindingV2 = (styleId) => {
+  return service.get(`/api/report/style/v2/binding/${styleId}`)
+}
+
+export const saveStyleReviewPolicyV2 = (styleId, policy) => {
+  return requestWithRetry(
+    () => service.post('/api/report/style/v2/review-policy', { style_id: styleId, policy }),
+    2,
+    500
+  )
+}
+
+export const getStyleReviewPolicyV2 = (styleId) => {
+  return service.get(`/api/report/style/v2/review-policy/${styleId}`)
+}
+
+export const listStyleKnowledgeDocsV2 = (params) => {
+  return service.get('/api/report/style/v2/knowledge/docs', { params })
+}
+
+export const writeWithStyleV2 = (payload) => {
+  return requestWithRetry(() => service.post('/api/report/style/v2/write', payload), 2, 800)
+}
+
+export const reviewWithStyleV2 = (payload) => {
+  return requestWithRetry(() => service.post('/api/report/style/v2/review', payload), 2, 500)
+}

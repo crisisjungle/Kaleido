@@ -98,8 +98,8 @@ class SimulationMapProjectionBuilder:
     def _build_context(self, *, map_layers_payload: Dict[str, Any]) -> Dict[str, Any]:
         center_payload = map_layers_payload.get("center") or {}
         center = {
-            "lat": self._to_float(center_payload.get("lat"), 20.0),
-            "lon": self._to_float(center_payload.get("lon"), 0.0),
+            "lat": self._to_float(center_payload.get("lat") or center_payload.get("latitude"), 20.0),
+            "lon": self._to_float(center_payload.get("lon") or center_payload.get("lng") or center_payload.get("longitude"), 0.0),
         }
 
         anchor_points = self._collect_anchor_points(map_layers_payload)
@@ -155,7 +155,48 @@ class SimulationMapProjectionBuilder:
                 }
             )
 
-        return points
+        for layer in list(map_layers_payload.get("layers") or []):
+            if str(layer.get("type") or "").lower() != "geojson":
+                continue
+            geojson = layer.get("data") or {}
+            for feature in list(geojson.get("features") or []):
+                geometry = feature.get("geometry") or {}
+                props = feature.get("properties") or {}
+                lat = None
+                lon = None
+                geometry_type = str(geometry.get("type") or "")
+                if geometry_type in {"Polygon", "MultiPolygon"}:
+                    centroid = self._geometry_centroid(geometry)
+                    if centroid:
+                        lon, lat = centroid
+                elif geometry_type == "Point":
+                    coords = list(geometry.get("coordinates") or [])
+                    if len(coords) >= 2:
+                        lon = self._to_float(coords[0])
+                        lat = self._to_float(coords[1])
+                if lat is None or lon is None:
+                    continue
+                points.append(
+                    {
+                        "lat": lat,
+                        "lon": lon,
+                        "name": str(props.get("name") or layer.get("name") or ""),
+                        "category": str(props.get("class_name") or layer.get("name") or ""),
+                        "subtype": str(props.get("class_code") or layer.get("id") or ""),
+                        "source_kind": "detected",
+                    }
+                )
+
+        deduped: List[Dict[str, Any]] = []
+        for point in points:
+            keep = True
+            for existing in deduped:
+                if abs(point["lat"] - existing["lat"]) < 1e-6 and abs(point["lon"] - existing["lon"]) < 1e-6:
+                    keep = False
+                    break
+            if keep:
+                deduped.append(point)
+        return deduped
 
     def _collect_water_geometries(self, map_layers_payload: Dict[str, Any]) -> List[Dict[str, Any]]:
         geometries: List[Dict[str, Any]] = []
@@ -220,8 +261,8 @@ class SimulationMapProjectionBuilder:
         for index, node in enumerate(nodes):
             node_id = str(node.get("uuid") or node.get("id") or f"node_{index}")
             attributes = dict(node.get("attributes") or {})
-            lat = self._to_float(attributes.get("lat"))
-            lon = self._to_float(attributes.get("lon"))
+            lat = self._to_float(attributes.get("lat") or attributes.get("latitude") or attributes.get("y"))
+            lon = self._to_float(attributes.get("lon") or attributes.get("lng") or attributes.get("longitude") or attributes.get("x"))
             kind = self._node_kind(node_id=node_id, labels=node.get("labels"))
             normalized = {
                 "uuid": node_id,
@@ -376,11 +417,15 @@ class SimulationMapProjectionBuilder:
             parent_position = (context["center"]["lat"], context["center"]["lon"])
 
         distance_band = str(attributes.get("distance_band") or "").lower()
-        radius_m = 450.0
-        if distance_band in {"mid", "medium"}:
-            radius_m = 700.0
+        region_radius = max(float(context.get("radius_m") or 0), 3000.0)
+        if distance_band in {"near", "inner"}:
+            radius_m = max(600.0, min(region_radius * 0.16, 3800.0))
+        elif distance_band in {"mid", "medium"}:
+            radius_m = max(900.0, min(region_radius * 0.24, 4400.0))
         elif distance_band in {"far", "outer"}:
-            radius_m = 950.0
+            radius_m = max(1200.0, min(region_radius * 0.34, 5200.0))
+        else:
+            radius_m = max(800.0, min(region_radius * 0.2, 4200.0))
 
         region_type = str(attributes.get("region_type") or "")
         require_water = self._prefers_water(region_type, fallback_name=node.get("name"))
@@ -388,7 +433,7 @@ class SimulationMapProjectionBuilder:
             center={"lat": parent_position[0], "lon": parent_position[1]},
             stable_key=f"subregion::{node['uuid']}",
             used_points=used_points,
-            min_distance_m=120.0,
+            min_distance_m=max(140.0, radius_m * 0.18),
             context=context,
             require_water=require_water,
             radius_m=radius_m,
@@ -437,14 +482,16 @@ class SimulationMapProjectionBuilder:
             anchor_token or str(home_region),
             fallback_name=node.get("name"),
         )
+        region_radius = max(float(context.get("radius_m") or 0), 3000.0)
+        agent_radius = max(260.0, min(region_radius * 0.06, 1400.0))
         return self._radial_fallback(
             center={"lat": base_lat, "lon": base_lon},
             stable_key=f"agent::{node['uuid']}",
             used_points=used_points,
-            min_distance_m=45.0,
+            min_distance_m=max(70.0, agent_radius * 0.14),
             context=context,
             require_water=require_water,
-            radius_m=220.0,
+            radius_m=agent_radius,
         )
 
     def _place_generic_node(

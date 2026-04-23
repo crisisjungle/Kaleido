@@ -15,7 +15,7 @@ from ..services.graph_builder import GraphBuilderService
 from ..services.text_processor import TextProcessor
 from ..utils.file_parser import FileParser
 from ..utils.logger import get_logger
-from ..models.task import TaskManager, TaskStatus
+from ..models.task import TaskCancelledError, TaskManager, TaskStatus
 from ..models.project import ProjectManager, ProjectStatus
 
 # 获取日志器
@@ -362,7 +362,10 @@ def build_graph():
         
         # 创建异步任务
         task_manager = TaskManager()
-        task_id = task_manager.create_task(f"构建图谱: {graph_name}")
+        task_id = task_manager.create_task(
+            f"构建图谱: {graph_name}",
+            metadata={"project_id": project_id, "graph_name": graph_name}
+        )
         logger.info(f"创建图谱构建任务: task_id={task_id}, project_id={project_id}")
         
         # 更新项目状态
@@ -374,17 +377,22 @@ def build_graph():
         def build_task():
             build_logger = get_logger('envfish.build')
             try:
+                def ensure_running():
+                    task_manager.ensure_not_cancelled(task_id)
+
                 build_logger.info(f"[{task_id}] 开始构建图谱...")
                 task_manager.update_task(
                     task_id, 
                     status=TaskStatus.PROCESSING,
                     message="初始化图谱构建服务..."
                 )
+                ensure_running()
                 
                 # 创建图谱构建服务
                 builder = GraphBuilderService(api_key=Config.ZEP_API_KEY)
                 
                 # 分块
+                ensure_running()
                 task_manager.update_task(
                     task_id,
                     message="文本分块中...",
@@ -398,27 +406,32 @@ def build_graph():
                 total_chunks = len(chunks)
                 
                 # 创建图谱
+                ensure_running()
                 task_manager.update_task(
                     task_id,
                     message="创建Zep图谱...",
                     progress=10
                 )
                 graph_id = builder.create_graph(name=graph_name)
+                ensure_running()
                 
                 # 更新项目的graph_id
                 project.graph_id = graph_id
                 ProjectManager.save_project(project)
                 
                 # 设置本体
+                ensure_running()
                 task_manager.update_task(
                     task_id,
                     message="设置本体定义...",
                     progress=15
                 )
                 builder.set_ontology(graph_id, ontology)
+                ensure_running()
                 
                 # 添加文本（progress_callback 签名是 (msg, progress_ratio)）
                 def add_progress_callback(msg, progress_ratio):
+                    ensure_running()
                     progress = 15 + int(progress_ratio * 40)  # 15% - 55%
                     task_manager.update_task(
                         task_id,
@@ -432,6 +445,7 @@ def build_graph():
                     progress=15
                 )
                 
+                ensure_running()
                 episode_uuids = builder.add_text_batches(
                     graph_id, 
                     chunks,
@@ -440,6 +454,7 @@ def build_graph():
                 )
                 
                 # 等待Zep处理完成（查询每个episode的processed状态）
+                ensure_running()
                 task_manager.update_task(
                     task_id,
                     message="等待Zep处理数据...",
@@ -447,6 +462,7 @@ def build_graph():
                 )
                 
                 def wait_progress_callback(msg, progress_ratio):
+                    ensure_running()
                     progress = 55 + int(progress_ratio * 35)  # 55% - 90%
                     task_manager.update_task(
                         task_id,
@@ -457,12 +473,14 @@ def build_graph():
                 builder._wait_for_episodes(episode_uuids, wait_progress_callback)
                 
                 # 获取图谱数据
+                ensure_running()
                 task_manager.update_task(
                     task_id,
                     message="获取图谱数据...",
                     progress=95
                 )
                 graph_data = builder.get_graph_data(graph_id)
+                ensure_running()
                 
                 # 更新项目状态
                 project.status = ProjectStatus.GRAPH_COMPLETED
@@ -488,6 +506,14 @@ def build_graph():
                 )
                 
             except Exception as e:
+                if isinstance(e, TaskCancelledError) or task_manager.is_cancelled(task_id):
+                    cancel_reason = str(e) or "用户强制停止"
+                    build_logger.info(f"[{task_id}] 图谱构建已取消: {cancel_reason}")
+                    project.status = ProjectStatus.FAILED
+                    project.error = cancel_reason
+                    ProjectManager.save_project(project)
+                    return
+
                 # 更新项目状态为失败
                 build_logger.error(f"[{task_id}] 图谱构建失败: {str(e)}")
                 build_logger.debug(traceback.format_exc())

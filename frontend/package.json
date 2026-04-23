@@ -6,7 +6,8 @@
   "scripts": {
     "dev": "vite --host",
     "build": "vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "test:space-forecast": "node scripts/space-forecast-regression.mjs"
   },
   "dependencies": {
     "3d-force-graph": "^1.79.1",

@@ -10,15 +10,21 @@ from datetime import datetime
 from flask import request, jsonify, send_file
 
 from . import report_bp
-from ..config import Config
 from ..services.report_agent import Report, ReportAgent, ReportManager, ReportStatus
 from ..services.report_analysis import ReportAnalysisService
 from ..services.simulation_manager import SimulationManager
+from ..services.style_v2 import (
+    ReviewPolicyV2,
+    StyleLibraryV2Manager,
+    StyleWritingEngineV2,
+)
 from ..models.project import ProjectManager
-from ..models.task import TaskManager, TaskStatus
+from ..models.task import TaskCancelledError, TaskManager, TaskStatus
 from ..utils.logger import get_logger
 
 logger = get_logger('envfish.api.report')
+style_v2_manager = StyleLibraryV2Manager()
+style_v2_engine = StyleWritingEngineV2(manager=style_v2_manager)
 
 
 # ============== 报告生成接口 ==============
@@ -135,12 +141,16 @@ def generate_report():
         # 定义后台任务
         def run_generate():
             try:
+                def ensure_running():
+                    task_manager.ensure_not_cancelled(task_id)
+
                 task_manager.update_task(
                     task_id,
                     status=TaskStatus.PROCESSING,
                     progress=0,
                     message="初始化Report Agent..."
                 )
+                ensure_running()
                 
                 # 创建Report Agent
                 agent = ReportAgent(
@@ -151,6 +161,7 @@ def generate_report():
                 
                 # 进度回调
                 def progress_callback(stage, progress, message):
+                    ensure_running()
                     task_manager.update_task(
                         task_id,
                         progress=progress,
@@ -162,6 +173,7 @@ def generate_report():
                     progress_callback=progress_callback,
                     report_id=report_id
                 )
+                ensure_running()
                 
                 # 保存报告
                 ReportManager.save_report(report)
@@ -179,6 +191,21 @@ def generate_report():
                     task_manager.fail_task(task_id, report.error or "报告生成失败")
                 
             except Exception as e:
+                if isinstance(e, TaskCancelledError) or task_manager.is_cancelled(task_id):
+                    cancel_reason = str(e) or "用户强制停止"
+                    logger.info(f"报告生成已取消: task_id={task_id}, report_id={report_id}")
+                    report = ReportManager.get_report(report_id) or placeholder_report
+                    report.status = ReportStatus.FAILED
+                    report.error = cancel_reason
+                    ReportManager.save_report(report)
+                    ReportManager.update_progress(
+                        report_id=report_id,
+                        status="failed",
+                        progress=0,
+                        message=cancel_reason
+                    )
+                    return
+
                 logger.error(f"报告生成失败: {str(e)}")
                 task_manager.fail_task(task_id, str(e))
         
@@ -568,6 +595,310 @@ def chat_with_report_agent():
             "success": False,
             "error": str(e),
             "traceback": traceback.format_exc()
+        }), 500
+
+
+def _resolve_style_project_id(payload: dict) -> str:
+    project_id = str(payload.get('project_id') or '').strip()
+    if project_id:
+        return project_id
+
+    simulation_id = str(payload.get('simulation_id') or '').strip()
+    if not simulation_id:
+        return ""
+
+    state = SimulationManager().get_simulation(simulation_id)
+    if not state:
+        return ""
+    return str(state.project_id or "")
+
+
+# ============== 风格库V2接口 ==============
+
+@report_bp.route('/style/v2/profiles', methods=['GET'])
+def list_style_profiles_v2():
+    try:
+        profiles = style_v2_manager.list_profiles()
+        return jsonify({
+            "success": True,
+            "data": [item.to_dict() for item in profiles],
+            "count": len(profiles)
+        })
+    except Exception as e:
+        logger.error(f"查询风格列表失败: {e}")
+        return jsonify({
+            "success": False,
+            "error": str(e),
+        }), 500
+
+
+@report_bp.route('/style/v2/profile', methods=['POST'])
+def upsert_style_profile_v2():
+    try:
+        data = request.get_json() or {}
+        profile_payload = data.get('profile') or data
+        profile = style_v2_manager.save_profile(profile_payload)
+        return jsonify({
+            "success": True,
+            "data": profile.to_dict()
+        })
+    except Exception as e:
+        logger.error(f"保存风格失败: {e}")
+        return jsonify({
+            "success": False,
+            "error": str(e),
+        }), 400
+
+
+@report_bp.route('/style/v2/profile/<style_id>', methods=['GET'])
+def get_style_profile_v2(style_id: str):
+    try:
+        profile = style_v2_manager.get_profile(style_id)
+        if not profile:
+            return jsonify({
+                "success": False,
+                "error": f"风格不存在: {style_id}"
+            }), 404
+        return jsonify({
+            "success": True,
+            "data": profile.to_dict()
+        })
+    except Exception as e:
+        logger.error(f"读取风格失败: {e}")
+        return jsonify({
+            "success": False,
+            "error": str(e),
+        }), 500
+
+
+@report_bp.route('/style/v2/profile/<style_id>', methods=['DELETE'])
+def delete_style_profile_v2(style_id: str):
+    try:
+        deleted = style_v2_manager.delete_profile(style_id)
+        if not deleted:
+            return jsonify({
+                "success": False,
+                "error": f"风格不存在: {style_id}"
+            }), 404
+        return jsonify({
+            "success": True,
+            "message": f"已删除风格: {style_id}"
+        })
+    except Exception as e:
+        logger.error(f"删除风格失败: {e}")
+        return jsonify({
+            "success": False,
+            "error": str(e),
+        }), 500
+
+
+@report_bp.route('/style/v2/binding', methods=['POST'])
+def upsert_style_binding_v2():
+    try:
+        data = request.get_json() or {}
+        payload = data.get('binding') or data
+        binding = style_v2_manager.save_binding(payload)
+        return jsonify({
+            "success": True,
+            "data": binding.to_dict()
+        })
+    except Exception as e:
+        logger.error(f"保存风格绑定失败: {e}")
+        return jsonify({
+            "success": False,
+            "error": str(e),
+        }), 400
+
+
+@report_bp.route('/style/v2/binding/<style_id>', methods=['GET'])
+def get_style_binding_v2(style_id: str):
+    try:
+        binding = style_v2_manager.get_binding(style_id)
+        if not binding:
+            return jsonify({
+                "success": False,
+                "error": f"风格绑定不存在: {style_id}"
+            }), 404
+        return jsonify({
+            "success": True,
+            "data": binding.to_dict()
+        })
+    except Exception as e:
+        logger.error(f"读取风格绑定失败: {e}")
+        return jsonify({
+            "success": False,
+            "error": str(e),
+        }), 500
+
+
+@report_bp.route('/style/v2/review-policy', methods=['POST'])
+def upsert_style_review_policy_v2():
+    try:
+        data = request.get_json() or {}
+        style_id = str(data.get('style_id') or '').strip()
+        if not style_id:
+            return jsonify({
+                "success": False,
+                "error": "请提供 style_id"
+            }), 400
+
+        policy_payload = data.get('policy') or data.get('review_policy') or {}
+        if not policy_payload:
+            policy_payload = ReviewPolicyV2.default().to_dict()
+        policy = style_v2_manager.save_review_policy(style_id, policy_payload)
+        return jsonify({
+            "success": True,
+            "data": policy.to_dict()
+        })
+    except Exception as e:
+        logger.error(f"保存审稿规则失败: {e}")
+        return jsonify({
+            "success": False,
+            "error": str(e),
+        }), 400
+
+
+@report_bp.route('/style/v2/review-policy/<style_id>', methods=['GET'])
+def get_style_review_policy_v2(style_id: str):
+    try:
+        policy = style_v2_manager.get_review_policy(style_id)
+        if not policy:
+            default_policy = ReviewPolicyV2.default()
+            return jsonify({
+                "success": True,
+                "data": default_policy.to_dict(),
+                "is_default": True
+            })
+        return jsonify({
+            "success": True,
+            "data": policy.to_dict(),
+            "is_default": False
+        })
+    except Exception as e:
+        logger.error(f"读取审稿规则失败: {e}")
+        return jsonify({
+            "success": False,
+            "error": str(e),
+        }), 500
+
+
+@report_bp.route('/style/v2/knowledge/docs', methods=['GET'])
+def list_style_knowledge_docs_v2():
+    try:
+        project_id = str(request.args.get('project_id') or '').strip()
+        simulation_id = str(request.args.get('simulation_id') or '').strip()
+        if not project_id and simulation_id:
+            state = SimulationManager().get_simulation(simulation_id)
+            if state:
+                project_id = str(state.project_id or "")
+
+        if not project_id:
+            return jsonify({
+                "success": False,
+                "error": "请提供 project_id 或 simulation_id"
+            }), 400
+
+        docs = style_v2_manager.list_project_docs(project_id)
+        return jsonify({
+            "success": True,
+            "data": docs,
+            "count": len(docs),
+            "project_id": project_id
+        })
+    except Exception as e:
+        logger.error(f"读取知识库文档列表失败: {e}")
+        return jsonify({
+            "success": False,
+            "error": str(e),
+        }), 500
+
+
+@report_bp.route('/style/v2/write', methods=['POST'])
+def write_with_style_v2():
+    try:
+        data = request.get_json() or {}
+        style_id = str(data.get('style_id') or '').strip()
+        task = str(data.get('task') or '').strip()
+        scene = str(data.get('scene') or '通用').strip() or '通用'
+        draft_text = data.get('draft_text')
+        max_rewrite_rounds = data.get('max_rewrite_rounds', 2)
+        project_id = _resolve_style_project_id(data)
+
+        if not style_id:
+            return jsonify({
+                "success": False,
+                "error": "请提供 style_id"
+            }), 400
+
+        if not task and draft_text is None:
+            return jsonify({
+                "success": False,
+                "error": "请提供 task 或 draft_text"
+            }), 400
+
+        if not task:
+            task = "按风格规则审稿并改写"
+
+        result = style_v2_engine.generate(
+            style_id=style_id,
+            task=task,
+            scene=scene,
+            project_id=project_id or None,
+            draft_text=draft_text,
+            max_rewrite_rounds=max_rewrite_rounds,
+        )
+        return jsonify({
+            "success": True,
+            "data": result
+        })
+    except ValueError as e:
+        return jsonify({
+            "success": False,
+            "error": str(e),
+        }), 400
+    except Exception as e:
+        logger.error(f"风格写作失败: {e}")
+        return jsonify({
+            "success": False,
+            "error": str(e),
+            "traceback": traceback.format_exc(),
+        }), 500
+
+
+@report_bp.route('/style/v2/review', methods=['POST'])
+def review_with_style_v2():
+    try:
+        data = request.get_json() or {}
+        style_id = str(data.get('style_id') or '').strip()
+        text = str(data.get('text') or '').strip()
+
+        if not style_id:
+            return jsonify({
+                "success": False,
+                "error": "请提供 style_id"
+            }), 400
+
+        if not text:
+            return jsonify({
+                "success": False,
+                "error": "请提供 text"
+            }), 400
+
+        review = style_v2_engine.review_only(style_id=style_id, text=text)
+        return jsonify({
+            "success": True,
+            "data": review
+        })
+    except ValueError as e:
+        return jsonify({
+            "success": False,
+            "error": str(e),
+        }), 400
+    except Exception as e:
+        logger.error(f"风格审稿失败: {e}")
+        return jsonify({
+            "success": False,
+            "error": str(e),
         }), 500
 
 
