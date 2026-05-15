@@ -1,0 +1,17 @@
+{
+  "task_id": "task_88e282b955fc",
+  "name": "准备模拟: sim_776fb956a368",
+  "status": "failed",
+  "message": "服务重启后任务已中断，请重新提交",
+  "progress": 90,
+  "result": null,
+  "error": "服务重启后任务已中断，请重新提交",
+  "progress_detail": null,
+  "metadata": {
+    "simulation_id": "sim_776fb956a368",
+    "project_id": "proj_911651ee7cfd"
+  },
+  "task_type": "simulation_prepare",
+  "created_at": "2026-05-15T17:29:52.777961",
+  "updated_at": "2026-05-15T18:02:24.136300"
+}

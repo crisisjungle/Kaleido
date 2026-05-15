@@ -1,0 +1,22 @@
+{
+  "task_id": "task_b0ac21017fb6",
+  "name": "构建图谱: Unnamed Project",
+  "status": "completed",
+  "message": "图谱构建完成",
+  "progress": 100,
+  "result": {
+    "project_id": "proj_d1f5daa677d0",
+    "graph_id": "envfish_e69114f5ab12450a",
+    "node_count": 60,
+    "edge_count": 80,
+    "chunk_count": 9
+  },
+  "error": null,
+  "metadata": {
+    "project_id": "proj_d1f5daa677d0",
+    "graph_name": "Unnamed Project"
+  },
+  "task_type": "",
+  "created_at": "2026-05-08T15:26:24.494624",
+  "updated_at": "2026-05-08T15:28:07.865869"
+}

@@ -1,0 +1,47 @@
+{
+  "project_id": "proj_911651ee7cfd",
+  "name": "Unnamed Project",
+  "status": "graph_completed",
+  "created_at": "2026-05-15T17:25:34.751496",
+  "updated_at": "2026-05-15T17:27:07.371097",
+  "simulation_requirement": "前海石公园处于滨海城市开放空间，平日由游客活动、滨海步道、城市开发、绿地维护和近岸生态共同维持。需要关注高温、暴雨和游客高峰叠加时，对滨海植被、步道设施、公共服务和周边交通的影响。",
+  "files": [
+    {
+      "filename": "深圳前海石公园环境稳态素材报告.md",
+      "size": 5457
+    }
+  ],
+  "total_text_length": 2535,
+  "ontology": {
+    "entity_types": [
+      {
+        "name": "Region",
+        "description": "地理或生态区域"
+      },
+      {
+        "name": "Actor",
+        "description": "参与推演的主体"
+      },
+      {
+        "name": "Risk",
+        "description": "风险或影响链路"
+      }
+    ],
+    "edge_types": [
+      {
+        "name": "AFFECTS",
+        "description": "影响关系"
+      },
+      {
+        "name": "LOCATED_IN",
+        "description": "空间归属"
+      }
+    ]
+  },
+  "analysis_summary": "前海石公园处于滨海城市开放空间，平日由游客活动、滨海步道、城市开发、绿地维护和近岸生态共同维持。需要关注高温、暴雨和游客高峰叠加时，对滨海植被、步道设施、公共服务和周边交通的影响。",
+  "graph_id": "envfish_37785f50abd14a22",
+  "graph_build_task_id": "task_f7e756e21207",
+  "chunk_size": 500,
+  "chunk_overlap": 50,
+  "error": null
+}

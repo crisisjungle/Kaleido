@@ -1,0 +1,14 @@
+services:
+  kaleido:
+    image: ghcr.io/crisisjungle/kaleido:latest
+    # 加速镜像（如拉取缓慢可替换上方地址）
+    # image: ghcr.nju.edu.cn/crisisjungle/kaleido:latest
+    container_name: kaleido
+    env_file:
+      - .env
+    ports:
+      - "3000:3000"
+      - "5001:5001"
+    restart: unless-stopped
+    volumes:
+      - ./backend/uploads:/app/backend/uploads

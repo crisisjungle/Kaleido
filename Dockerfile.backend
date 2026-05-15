@@ -1,0 +1,24 @@
+FROM ghcr.io/crisisjungle/kaleido-backend:latest AS previous-backend
+
+FROM python:3.11-slim
+
+COPY --from=previous-backend /usr/local/bin/uv /usr/local/bin/uv
+
+WORKDIR /app
+
+COPY backend/pyproject.toml backend/uv.lock ./backend/
+COPY --from=previous-backend /app/backend/.venv ./backend/.venv
+
+RUN cd backend && uv sync --frozen --no-dev
+
+COPY backend ./backend
+
+ENV FLASK_DEBUG=False
+ENV FLASK_HOST=0.0.0.0
+ENV FLASK_PORT=5001
+
+EXPOSE 5001
+
+WORKDIR /app/backend
+
+CMD ["uv", "run", "gunicorn", "--bind", "0.0.0.0:5001", "--workers", "1", "--threads", "4", "--timeout", "300", "app:create_app()"]

@@ -1,0 +1,47 @@
+{
+  "project_id": "proj_82109ce44ce7",
+  "name": "Unnamed Project",
+  "status": "graph_completed",
+  "created_at": "2026-05-08T11:21:42.204801",
+  "updated_at": "2026-05-08T11:23:21.233740",
+  "simulation_requirement": "模拟15级台风登陆对杭州湾平湖市沿海区域的影响，评估对生态-社会系统的扰动与恢复过程。",
+  "files": [
+    {
+      "filename": "杭州湾平湖市重点区域稳态环境与台风扰动推演素材报告.md",
+      "size": 7683
+    }
+  ],
+  "total_text_length": 3159,
+  "ontology": {
+    "entity_types": [
+      {
+        "name": "Region",
+        "description": "地理或生态区域"
+      },
+      {
+        "name": "Actor",
+        "description": "参与推演的主体"
+      },
+      {
+        "name": "Risk",
+        "description": "风险或影响链路"
+      }
+    ],
+    "edge_types": [
+      {
+        "name": "AFFECTS",
+        "description": "影响关系"
+      },
+      {
+        "name": "LOCATED_IN",
+        "description": "空间归属"
+      }
+    ]
+  },
+  "analysis_summary": "模拟15级台风登陆对杭州湾平湖市沿海区域的影响，评估对生态-社会系统的扰动与恢复过程。",
+  "graph_id": "envfish_1e8c10ce96ad40be",
+  "graph_build_task_id": "task_9ed5467a8851",
+  "chunk_size": 500,
+  "chunk_overlap": 50,
+  "error": null
+}
