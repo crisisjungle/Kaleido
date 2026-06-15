@@ -53,14 +53,17 @@ JSON 输出结构：
     "rationale": "范围划定理由"
   },
   "initial_variables": [
-    {"name": "变量名", "type": "weather|policy|pollution|traffic|public_health|resource|custom", "description": "变量描述", "expected_effects": ["影响1"]}
+    {"name": "变量名", "type": "weather|policy|pollution|traffic|public_health|resource|custom", "description": "变量描述", "direction": "上升|下降|突变|...", "intensity": "极端|高强度|...", "expected_effects": ["影响1"]}
+  ],
+  "stable_context_variables": [
+    {"name": "稳态背景项", "type": "...", "description": "基线/常态背景，非注入扰动"}
   ],
   "assumptions": ["推演假设"],
   "uncertainties": ["不确定性"],
   "report_markdown": "# 标题\\n..."
 }
 
-initial_variables 只放会改变系统状态的扰动、压力或干预，例如极端降雨、污染泄漏、限行政策、资源调度。不要把基线信息、当前观测值、常态条件或地图事实放进 initial_variables；基线温度、基线湿度、基线降水、基线风速、局地天气基线应写入 report_markdown 的环境基线或 assumptions，而不是变量。
+initial_variables 只放会改变系统状态的扰动、压力或干预，例如极端降雨、污染泄漏、限行政策、资源调度；每个变量必须带 direction（方向，如上升/下降/突变）或 intensity（强度，如极端/高强度），否则会被代码降级为稳态背景。不要把基线信息、当前观测值、常态条件或地图事实放进 initial_variables；基线温度、基线湿度、基线降水、基线风速、局地天气基线应放入 stable_context_variables，或写入 report_markdown 的环境基线 / assumptions。代码侧会再次执行同样的纪律校验（机器闸门），不依赖本提示词。
 """
 
 
@@ -117,6 +120,135 @@ def _is_baseline_context_variable(item: Dict[str, Any]) -> bool:
     return any(term in text for term in baseline_terms) and any(term in text for term in weather_terms)
 
 
+# A variable only earns a place in initial_variables (the injected / perturbation
+# track) when it carries genuine *change* semantics: a direction (up/down/onset),
+# an intensity (强/弱/级别), or an explicit intervention/disturbance verb. Anything
+# else is treated as stable-context and moved out of initial_variables so that
+# downstream extraction never mistakes a baseline reading for a driver.
+_PERTURBATION_DIRECTION_TERMS = (
+    "增加", "上升", "升高", "增强", "上调", "加剧", "扩大", "加速", "升级", "激增", "暴增",
+    "减少", "下降", "降低", "减弱", "下调", "缓解", "收缩", "减速", "放缓", "骤降", "锐减",
+    "突变", "波动", "起伏", "转向", "逆转", "爆发", "骤升", "骤减",
+    "increase", "rise", "surge", "spike", "escalate", "intensify", "ramp",
+    "decrease", "drop", "decline", "reduce", "fall", "ease", "weaken", "slow",
+    "shift", "swing", "reverse", "onset", "outbreak",
+)
+_PERTURBATION_INTENSITY_TERMS = (
+    "极端", "强", "弱", "高强度", "低强度", "重度", "轻度", "严重", "剧烈", "大幅", "小幅",
+    "等级", "级别", "阈值", "峰值", "强度", "幅度", "量级",
+    "extreme", "severe", "heavy", "intense", "magnitude", "intensity", "level",
+    "threshold", "peak",
+)
+_PERTURBATION_ACTION_TERMS = (
+    "限行", "管控", "封控", "调度", "干预", "投放", "泄漏", "排放", "停产", "停运", "关闭",
+    "疏散", "撤离", "管制", "施加", "注入", "切断", "中断", "封锁", "扰动", "冲击", "压力",
+    "政策", "措施", "事件", "灾害", "异常",
+    "policy", "intervention", "shock", "disturbance", "perturbation", "leak",
+    "spill", "shutdown", "evacuation", "restriction", "injection", "disruption",
+    "lockdown", "deploy",
+)
+
+
+def _variable_text_blob(item: Dict[str, Any]) -> str:
+    if not isinstance(item, dict):
+        return ""
+    parts: List[str] = []
+    for key in ("name", "title", "description", "detail", "summary", "type", "category"):
+        parts.append(_safe_text(item.get(key)))
+    for key in ("expected_effects", "effects"):
+        value = item.get(key)
+        if isinstance(value, (list, tuple)):
+            parts.extend(_safe_text(effect) for effect in value)
+    return " ".join(part for part in parts if part).lower()
+
+
+def _detect_variable_direction(item: Dict[str, Any]) -> Optional[str]:
+    """Return an explicit direction string if the variable encodes one."""
+    explicit = _safe_text(item.get("direction")).lower()
+    if explicit:
+        return explicit
+    blob = _variable_text_blob(item)
+    if not blob:
+        return None
+    for term in _PERTURBATION_DIRECTION_TERMS:
+        if term in blob:
+            return term
+    return None
+
+
+def _detect_variable_intensity(item: Dict[str, Any]) -> Optional[str]:
+    """Return an intensity / magnitude marker if the variable encodes one."""
+    for key in ("intensity", "magnitude", "level", "强度", "幅度"):
+        explicit = _safe_text(item.get(key))
+        if explicit:
+            return explicit.lower()
+    blob = _variable_text_blob(item)
+    if not blob:
+        return None
+    for term in _PERTURBATION_INTENSITY_TERMS:
+        if term in blob:
+            return term
+    return None
+
+
+def _is_true_perturbation_variable(item: Dict[str, Any]) -> bool:
+    """A variable is a real injected perturbation only if it has change semantics.
+
+    This is the machine gate that the system prompt previously only *described*.
+    Pure baseline / weather-baseline pseudo-variables fail here and are reclassified
+    as stable-context, even when they slipped past _is_baseline_context_variable.
+    """
+    if not isinstance(item, dict):
+        return False
+    if _is_baseline_context_variable(item):
+        return False
+    if _detect_variable_direction(item):
+        return True
+    if _detect_variable_intensity(item):
+        return True
+    blob = _variable_text_blob(item)
+    return any(term in blob for term in _PERTURBATION_ACTION_TERMS)
+
+
+def _classify_variable(item: Dict[str, Any]) -> Dict[str, Any]:
+    """Annotate a normalized variable with its epistemic role and change signal.
+
+    Returns the same dict with additive keys: epistemic_role
+    ("perturbation"|"stable_context"), direction, intensity. Contract keys
+    (name/type/description/...) are preserved untouched.
+    """
+    enriched = dict(item) if isinstance(item, dict) else {}
+    direction = _detect_variable_direction(enriched)
+    intensity = _detect_variable_intensity(enriched)
+    is_perturbation = _is_true_perturbation_variable(enriched)
+    enriched["direction"] = direction or _safe_text(enriched.get("direction")) or None
+    enriched["intensity"] = intensity or _safe_text(enriched.get("intensity")) or None
+    enriched["epistemic_role"] = "perturbation" if is_perturbation else "stable_context"
+    if not is_perturbation:
+        # Flag *why* it was demoted so the UI / downstream can be honest about it.
+        enriched["context_reason"] = (
+            "缺少方向/强度/扰动语义，按稳态背景处理（非注入变量）"
+        )
+    return enriched
+
+
+def _split_variables_by_role(
+    variables: Iterable[Dict[str, Any]],
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """Partition normalized variables into (perturbations, stable_context)."""
+    perturbations: List[Dict[str, Any]] = []
+    stable_context: List[Dict[str, Any]] = []
+    for item in variables or []:
+        if not isinstance(item, dict):
+            continue
+        classified = _classify_variable(item)
+        if classified.get("epistemic_role") == "perturbation":
+            perturbations.append(classified)
+        else:
+            stable_context.append(classified)
+    return perturbations, stable_context
+
+
 def _parse_jsonish(value: Any, fallback: Any) -> Any:
     if value in (None, ""):
         return fallback
@@ -148,23 +280,29 @@ def _normalize_initial_variables(value: Any) -> List[Dict[str, Any]]:
         if not isinstance(item, dict):
             continue
         name = _safe_text(item.get("name")) or f"初始变量 {index}"
-        normalized.append(
-            {
-                "name": name,
-                "type": _safe_text(item.get("type")) or "custom",
-                "description": _safe_text(item.get("description") or item.get("detail")) or name,
-                "expected_effects": [
-                    _safe_text(effect)
-                    for effect in (item.get("expected_effects") or item.get("effects") or [])
-                    if _safe_text(effect)
-                ],
-                "target_regions": [
-                    _safe_text(region)
-                    for region in (item.get("target_regions") or item.get("targets") or [])
-                    if _safe_text(region)
-                ],
-            }
-        )
+        base = {
+            "name": name,
+            "type": _safe_text(item.get("type")) or "custom",
+            "description": _safe_text(item.get("description") or item.get("detail")) or name,
+            "expected_effects": [
+                _safe_text(effect)
+                for effect in (item.get("expected_effects") or item.get("effects") or [])
+                if _safe_text(effect)
+            ],
+            "target_regions": [
+                _safe_text(region)
+                for region in (item.get("target_regions") or item.get("targets") or [])
+                if _safe_text(region)
+            ],
+        }
+        # Carry through any explicit change semantics the caller already provided
+        # so the perturbation gate can read them before falling back to text.
+        for passthrough in ("direction", "intensity", "magnitude", "time_window"):
+            explicit = _safe_text(item.get(passthrough))
+            if explicit:
+                base[passthrough] = explicit
+        # Annotate role/direction/intensity in code (the machine gate), not prompt.
+        normalized.append(_classify_variable(base))
     return normalized
 
 
@@ -349,7 +487,11 @@ class SceneMaterialGenerator:
             },
         ]
         if merged_variables:
-            revised["initial_variables"] = merged_variables
+            # Re-apply the machine gate so a revision cannot re-inject stable-context
+            # variables back into the perturbation track.
+            perturbations, stable_context = _split_variables_by_role(merged_variables)
+            revised["initial_variables"] = perturbations
+            revised["stable_context_variables"] = stable_context
         self._save_seed(revised)
         return revised
 
@@ -508,31 +650,51 @@ class SceneMaterialGenerator:
             logger.warning(f"Scene compose LLM failed, using fallback: {exc}")
             return None
 
+    # Sections that require LLM synthesis (subjects, relations, metrics, branches,
+    # extraction hints). The fallback MUST NOT invent generic prose for these — it
+    # only marks them as not-generated so downstream extraction never ingests
+    # fabricated facts. This is the "honest skeleton" contract.
+    _LLM_REQUIRED_SECTION_LABEL = "未生成（需 LLM）"
+
     def _fallback_generate(self, input_bundle: Dict[str, Any]) -> Dict[str, Any]:
+        """LLM-unavailable HONEST SKELETON.
+
+        Echoes only user-confirmed inputs (locations, variables, anchors, uploaded
+        material) and explicitly labels every synthesis section as not-generated.
+        It must NOT fabricate generic relationship / subject / metric prose, because
+        downstream extraction would treat that prose as grounded fact.
+        """
         title_subject = input_bundle["location"] or input_bundle["event_or_baseline"] or "未命名场景"
         scene_label = {
             "historical_event": "历史事件",
             "stable_environment": "环境稳态",
             "hybrid": "混合场景",
         }.get(input_bundle["scene_type"], "自定义场景")
-        title = f"{title_subject}{scene_label}素材报告"
+        title = f"{title_subject}{scene_label}素材报告（骨架 / 未经 LLM 合成）"
         selected_points = input_bundle["selected_points"]
         primary_point = selected_points[0] if selected_points else {}
         map_report = input_bundle["map_context"].get("report_text") or ""
         document_excerpt = _truncate("\n\n".join(input_bundle["document_texts"]), 5000)
-        variables = input_bundle["initial_variables"]
-        known_entity_lines = [
-            f"- {item}"
-            for item in _multiline_lines(input_bundle["known_entities"])
-        ] or ["- 暂未提供已知主体、设施或环境对象。"]
-        boundary_lines = [
-            f"- {item}"
-            for item in _multiline_lines(input_bundle["analysis_boundaries"])
-        ] or ["- 暂未提供明确排除项，默认围绕当前地点、半径和文档事实展开。"]
-        report_question_lines = [
-            f"- {item}"
-            for item in _multiline_lines(input_bundle["report_questions"])
-        ] or ["- 暂未提供重点追问，默认围绕稳态结构、关键关系和潜在扰动展开。"]
+
+        # Machine gate runs in the fallback too: split user variables into the two
+        # honest tracks instead of dumping everything into initial_variables.
+        perturbations, stable_context = _split_variables_by_role(input_bundle["initial_variables"])
+
+        missing = self._LLM_REQUIRED_SECTION_LABEL
+
+        def _echo_lines(value: Any, empty_note: str) -> List[str]:
+            lines = [f"- {item}" for item in _multiline_lines(value)]
+            return lines or [f"- {empty_note}"]
+
+        known_entity_lines = _echo_lines(
+            input_bundle["known_entities"], "用户未提供已知主体 / 设施 / 环境对象。"
+        )
+        boundary_lines = _echo_lines(
+            input_bundle["analysis_boundaries"], "用户未提供明确排除项。"
+        )
+        report_question_lines = _echo_lines(
+            input_bundle["report_questions"], "用户未提供重点追问。"
+        )
 
         source_lines = []
         if input_bundle["uploaded_files"]:
@@ -547,89 +709,92 @@ class SceneMaterialGenerator:
         point_lines = [
             f"- {point['name']}：{point['lat']}, {point['lon']}，角色 {point['role']}。"
             for point in selected_points
-        ] or ["- 暂无确认地图点位；建议后续在地图上补充主锚点。"]
-        variable_lines = [
-            f"- {item['name']}：{item['description']}"
-            for item in variables
-        ] or ["- 暂无初始变量；可继续添加天气、政策、人流、污染、资源调度等变量。"]
-        relation_lines = [
-            "- 主区域承载居民、管理者、设施运营者和环境受体。",
-            "- 交通、人流、物资流和信息流连接区域内外主体。",
-            "- 初始变量会改变主体行为、设施负荷、环境状态和治理响应。",
+        ] or ["- 用户尚未确认地图点位。"]
+
+        def _variable_line(item: Dict[str, Any]) -> str:
+            bits = [f"- {item.get('name')}：{item.get('description')}"]
+            direction = item.get("direction")
+            intensity = item.get("intensity")
+            if direction:
+                bits.append(f"方向={direction}")
+            if intensity:
+                bits.append(f"强度={intensity}")
+            return "，".join(bits)
+
+        perturbation_lines = [_variable_line(item) for item in perturbations] or [
+            "- 用户未提供具备方向/强度的扰动变量。"
         ]
-        if selected_points:
-            relation_lines.insert(0, f"- {primary_point.get('name')} 是当前场景的主要空间锚点。")
+        stable_context_lines = [
+            f"- {item.get('name')}：{item.get('description')}（稳态背景，非注入变量）"
+            for item in stable_context
+        ] or ["- 无被归类为稳态背景的变量。"]
 
         report = "\n".join(
             [
                 f"# {title}",
                 "",
-                "## 0. 文档用途与推演边界",
-                "本报告由场景素材生成器生成，用于进入 EnvFish 后续图谱构建、环境搭建、agent 生成和多轮推演流程。",
-                "报告中的地图、文档和用户变量需要在进入正式推演前由用户确认；不确定内容应作为推演假设，而不是事实结论。",
+                "> 本报告为 **诚实骨架**：LLM 当前不可用，仅回显用户已确认输入。",
+                "> 标注为 “" + missing + "” 的章节尚未经过 LLM 合成，**不得**当作已成立事实进入下游抽取。",
                 "",
-                "## 1. 场景摘要",
+                "## 0. 文档用途与推演边界",
+                "本骨架由场景素材生成器在无 LLM 情况下生成，仅整理用户已确认的输入；",
+                "主体、关系、指标等合成内容需在 LLM 可用后补全，当前一律标注为未生成。",
+                "",
+                "## 1. 场景摘要（回显用户输入）",
                 f"- 场景类型: {scene_label}",
-                f"- 地点: {input_bundle['location'] or '未明确'}",
-                f"- 时间范围/稳态周期: {input_bundle['time_scope'] or '未明确'}",
-                f"- 事件或稳态描述: {input_bundle['event_or_baseline'] or '未明确'}",
-                f"- 重点关系 / 关注问题: {input_bundle['focus'] or '未明确'}",
+                f"- 地点: {input_bundle['location'] or '未提供'}",
+                f"- 时间范围/稳态周期: {input_bundle['time_scope'] or '未提供'}",
+                f"- 事件或稳态描述: {input_bundle['event_or_baseline'] or '未提供'}",
+                f"- 重点关系 / 关注问题: {input_bundle['focus'] or '未提供'}",
                 f"- 补充背景线索: {input_bundle['additional_context'] or '未提供'}",
-                f"- 已知主体 / 设施 / 环境对象: {input_bundle['known_entities'] or '未提供'}",
                 "",
                 "## 2. 输入来源",
                 *source_lines,
                 "",
-                "## 3. 区域背景",
-                "当前区域背景由用户输入、上传文档和地图空间事实共同构成。后续推演应优先围绕已确认点位和文档中的真实地点展开。",
+                "## 3. 区域背景（仅回显已确认点位）",
                 *point_lines,
                 "",
-                "### 补充背景线索",
-                input_bundle["additional_context"] or "当前未提供额外背景线索。",
-                "",
                 "## 4. 地图稳态与空间事实",
-                map_report.strip() or "当前尚未生成地图稳态报告。若需要更强区域 grounding，请先在地图上选点并生成地图种子。",
+                map_report.strip() or "用户尚未生成地图稳态报告。",
                 "",
-                "## 5. 文档材料摘要",
+                "## 5. 文档材料摘要（原文摘录，未做合成）",
                 document_excerpt or "当前没有上传文档摘录。",
                 "",
                 "## 6. 主体与 agent 画像",
-                "### 用户已知对象",
+                "### 用户已确认对象（回显）",
                 *known_entity_lines,
                 "",
-                "- 居民或使用者：受环境状态、设施可达性、政策规则和信息传播影响。",
-                "- 管理主体：负责监测、管控、维护、通告和资源协调。",
-                "- 设施运营者：维持基础设施、交通、供应或服务节点运行。",
-                "- 环境受体：包括水体、植被、动物栖息地、空气或土壤等可被推演的受影响对象。",
+                f"### 推断主体画像: {missing}",
+                "（需 LLM 从文档与地图事实中抽取真实主体；骨架不编造通用角色。）",
                 "",
-                "## 7. 关键关系网络",
-                *relation_lines,
+                f"## 7. 关键关系网络: {missing}",
+                "（关系是一等数据，需 LLM 基于证据生成 observed/inferred 边；骨架不写死任何关系句。）",
                 "",
-                "## 8. 初始变量",
-                *variable_lines,
+                "## 8. 注入变量（扰动轨，已通过机器闸门）",
+                *perturbation_lines,
                 "",
-                "## 9. 推演变量与指标",
-                "- 区域暴露水平、设施负荷、生态完整性、居民活动强度、治理响应速度、信息透明度、资源供应稳定性。",
+                "## 9. 稳态背景变量（非注入）",
+                *stable_context_lines,
                 "",
-                "## 10. 可推演情景分支",
-                "- 基线情景：维持当前输入变量和空间稳态。",
-                "- 强扰动情景：提高一个或多个初始变量强度，观察区域、主体和设施的连锁反应。",
-                "- 干预情景：加入治理、资源、交通、监测或信息通告干预。",
+                f"## 10. 推演指标: {missing}",
+                "（指标需结合真实主体与关系生成；骨架不预设通用指标清单。）",
                 "",
-                "## 11. 分析边界与排除项",
+                f"## 11. 可推演情景分支: {missing}",
+                "（情景分支需 LLM 基于扰动变量与关系结构生成。）",
+                "",
+                "## 12. 分析边界与排除项（回显用户输入）",
                 *boundary_lines,
                 "",
-                "## 12. 重点追问",
+                "## 13. 重点追问（回显用户输入）",
                 *report_question_lines,
                 "",
-                "## 13. Agent 抽取提示",
-                "- 优先抽取真实区域、地图点位、设施、组织、人群和环境受体。",
-                "- 将风险、压力、信任、舆情和稳定性作为状态指标，不要作为核心实体。",
+                f"## 14. Agent 抽取提示: {missing}",
+                "（需 LLM 给出针对本场景的抽取提示；骨架不提供通用模板提示。）",
                 "",
-                "## 14. 关键不确定性",
-                "- 当前报告包含模板兜底内容，需用户确认关键事实。",
-                "- 地图点位、文档地点和真实行政范围可能存在偏差。",
-                "- 初始变量的强度、时间窗和影响方向需要在后续推演前进一步校准。",
+                "## 15. 关键不确定性",
+                "- 本报告为无 LLM 骨架，主体 / 关系 / 指标 / 情景分支均未生成。",
+                "- 仅用户已确认输入（地点、变量、地图点位、文档）可视为输入级事实。",
+                "- 进入正式推演前需在 LLM 可用时重新生成合成章节。",
             ]
         )
 
@@ -646,11 +811,16 @@ class SceneMaterialGenerator:
                     "lon": primary_point.get("lon"),
                 },
                 "radius_m": None,
-                "rationale": "根据用户输入和地图标注确定的初始分析范围。",
+                "rationale": "根据用户已确认输入和地图标注确定的初始分析范围。",
             },
-            "initial_variables": variables,
-            "assumptions": ["部分内容由模板兜底生成，需用户在预览阶段确认。"],
-            "uncertainties": ["缺少充分文档或地图事实时，主体与关系会偏模板化。"],
+            "initial_variables": perturbations,
+            "stable_context_variables": stable_context,
+            "assumptions": ["本报告为无 LLM 诚实骨架，合成章节（主体/关系/指标/情景）均未生成。"],
+            "uncertainties": [
+                "主体、关系、指标与情景分支尚未生成，需在 LLM 可用时补全。",
+                "仅用户已确认输入可视为事实，骨架未引入任何推断或合成结论。",
+            ],
+            "fallback_mode": "honest_skeleton",
             "report_markdown": report,
         }
 
@@ -673,10 +843,27 @@ class SceneMaterialGenerator:
         if not report:
             report = f"# {title}\n\n当前没有生成报告正文，请补充场景信息后重试。"
         raw_variables = generated.get("initial_variables") if isinstance(generated.get("initial_variables"), list) else []
+        # Machine gate: only true perturbations (direction/intensity/change semantics)
+        # stay in initial_variables; everything else is demoted to stable_context so
+        # downstream extraction does not treat a baseline reading as a driver.
+        classified_variables = [
+            _classify_variable(item) for item in raw_variables if isinstance(item, dict)
+        ]
         initial_variables = [
-            item
-            for item in raw_variables
-            if isinstance(item, dict) and not _is_baseline_context_variable(item)
+            item for item in classified_variables if item.get("epistemic_role") == "perturbation"
+        ]
+        # Honor any stable-context already partitioned upstream (additive contract key).
+        carried_context = (
+            generated.get("stable_context_variables")
+            if isinstance(generated.get("stable_context_variables"), list)
+            else []
+        )
+        stable_context_variables = [
+            _classify_variable(item)
+            for item in carried_context
+            if isinstance(item, dict)
+        ] + [
+            item for item in classified_variables if item.get("epistemic_role") != "perturbation"
         ]
         return {
             "title": title,
@@ -686,8 +873,10 @@ class SceneMaterialGenerator:
             "locations": generated.get("locations") if isinstance(generated.get("locations"), list) else [],
             "area_of_interest": generated.get("area_of_interest") if isinstance(generated.get("area_of_interest"), dict) else {},
             "initial_variables": initial_variables,
+            "stable_context_variables": stable_context_variables,
             "assumptions": generated.get("assumptions") if isinstance(generated.get("assumptions"), list) else [],
             "uncertainties": generated.get("uncertainties") if isinstance(generated.get("uncertainties"), list) else [],
+            "fallback_mode": _safe_text(generated.get("fallback_mode")) or None,
             "report_markdown": report,
         }
 
@@ -700,8 +889,12 @@ class SceneMaterialGenerator:
         sanitized = self._sanitize_generated_payload(generated)
         if not sanitized["locations"] and input_bundle["selected_points"]:
             sanitized["locations"] = input_bundle["selected_points"]
-        if not sanitized["initial_variables"] and input_bundle["initial_variables"]:
-            sanitized["initial_variables"] = input_bundle["initial_variables"]
+        if not sanitized["initial_variables"] and not sanitized.get("stable_context_variables") and input_bundle["initial_variables"]:
+            # Re-run the machine gate against the user-supplied variables so the
+            # two tracks stay populated even when the LLM/fallback dropped them.
+            perturbations, stable_context = _split_variables_by_role(input_bundle["initial_variables"])
+            sanitized["initial_variables"] = perturbations
+            sanitized["stable_context_variables"] = stable_context
         if not sanitized["source_mode"]:
             sanitized["source_mode"] = self._infer_source_mode(input_bundle)
         return {

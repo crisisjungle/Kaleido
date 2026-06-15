@@ -22,10 +22,11 @@ from ..config import Config
 from ..utils.llm_client import LLMClient
 from ..utils.logger import get_logger
 from .zep_tools import (
-    ZepToolsService, 
-    SearchResult, 
-    InsightForgeResult, 
+    ZepToolsService,
+    SearchResult,
+    InsightForgeResult,
     PanoramaResult,
+    AgentStateSummaryResult,
     InterviewResult
 )
 
@@ -527,31 +528,30 @@ TOOL_DESC_QUICK_SEARCH = """\
 【返回内容】
 - 与查询最相关的事实列表"""
 
-TOOL_DESC_INTERVIEW_AGENTS = """\
-【深度采访 - Agent采访（EnvFish优先）】
-在EnvFish模式下，优先基于工件和角色画像生成文件驱动的虚拟采访；在旧Envfish模式下，调用OASIS模拟环境的采访API，对正在运行的模拟Agent进行真实采访。
-默认在Twitter和Reddit两个平台同时采访，获取更全面的观点。
+TOOL_DESC_AGENT_STATE_SUMMARY = """\
+【Agent 状态摘要 - 观测指标状态卡】
+读取 EnvFish 工件中最新快照里若干关键 Agent 的「状态向量」，输出确定性的状态卡。
+这不是采访，也不会生成第一人称发言或"人群原话"——它只汇报可观测的数值指标与已记录的动作类型。
 
 功能流程：
-1. 自动读取人设文件，了解所有模拟Agent
-2. 智能选择与采访主题最相关的Agent（如学生、媒体、官方等）
-3. 自动生成采访问题
-4. EnvFish下直接基于工件和角色画像生成回答；旧模式下调用 /api/simulation/interview/batch 接口在双平台进行真实采访
-5. 整合所有采访结果，提供多视角分析
+1. 读取最新轮快照中的 top agents 及其 state_vector
+2. 为每个 Agent 输出位置、脆弱性、恐慌指数、响应能力等观测数值
+3. 如有 agent_interactions 记录，补充"已记录到的动作类型"（observed action，非原话）
 
 【使用场景】
-- 需要从不同角色视角了解事件看法（学生怎么看？媒体怎么看？官方怎么说？）
-- 需要收集多方意见和立场
-- 需要获取模拟Agent的真实回答（来自OASIS模拟环境）
-- 想让报告更生动，包含"采访实录"
+- 需要了解关键 Agent 当前的状态指标分布（谁更脆弱、谁响应能力低）
+- 需要把节点状态作为关系结构的端点证据，而非作为人群发言
+- 需要在报告中以观测口吻引用 Agent 状态（必须标注为"观测指标"）
 
 【返回内容】
-- 被采访Agent的身份信息
-- 各Agent在Twitter和Reddit两个平台的采访回答
-- 关键引言（可直接引用）
-- 采访摘要和观点对比
+- Agent 身份/位置
+- 观测状态向量（脆弱性 / 恐慌 / 响应能力等）
+- 已记录的动作类型（如有）
 
-【重要】旧Envfish模式需要OASIS模拟环境正在运行；EnvFish模式不依赖OASIS。"""
+【诚实边界 - 必须遵守】
+- 这些是观测数值，仅可用于排序，不可当作概率或效应量
+- 严禁把状态卡改写成第一人称引述（"某人说……"）或"采访实录"
+- 数值未经标定，引用时必须明确标注为"观测/推断"，不要伪装成定性证据"""
 
 TOOL_DESC_ENVFISH_SUMMARY = """\
 【EnvFish工件总览】
@@ -605,34 +605,37 @@ TOOL_DESC_ENVFISH_INTERVENTION = """\
 # ── 大纲规划 prompt ──
 
 PLAN_SYSTEM_PROMPT = """\
-你是一个「未来预测报告」的撰写专家，拥有对模拟世界的「上帝视角」——你可以洞察模拟中每一位Agent的行为、言论和互动。
+你是一份「关系探索 / 探索轨迹报告」的撰写专家。这不是预测，也没有"上帝视角"。
+你的工作是审视一次复杂人-自然系统的关系演化探索，把其中的结构、方向与符号梳理成一张可审计、可争论的关系地图。
 
 【核心理念】
-我们构建了一个模拟世界，并向其中注入了特定的「模拟需求」作为变量。模拟世界的演化结果，就是对未来可能发生情况的预测。你正在观察的不是"实验数据"，而是"未来的预演"。
+我们用 LLM 多智能体沙盘探索了一组关系如何在压力下耦合、反馈与重连。
+探索产出的是「关系的结构、方向与符号」这类只能定性把握的洞察——它是指南针（方向对），不是尺子（刻度不可信）。
+所有数值（脆弱性、强度、置信度）只能用于排序，不可当作概率、效应量或对未来的预测。
 
 【你的任务】
-撰写一份「未来预测报告」，回答：
-1. 在我们设定的条件下，未来发生了什么？
-2. 各类Agent（人群）是如何反应和行动？
-3. 这个模拟揭示了哪些值得关注的未来趋势和风险？
+撰写一份「探索轨迹报告」，回答：
+1. 这次探索揭示了哪些关键的关系结构与耦合（谁与谁相关、方向如何、是放大还是抑制）？
+2. 出现了哪些反馈回路、涌现张力或杠杆点（leverage points）？
+3. 哪些结论是「观测」（有地图/文档证据），哪些是「推断」，哪些是模型的「推测/想象」？
 
 【报告定位】
-- ✅ 这是一份基于模拟的未来预测报告，揭示"如果这样，未来会怎样"
-- ✅ 聚焦于预测结果：事件走向、群体反应、涌现现象、潜在风险
-- ✅ 模拟世界中的Agent言行就是对未来人群行为的预测
-- ❌ 不是对现实世界现状的分析
-- ❌ 不是泛泛而谈的舆情综述
+- ✅ 这是一份关系探索报告，呈现结构、方向、符号、反馈与杠杆点
+- ✅ 必须显式区分 观测 / 推断 / 推测 三态，对模型想象保持诚实
+- ✅ 聚焦"为什么这两者会耦合""如果切断这条关系会怎样"这类结构性问题
+- ❌ 不是未来预测，不要写"未来会发生 X"或给出时刻表/概率
+- ❌ 不要把模型自创的数值伪装成已标定的事实，不要把状态数值当作人群发言
 
 【章节数量限制】
 - 最少2个章节，最多5个章节
 - 不需要子章节，每个章节直接撰写完整内容
-- 内容要精炼，聚焦于核心预测发现
-- 章节结构由你根据预测结果自主设计
+- 内容要精炼，聚焦于核心关系发现与杠杆点
+- 章节结构由你根据探索结果自主设计
 
 请输出JSON格式的报告大纲，格式如下：
 {
     "title": "报告标题",
-    "summary": "报告摘要（一句话概括核心预测发现）",
+    "summary": "报告摘要（一句话概括核心关系发现，而非预测结论）",
     "sections": [
         {
             "title": "章节标题",
@@ -644,35 +647,35 @@ PLAN_SYSTEM_PROMPT = """\
 注意：sections数组最少2个，最多5个元素！"""
 
 PLAN_USER_PROMPT_TEMPLATE = """\
-【预测场景设定】
-我们向模拟世界注入的变量（模拟需求）：{simulation_requirement}
+【探索场景设定】
+我们向沙盘注入的扰动/探索变量（模拟需求）：{simulation_requirement}
 
-【模拟世界规模】
-- 参与模拟的实体数量: {total_nodes}
-- 实体间产生的关系数量: {total_edges}
+【关系网络规模】
+- 参与探索的实体（节点）数量: {total_nodes}
+- 实体间的关系（边）数量: {total_edges}
 - 实体类型分布: {entity_types}
 - 活跃Agent数量: {total_entities}
 
-【模拟预测到的部分未来事实样本】
+【探索过程中记录到的部分关系/状态样本】
 {related_facts_json}
 
-请以「上帝视角」审视这个未来预演：
-1. 在我们设定的条件下，未来呈现出了什么样的状态？
-2. 各类人群（Agent）是如何反应和行动的？
-3. 这个模拟揭示了哪些值得关注的未来趋势？
+请审视这次关系探索（不要做未来预测）：
+1. 浮现出哪些关键的关系结构与耦合（方向、符号、跨区传导）？
+2. 出现了哪些反馈回路、涌现张力或杠杆点？
+3. 哪些是观测、哪些是推断、哪些是模型推测？
 
-根据预测结果，设计最合适的报告章节结构。
+根据探索结果，设计最合适的报告章节结构。
 
-【再次提醒】报告章节数量：最少2个，最多5个，内容要精炼聚焦于核心预测发现。"""
+【再次提醒】报告章节数量：最少2个，最多5个，内容要精炼聚焦于核心关系发现与杠杆点（非预测）。"""
 
 # ── 章节生成 prompt ──
 
 SECTION_SYSTEM_PROMPT_TEMPLATE = """\
-你是一个「未来预测报告」的撰写专家，正在撰写报告的一个章节。
+你是一份「关系探索 / 探索轨迹报告」的撰写专家，正在撰写报告的一个章节。
 
 报告标题: {report_title}
 报告摘要: {report_summary}
-预测场景（模拟需求）: {simulation_requirement}
+探索场景（模拟需求）: {simulation_requirement}
 
 当前要撰写的章节: {section_title}
 
@@ -680,32 +683,34 @@ SECTION_SYSTEM_PROMPT_TEMPLATE = """\
 【核心理念】
 ═══════════════════════════════════════════════════════════════
 
-模拟世界是对未来的预演。我们向模拟世界注入了特定条件（模拟需求），
-模拟中Agent的行为和互动，就是对未来人群行为的预测。
+这是一次复杂人-自然系统的关系演化探索，不是对未来的预测。
+我们向沙盘注入了扰动（模拟需求），观察关系如何耦合、反馈与重连。
+你呈现的是关系的结构、方向与符号——它是指南针（方向对），不是尺子（刻度不可信）。
 
 你的任务是：
-- 揭示在设定条件下，未来发生了什么
-- 预测各类人群（Agent）是如何反应和行动的
-- 发现值得关注的未来趋势、风险和机会
+- 梳理在该扰动下浮现的关系结构与耦合（方向、符号、跨区传导）
+- 识别反馈回路、涌现张力与杠杆点（leverage points）
+- 显式区分 观测 / 推断 / 推测 三态，对模型想象保持诚实
 
-❌ 不要写成对现实世界现状的分析
-✅ 要聚焦于"未来会怎样"——模拟结果就是预测的未来
+❌ 不要写成未来预测，不要给出时刻表/概率，不要说"未来会发生 X"
+✅ 要聚焦"为什么会耦合""切断这条关系会怎样"这类结构性、可争论的问题
 
 ═══════════════════════════════════════════════════════════════
 【最重要的规则 - 必须遵守】
 ═══════════════════════════════════════════════════════════════
 
-1. 【必须调用工具观察模拟世界】
-   - 你正在以「上帝视角」观察未来的预演
-   - 所有内容必须来自模拟世界中发生的事件和Agent言行
+1. 【必须调用工具观察探索结果】
+   - 你不是在预测未来，而是在审视一次已发生的关系探索
+   - 所有内容必须来自工具返回的探索记录（关系、状态、反馈、机制）
    - 禁止使用你自己的知识来编写报告内容
-   - 每个章节至少调用3次工具（最多5次）来观察模拟的世界，它代表了未来
+   - 每个章节至少调用3次工具（最多5次）来观察探索结果
 
-2. 【必须引用Agent的原始言行】
-   - Agent的发言和行为是对未来人群行为的预测
-   - 在报告中使用引用格式展示这些预测，例如：
-     > "某类人群会表示：原文内容..."
-   - 这些引用是模拟预测的核心证据
+2. 【引用证据时必须标注来源类型，禁止伪造"原话"】
+   - 工具返回的 Agent 状态是「观测指标」（脆弱性/恐慌/响应能力等数值）
+   - ❌ 严禁把状态数值改写成第一人称发言或"采访实录"（如「某人说：……」）
+   - ✅ 应以观测口吻引用，并标注为「观测」或「推断」，例如：
+     > 观测：该区域脆弱性指标显著高于其他区域（数值仅供排序，不可当作概率）
+   - 数值未经标定，只能用于排序，不可作为概率/效应量/预测
 
 3. 【语言一致性 - 引用内容必须翻译为报告语言】
    - 工具返回的内容可能包含英文或中英文混杂的表述
@@ -714,10 +719,10 @@ SECTION_SYSTEM_PROMPT_TEMPLATE = """\
    - 翻译时保持原意不变，确保表述自然通顺
    - 这一规则同时适用于正文和引用块（> 格式）中的内容
 
-4. 【忠实呈现预测结果】
-   - 报告内容必须反映模拟世界中的代表未来的模拟结果
-   - 不要添加模拟中不存在的信息
-   - 如果某方面信息不足，如实说明
+4. 【忠实呈现探索结果】
+   - 报告内容必须反映探索中实际记录到的关系与状态
+   - 不要添加探索中不存在的信息，不要把推测写成观测
+   - 如果某方面信息不足，如实说明（不确定性是这份报告的特性，不是缺陷）
 
 ═══════════════════════════════════════════════════════════════
 【⚠️ 格式规范 - 极其重要！】
@@ -767,7 +772,7 @@ SECTION_SYSTEM_PROMPT_TEMPLATE = """\
 - insight_forge: 深度洞察分析，自动分解问题并多维度检索事实和关系
 - panorama_search: 广角全景搜索，了解事件全貌、时间线和演变过程
 - quick_search: 快速验证某个具体信息点
-- interview_agents: 采访模拟Agent，获取不同角色的第一人称观点和真实反应
+- summarize_agent_state: 读取关键 Agent 的观测状态卡（脆弱性/恐慌/响应能力等数值，非采访、非原话）
 
 ═══════════════════════════════════════════════════════════════
 【工作流程】
@@ -973,10 +978,10 @@ ENV_SECTION_SYSTEM_PROMPT_TEMPLATE = """\
 章节标题: {section_title}
 
 【EnvFish写作原则】
-1. 这不是物理求解器报告，而是半定量的区域级推演结果
-2. 必须围绕污染扩散、生态影响、人类反馈、治理响应、干预摩擦展开
-3. 需要明确说明不确定性和模型边界
-4. 可以引用工件、事件和采访，但不要编造工件里没有的信息
+1. 这不是物理求解器报告，也不是未来预测，而是半定量的区域级关系探索结果
+2. 必须围绕污染扩散、生态影响、人类反馈、治理响应、干预摩擦等关系结构展开
+3. 需要明确说明不确定性和模型边界，并区分观测 / 推断 / 推测三态
+4. 可以引用工件、事件和 Agent 观测状态卡，但不要编造工件里没有的信息，也不要把状态数值伪装成人群原话
 5. 如果存在地图选点事实，必须优先使用真实地点、周边真实点位和地图基线，不要只写 Coastal Buffer Zone / Core Region 等抽象模板名称
 
 【章节职责】
@@ -1001,7 +1006,7 @@ ENV_SECTION_SYSTEM_PROMPT_TEMPLATE = """\
 - insight_forge
 - panorama_search
 - quick_search
-- interview_agents
+- summarize_agent_state
 
 【可用工具详情】
 {tools_description}
@@ -1141,12 +1146,12 @@ class ReportAgent:
                     "limit": "返回结果数量（可选，默认10）"
                 }
             },
-            "interview_agents": {
-                "name": "interview_agents",
-                "description": TOOL_DESC_INTERVIEW_AGENTS,
+            "summarize_agent_state": {
+                "name": "summarize_agent_state",
+                "description": TOOL_DESC_AGENT_STATE_SUMMARY,
                 "parameters": {
-                    "interview_topic": "采访主题或需求描述（如：'了解学生对宿舍甲醛事件的看法'）",
-                    "max_agents": "最多采访的Agent数量（可选，默认5，最大10）"
+                    "focus": "关注主题或需求描述（如：'哪些 Agent 当前状态最脆弱'）",
+                    "max_agents": "最多输出状态卡的Agent数量（可选，默认5，最大10）"
                 }
             },
             "envfish_summary": {
@@ -1238,16 +1243,17 @@ class ReportAgent:
                 )
                 return result.to_text()
             
-            elif tool_name == "interview_agents":
-                # 深度采访 - 调用真实的OASIS采访API获取模拟Agent的回答（双平台）
-                interview_topic = parameters.get("interview_topic", parameters.get("query", ""))
+            elif tool_name in ("summarize_agent_state", "interview_agents"):
+                # Agent 状态摘要 - 读取观测状态向量，输出确定性状态卡（非采访、非原话）
+                # 兼容旧名 interview_agents / 旧参数 interview_topic
+                focus = parameters.get("focus", parameters.get("interview_topic", parameters.get("query", "")))
                 max_agents = parameters.get("max_agents", 5)
                 if isinstance(max_agents, str):
                     max_agents = int(max_agents)
                 max_agents = min(max_agents, 10)
-                result = self.zep_tools.interview_agents(
+                result = self.zep_tools.summarize_agent_state(
                     simulation_id=self.simulation_id,
-                    interview_requirement=interview_topic,
+                    focus=focus,
                     simulation_requirement=self.simulation_requirement,
                     max_agents=max_agents
                 )
@@ -1318,7 +1324,7 @@ class ReportAgent:
                 return json.dumps(result, ensure_ascii=False, indent=2)
             
             else:
-                return f"未知工具: {tool_name}。请使用以下工具之一: insight_forge, panorama_search, quick_search, interview_agents, envfish_summary, envfish_spread_forecast, envfish_vulnerability_ranking, envfish_feedback_summary, envfish_intervention_comparison"
+                return f"未知工具: {tool_name}。请使用以下工具之一: insight_forge, panorama_search, quick_search, summarize_agent_state, envfish_summary, envfish_spread_forecast, envfish_vulnerability_ranking, envfish_feedback_summary, envfish_intervention_comparison"
                 
         except Exception as e:
             logger.error(f"工具执行失败: {tool_name}, 错误: {str(e)}")
@@ -1329,7 +1335,8 @@ class ReportAgent:
         "insight_forge",
         "panorama_search",
         "quick_search",
-        "interview_agents",
+        "summarize_agent_state",
+        "interview_agents",  # 旧名别名，仍可解析，dispatch 时映射到 summarize_agent_state
         "envfish_summary",
         "envfish_spread_forecast",
         "envfish_vulnerability_ranking",
@@ -1666,12 +1673,12 @@ EnvFish摘要：
             logger.error(f"大纲规划失败: {str(e)}")
             # 返回默认大纲（3个章节，作为fallback）
             return ReportOutline(
-                title="未来预测报告",
-                summary="基于模拟预测的未来趋势与风险分析",
+                title="关系探索报告",
+                summary="基于关系探索的结构、耦合与杠杆点分析（非未来预测）",
                 sections=[
-                    ReportSection(title="预测场景与核心发现"),
-                    ReportSection(title="人群行为预测分析"),
-                    ReportSection(title="趋势展望与风险提示")
+                    ReportSection(title="探索场景与核心关系发现"),
+                    ReportSection(title="关系结构与反馈回路分析"),
+                    ReportSection(title="杠杆点与不确定性边界")
                 ]
             )
     
@@ -1758,7 +1765,7 @@ EnvFish摘要：
         min_tool_calls = 3  # 最少工具调用次数
         conflict_retries = 0  # 工具调用与Final Answer同时出现的连续冲突次数
         used_tools = set()  # 记录已调用过的工具名
-        all_tools = set(self.tools.keys()) if envfish_mode else {"insight_forge", "panorama_search", "quick_search", "interview_agents"}
+        all_tools = set(self.tools.keys()) if envfish_mode else {"insight_forge", "panorama_search", "quick_search", "summarize_agent_state"}
 
         # 报告上下文，用于InsightForge的子问题生成
         report_context = (

@@ -356,23 +356,32 @@ class RiskDefinitionBuilder:
         ]
 
     def _severity_score(self, intensity: float, candidate: Dict[str, Any], regions: List[Dict[str, Any]], profiles: List[Dict[str, Any]]) -> float:
-        coverage = min(18, len(regions) * 3 + len(profiles) * 0.8)
-        match_bonus = min(12, len(candidate.get("matches") or []) * 2.5)
-        return round(min(96, max(35, intensity * 0.62 + coverage + match_bonus)), 1)
+        # Rational compression spreads distinct risks across a range instead of
+        # every risk saturating to the same shared cap (the old "five risks all
+        # 68.4" bug). `raw` is the per-risk selection score, so it differs by the
+        # template's own keyword/region/profile matches.
+        raw = float(candidate.get("score", 0) or 0)
+        signal = 36.0 * raw / (raw + 30.0)
+        coverage = min(10.0, len(regions) * 1.5 + len(profiles) * 0.4)
+        return round(min(96.0, max(30.0, intensity * 0.42 + signal + coverage)), 1)
 
     def _confidence_score(self, candidate: Dict[str, Any], variables: List[Dict[str, Any]], regions: List[Dict[str, Any]], profiles: List[Dict[str, Any]]) -> float:
-        score = 0.48
-        score += min(0.16, len(candidate.get("matches") or []) * 0.035)
-        score += 0.08 if variables else 0
-        score += min(0.16, len(regions) * 0.025)
-        score += min(0.08, len(profiles) * 0.01)
-        return round(min(0.9, max(0.35, score)), 2)
+        raw = float(candidate.get("score", 0) or 0)
+        score = 0.40 + 0.32 * raw / (raw + 30.0)
+        if variables:
+            score += 0.06
+        score += min(0.08, len(regions) * 0.012)
+        return round(min(0.9, max(0.3, score)), 2)
 
     def _actionability_score(self, candidate: Dict[str, Any], region_refs: List[Dict[str, Any]], actor_refs: List[Dict[str, Any]], template: Dict[str, Any]) -> float:
-        score = 38 + len(region_refs) * 5 + len(actor_refs) * 2 + len(template["signals"]) * 3
-        if candidate.get("matches"):
-            score += 8
-        return round(min(92, max(35, score)), 1)
+        raw = float(candidate.get("score", 0) or 0)
+        score = (
+            34.0
+            + 30.0 * raw / (raw + 28.0)
+            + min(12.0, len(actor_refs) * 1.6)
+            + len(template.get("signals") or []) * 2.0
+        )
+        return round(min(92.0, max(30.0, score)), 1)
 
     def _scenario_intensity(self, variables: List[Dict[str, Any]]) -> float:
         values = []

@@ -1104,6 +1104,44 @@ class ReportAnalysisService:
             "groups": payload,
         }
 
+    def _reasoning_summary(self, snapshot: Dict[str, Any]) -> str:
+        """Extract the runtime-written reasoning summary if present (honest path).
+
+        The runtime now writes ``reasoning.summary`` per round. We surface it
+        verbatim instead of fabricating a template sentence. Returns "" when
+        absent so the caller can fall back to the deterministic template.
+        """
+        reasoning = snapshot.get("reasoning") if isinstance(snapshot.get("reasoning"), dict) else {}
+        return _normalize_text(reasoning.get("summary"))
+
+    def _turning_points(self, snapshot: Dict[str, Any]) -> List[str]:
+        reasoning = snapshot.get("reasoning") if isinstance(snapshot.get("reasoning"), dict) else {}
+        raw = reasoning.get("turning_points") or snapshot.get("turning_points") or []
+        points: List[str] = []
+        for item in raw if isinstance(raw, list) else []:
+            if isinstance(item, dict):
+                text = _normalize_text(item.get("description") or item.get("note") or item.get("label"))
+            else:
+                text = _normalize_text(item)
+            if text:
+                points.append(text)
+        return points
+
+    def _detected_feedback_loops(self, snapshot: Dict[str, Any]) -> List[str]:
+        feedback = snapshot.get("feedback") if isinstance(snapshot.get("feedback"), dict) else {}
+        raw = feedback.get("detected_feedback_loops") or []
+        loops: List[str] = []
+        for item in raw if isinstance(raw, list) else []:
+            if isinstance(item, dict):
+                text = _normalize_text(
+                    item.get("loop") or item.get("description") or item.get("label") or item.get("name")
+                )
+            else:
+                text = _normalize_text(item)
+            if text:
+                loops.append(text)
+        return loops
+
     def _build_narrative_tab(self) -> Dict[str, Any]:
         narratives: List[Dict[str, Any]] = []
         snapshots = self.round_snapshots or ([self.latest_snapshot] if self.latest_snapshot else [])
@@ -1114,10 +1152,19 @@ class ReportAnalysisService:
 
             feedback = snap.get("feedback") if isinstance(snap.get("feedback"), dict) else {}
             diffusion = snap.get("diffusion") if isinstance(snap.get("diffusion"), dict) else {}
+
+            # Prefer real runtime reasoning / detected loops over template strings.
+            reasoning_summary = self._reasoning_summary(snap)
+            detected_loops = self._detected_feedback_loops(snap)
+            turning_points = self._turning_points(snap)
+
             feedback_loop = ""
-            propagation = feedback.get("feedback_propagation") or []
-            if propagation and isinstance(propagation[0], dict):
-                feedback_loop = _normalize_text(propagation[0].get("loop"))
+            if detected_loops:
+                feedback_loop = detected_loops[0]
+            else:
+                propagation = feedback.get("feedback_propagation") or []
+                if propagation and isinstance(propagation[0], dict):
+                    feedback_loop = _normalize_text(propagation[0].get("loop"))
 
             diffusion_ranking = diffusion.get("region_ranking") or []
             diffusion_name = ""
@@ -1126,28 +1173,40 @@ class ReportAnalysisService:
 
             confidence = self._average_confidence(snap)
             uncertainty_text = (
-                f"平均置信度 {confidence}，需关注隐含参数与未记录干预。"
+                f"平均置信度 {confidence}，需关注隐含参数与未记录干预（数值仅供排序，不作预测）。"
                 if confidence is not None
                 else "当前轮缺少完整 uncertainty_band，结论需结合上下轮对照。"
             )
 
-            headline = f"{top_region_name} 是本轮最关键变化区域，脆弱性达到 {round(top_region_score, 2)}。"
-            amplifier = (
-                f"主要放大器是反馈链“{feedback_loop}”。"
-                if feedback_loop
-                else f"主要传播信号来自 {diffusion_name or top_region_name} 的扩散/暴露累积。"
-            )
-            narratives.append({
+            # headline: use runtime reasoning.summary when it exists, else template.
+            if reasoning_summary:
+                headline = reasoning_summary
+                narrative_source = "snapshot.reasoning.summary"
+            else:
+                headline = f"{top_region_name} 是本轮关系张力最集中的区域，脆弱性达到 {round(top_region_score, 2)}。"
+                narrative_source = "derived_template"
+
+            # amplifier: prefer detected feedback loops written by the runtime.
+            if feedback_loop:
+                amplifier = f"主要放大器是反馈回路“{feedback_loop}”。"
+            else:
+                amplifier = f"主要传播信号来自 {diffusion_name or top_region_name} 的扩散/暴露累积。"
+
+            entry: Dict[str, Any] = {
                 "round": snap.get("round"),
                 "timestamp": snap.get("timestamp"),
                 "headline": headline,
                 "amplifier": amplifier,
                 "uncertainty": uncertainty_text,
+                "narrative_source": narrative_source,
+                "detected_feedback_loops": detected_loops,
+                "turning_points": turning_points,
                 "top_region": {
                     "name": top_region_name,
                     "vulnerability_score": round(top_region_score, 2),
                 },
-            })
+            }
+            narratives.append(entry)
 
         return {
             "tab": "narrative",

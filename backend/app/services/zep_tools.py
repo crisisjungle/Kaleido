@@ -29,7 +29,34 @@ class PanoramaResult(SearchResult):
 
 
 @dataclass
-class InterviewResult(SearchResult):
+class AgentStateSummaryResult(SearchResult):
+    """Deterministic state cards for selected agents.
+
+    This is NOT an interview and NOT a first-person quote. Each entry is a
+    summary of the agent's *observed* metrics (state_vector) at the latest
+    snapshot. We deliberately frame the text as observed numbers so it cannot
+    be mistaken for qualitative testimony the agent "said".
+    """
+
+    def to_text(self) -> str:
+        if not self.results:
+            return f"未找到与“{self.query}”相关的 Agent 状态卡（无可读取的状态向量）。"
+        lines = [
+            "Agent 状态卡（观测指标，非采访/非原话；以下为状态向量的确定性摘要）：",
+        ]
+        for item in self.results:
+            name = item.get("name") or "结果"
+            summary = item.get("summary") or ""
+            lines.append(f"- {name}: {summary}")
+        return "\n".join(lines)
+
+
+@dataclass
+class InterviewResult(AgentStateSummaryResult):
+    """Backward-compatible alias retained for callers that still import it.
+
+    Inherits the honest state-card framing; it is no longer a fake interview.
+    """
     pass
 
 
@@ -79,7 +106,14 @@ class ZepToolsService:
         simulation_id = self._graph_to_simulation.get(graph_id, "")
         return SearchResult(query=query, results=self._fact_results(simulation_id, limit=limit) if simulation_id else [])
 
-    def interview_agents(self, simulation_id: str, interview_requirement: str, simulation_requirement: str = "", max_agents: int = 5) -> InterviewResult:
+    def summarize_agent_state(self, simulation_id: str, focus: str = "", simulation_requirement: str = "", max_agents: int = 5) -> AgentStateSummaryResult:
+        """Return deterministic *state cards* (observed metrics) for top agents.
+
+        This replaces the former ``interview_agents`` pseudo-interview. It does
+        NOT fabricate first-person quotes or "原话"; every entry reports the
+        agent's observed state_vector numbers and recorded action types, framed
+        as observed metrics so the report cannot dress them up as testimony.
+        """
         bundle = self._load_bundle(simulation_id)
         latest = self._latest_snapshot(bundle)
         interactions = (bundle.get("artifacts") or {}).get("agent_interactions") or []
@@ -93,21 +127,40 @@ class ZepToolsService:
                 {
                     "name": name,
                     "summary": (
-                        f"围绕“{interview_requirement}”，该角色位于{region or '未标注区域'}；"
-                        f"脆弱性 {self._num(vector.get('vulnerability_score'))}，"
-                        f"恐慌 {self._num(vector.get('panic_level'))}，"
-                        f"响应能力 {self._num(vector.get('response_capacity'))}。"
+                        f"位置 {region or '未标注区域'}；"
+                        f"观测状态向量——脆弱性 {self._num(vector.get('vulnerability_score'))}，"
+                        f"恐慌指数 {self._num(vector.get('panic_level'))}，"
+                        f"响应能力 {self._num(vector.get('response_capacity'))}"
+                        f"（数值仅供排序，未经标定，不可作为概率或效应量）。"
                     ),
                 }
             )
         for item in interactions[: max(0, max_agents - len(results))]:
+            action = item.get("action_type") or ""
+            rationale = item.get("rationale") or ""
+            note = "，".join(part for part in (action, rationale) if part) or "无记录动作"
             results.append(
                 {
                     "name": item.get("source_agent_name") or "交互样本",
-                    "summary": item.get("rationale") or item.get("action_type") or "",
+                    "summary": f"记录到的动作（observed action，非原话）：{note}。",
                 }
             )
-        return InterviewResult(query=interview_requirement, results=results)
+        return AgentStateSummaryResult(query=focus, results=results)
+
+    def interview_agents(self, simulation_id: str, interview_requirement: str = "", simulation_requirement: str = "", max_agents: int = 5) -> InterviewResult:
+        """Deprecated alias. Delegates to :meth:`summarize_agent_state`.
+
+        Retained only for backward compatibility with external callers. It no
+        longer produces an interview/quote — it returns the same honest state
+        cards. Prefer ``summarize_agent_state`` in new code.
+        """
+        summary = self.summarize_agent_state(
+            simulation_id=simulation_id,
+            focus=interview_requirement,
+            simulation_requirement=simulation_requirement,
+            max_agents=max_agents,
+        )
+        return InterviewResult(query=summary.query, results=summary.results)
 
     def get_graph_statistics(self, graph_id: str) -> Dict[str, Any]:
         simulation_id = self._graph_to_simulation.get(graph_id, "")

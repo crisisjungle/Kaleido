@@ -27,6 +27,22 @@ LEGACY_SIMULATION_ARCHITECTURE = "legacy_envfish_v1"
 LLM_MECHANISM_ARCHITECTURE = "llm_mechanism_v1"
 SUPPORTED_SIMULATION_ARCHITECTURES = {LEGACY_SIMULATION_ARCHITECTURE, LLM_MECHANISM_ARCHITECTURE}
 
+# Evidence strings that are placeholders, NOT real grounding. They must never be
+# counted as evidence coverage (this is what made the old metric circular: empty
+# evidence was backfilled with "llm_relation_candidate" and then counted as 1.0).
+_PLACEHOLDER_EVIDENCE = {
+    "llm_relation_candidate",
+    "fallback_explicit",
+    "fallback",
+    "placeholder",
+    "fallback_explicit_low_confidence",
+}
+
+
+def _is_placeholder_evidence(value: Any) -> bool:
+    text = str(value or "").strip().lower()
+    return (not text) or text in _PLACEHOLDER_EVIDENCE
+
 
 def normalize_simulation_architecture(value: Optional[str]) -> str:
     normalized = str(value or Config.ENVFISH_SIMULATION_ARCHITECTURE or LEGACY_SIMULATION_ARCHITECTURE)
@@ -104,7 +120,10 @@ class MechanismSimulationPlanner:
         else:
             payload = self._fallback_payload(context=context, fallback_reason=llm_error or "llm_unavailable")
 
-        relation_edges, relation_ledger = self._validate_relations(payload.get("relation_candidates") or [], profiles)
+        anchor_index = self._build_anchor_index(context, profiles)
+        relation_edges, relation_ledger = self._validate_relations(
+            payload.get("relation_candidates") or [], profiles, anchor_index=anchor_index
+        )
         fallback_relation_count = 0
         desired_relation_count = min(max(8, len(profiles)), max(8, len(profiles) * 3), 360)
         if len(relation_edges) < desired_relation_count:
@@ -129,6 +148,7 @@ class MechanismSimulationPlanner:
             relation_edges=relation_edges,
             relation_ledger=relation_ledger,
             fallback_relation_count=fallback_relation_count,
+            consistency=validated_relation_graph.get("consistency") or {},
         )
 
         artifacts = MechanismArtifacts(
@@ -310,7 +330,7 @@ class MechanismSimulationPlanner:
                 "Do not use a fixed taxonomy of relationship types; relation_label is scenario-local.",
                 "Include cross-region and cross-scale relations when mechanisms justify them.",
                 "Avoid repeating the same local motif for every subregion.",
-                "Every relation candidate must cite a mechanism and evidence.",
+                "Every relation candidate must cite a mechanism, and evidence that quotes the source document or names a real region/entity from the context. Do NOT invent generic evidence; leave evidence empty if you are only inferring.",
                 "Use only provided agent_id values for relation_candidates.",
                 "Return valid JSON only.",
             ],
@@ -433,7 +453,10 @@ class MechanismSimulationPlanner:
         self,
         candidates: Iterable[Dict[str, Any]],
         profiles: List[EnvAgentProfile],
+        *,
+        anchor_index: Optional[Dict[str, Any]] = None,
     ) -> Tuple[List[AgentRelationshipEdge], List[Dict[str, Any]]]:
+        anchor_index = anchor_index or {"corpus": "", "names": set()}
         profile_lookup = {int(profile.agent_id): profile for profile in profiles}
         seen: set[tuple[int, int, str]] = set()
         edges: List[AgentRelationshipEdge] = []
@@ -479,12 +502,25 @@ class MechanismSimulationPlanner:
                 continue
             seen.add(key)
             confidence = clamp_probability(candidate.get("confidence", 0.62))
-            mechanism = str(candidate.get("mechanism") or candidate.get("rationale") or "").strip()
-            evidence = self._string_list(candidate.get("evidence"), limit=6)
-            if not mechanism:
-                mechanism = f"{source.name} 与 {target.name} 在场景机制图中存在待验证影响关系。"
-            if not evidence:
-                evidence = ["llm_relation_candidate"]
+            raw_mechanism = str(candidate.get("mechanism") or candidate.get("rationale") or "").strip()
+            clean_evidence = [
+                item
+                for item in self._string_list(candidate.get("evidence"), limit=6)
+                if not _is_placeholder_evidence(item)
+            ]
+            # Real grounding check: does the evidence/mechanism reference a named
+            # region/entity from the scenario, or quote a fragment of the source
+            # document? We DO NOT backfill placeholder evidence anymore — an edge
+            # with no real evidence and no mechanism is honestly "speculative".
+            anchored_evidence = self._anchor_evidence(clean_evidence, anchor_index)
+            anchored_mechanism = self._anchor_evidence([raw_mechanism], anchor_index)
+            if anchored_evidence or anchored_mechanism:
+                epistemic_status = "observed"
+            elif clean_evidence or raw_mechanism:
+                epistemic_status = "inferred"
+            else:
+                epistemic_status = "speculative"
+            mechanism = raw_mechanism or f"{source.name}→{target.name}：关系由模型提出，未给出显式机制说明（推断）。"
             scope = str(candidate.get("scope") or "").strip()
             if not scope:
                 scope = "cross_region" if (source.home_region_id or source.primary_region) != (target.home_region_id or target.primary_region) else "local"
@@ -504,15 +540,19 @@ class MechanismSimulationPlanner:
                 latency=str(candidate.get("latency") or "unknown"),
                 direction=str(candidate.get("direction") or "conditional"),
                 scope=scope,
-                evidence=evidence,
+                evidence=clean_evidence,
                 confidence=confidence,
                 mechanism_edge_ids=self._string_list(candidate.get("mechanism_edge_ids"), limit=6),
                 origin="llm_relation_discovery",
-                validation_status="accepted",
+                validation_status="accepted" if epistemic_status != "speculative" else "accepted_unanchored",
+                epistemic_status=epistemic_status,
+                evidence_anchors=anchored_evidence,
             )
             edges.append(edge)
             record["status"] = "accepted"
             record["reason"] = "validated"
+            record["epistemic_status"] = epistemic_status
+            record["anchored_evidence_count"] = len(anchored_evidence)
             record["edge_id"] = edge.edge_id
             ledger.append(record)
         return edges, ledger
@@ -560,11 +600,13 @@ class MechanismSimulationPlanner:
                 latency="unknown",
                 direction="conditional",
                 scope=scope,
-                evidence=["fallback_explicit", source.name, target.name],
+                evidence=[],
                 confidence=confidence,
                 mechanism_edge_ids=mechanism_edge_ids[:2],
                 origin="fallback_explicit",
-                validation_status="accepted_low_confidence",
+                validation_status="speculative_fallback",
+                epistemic_status="speculative",
+                evidence_anchors=[],
             )
             edges.append(edge)
             ledger.append(
@@ -672,17 +714,226 @@ class MechanismSimulationPlanner:
 
     def _validated_relation_graph(self, edges: List[AgentRelationshipEdge]) -> Dict[str, Any]:
         edge_payloads = [edge.to_dict() for edge in edges]
+        total = len(edge_payloads)
+        observed = sum(1 for edge in edge_payloads if edge.get("epistemic_status") == "observed")
+        inferred = sum(1 for edge in edge_payloads if edge.get("epistemic_status") == "inferred")
+        speculative = sum(1 for edge in edge_payloads if edge.get("epistemic_status") == "speculative")
         cross_region_count = sum(1 for edge in edge_payloads if edge.get("source_region_id") != edge.get("target_region_id"))
-        evidence_count = sum(1 for edge in edge_payloads if edge.get("evidence"))
-        mechanism_count = sum(1 for edge in edge_payloads if edge.get("mechanism"))
-        return {
+        consistency = self._relation_consistency_report(edges)
+        graph = {
             "architecture": LLM_MECHANISM_ARCHITECTURE,
-            "edge_count": len(edge_payloads),
+            "edge_count": total,
             "cross_region_edge_count": cross_region_count,
-            "evidence_coverage": round(evidence_count / max(1, len(edge_payloads)), 3),
-            "mechanism_coverage": round(mechanism_count / max(1, len(edge_payloads)), 3),
+            "grounded_edge_count": observed,
+            "inferred_edge_count": inferred,
+            "speculative_edge_count": speculative,
+            # Honest coverage: ONLY edges whose evidence/mechanism anchors to an
+            # external source (named region/entity or document fragment) count.
+            # No longer ~1.0 by construction — placeholder backfill is gone.
+            "evidence_coverage": round(observed / max(1, total), 3),
+            "mechanism_coverage": round((observed + inferred) / max(1, total), 3),
+            "epistemic_breakdown": {
+                "observed": observed,
+                "inferred": inferred,
+                "speculative": speculative,
+            },
+            "coverage_note": (
+                "evidence_coverage 仅统计证据可锚定到外部来源（命名区域/实体或文档片段）的边；"
+                "inferred=有机制但无外部证据；speculative=降级占位边，不计入覆盖。"
+            ),
+            # M7: the graph is no longer just schema-validated — it is checked for
+            # causal defensibility. Direction/polarity contradictions and short
+            # directed cycles are surfaced (bounded), not silently merged away.
+            "consistency": consistency,
+            "contradiction_count": consistency["contradiction_count"],
+            "cycle_count": consistency["cycle_count"],
+            "quality_flags": consistency["quality_flags"],
             "edges": edge_payloads,
         }
+        return graph
+
+    # Directions that carry a sign for contradiction detection. "bidirectional"
+    # and "conditional" are sign-ambiguous and never count as a contradiction.
+    _SIGNED_DIRECTIONS = {"positive", "negative"}
+    _OPPOSING_DIRECTION = {"positive": "negative", "negative": "positive"}
+
+    def _relation_consistency_report(
+        self,
+        edges: List[AgentRelationshipEdge],
+        *,
+        max_items: int = 40,
+        max_cycle_length: int = 4,
+    ) -> Dict[str, Any]:
+        """Cheap, bounded causal-consistency pass over validated edges.
+
+        Detects two real defects that pure schema validation misses:
+          (i)  DIRECTION/POLARITY contradictions — the same ordered endpoint pair
+               asserted once as positive and once as negative (an edge that both
+               raises and lowers the same target is not defensible without a
+               conditional split).
+          (ii) short directed cycles (2-cycles up to ``max_cycle_length``) among
+               the edges — A→B and B→A, or longer loops. These are surfaced (not
+               an error: feedback loops are real) so downstream can flag them.
+
+        Honest by design: this does not "fix" anything, it only counts and lists
+        a bounded sample, and emits quality_flags so the contradiction is visible
+        rather than averaged into a clean coverage number.
+        """
+        # Group signed assertions per ordered endpoint pair. We key on the
+        # (source, target) region pair when both endpoints map to a region,
+        # else fall back to the agent pair so agent-level contradictions still
+        # surface. Polarity comes from edge.direction.
+        polarity_by_pair: Dict[Tuple[str, str], Dict[str, List[str]]] = {}
+        adjacency: Dict[str, set] = {}
+        node_label: Dict[str, str] = {}
+
+        def _endpoint(region_id: Any, agent_id: Any) -> str:
+            region = str(region_id or "").strip()
+            if region:
+                return f"region:{region}"
+            return f"agent:{agent_id}"
+
+        for edge in edges:
+            src = _endpoint(getattr(edge, "source_region_id", ""), edge.source_agent_id)
+            dst = _endpoint(getattr(edge, "target_region_id", ""), edge.target_agent_id)
+            if src == dst:
+                continue
+            node_label.setdefault(src, src)
+            node_label.setdefault(dst, dst)
+            adjacency.setdefault(src, set()).add(dst)
+            direction = str(getattr(edge, "direction", "") or "").strip().lower()
+            if direction in self._SIGNED_DIRECTIONS:
+                bucket = polarity_by_pair.setdefault((src, dst), {"positive": [], "negative": []})
+                bucket[direction].append(getattr(edge, "edge_id", ""))
+
+        contradictions: List[Dict[str, Any]] = []
+        for (src, dst), buckets in polarity_by_pair.items():
+            if buckets["positive"] and buckets["negative"]:
+                if len(contradictions) < max_items:
+                    contradictions.append(
+                        {
+                            "source": src,
+                            "target": dst,
+                            "positive_edge_ids": buckets["positive"][:6],
+                            "negative_edge_ids": buckets["negative"][:6],
+                            "note": "同一有向端点对被同时断言为 positive 与 negative，方向极性矛盾。",
+                        }
+                    )
+        contradiction_count = sum(
+            1 for buckets in polarity_by_pair.values() if buckets["positive"] and buckets["negative"]
+        )
+
+        cycles = self._detect_short_cycles(adjacency, max_cycle_length=max_cycle_length, max_items=max_items)
+
+        quality_flags: List[str] = []
+        if contradiction_count:
+            quality_flags.append("direction_contradiction_present")
+        if cycles:
+            quality_flags.append("short_cycle_present")
+            if any(c["length"] == 2 for c in cycles):
+                quality_flags.append("two_cycle_present")
+
+        return {
+            "contradiction_count": contradiction_count,
+            "contradictions": contradictions,
+            "cycle_count": len(cycles),
+            "cycles": cycles,
+            "signed_pair_count": len(polarity_by_pair),
+            "quality_flags": quality_flags,
+            "note": (
+                "contradictions=同一有向端点对的正负极性冲突；cycles=端点层短有向环（含 2 环）。"
+                "环不必是错误（反馈回路是真实现象），仅作可见性标注。"
+            ),
+        }
+
+    def _detect_short_cycles(
+        self,
+        adjacency: Dict[str, set],
+        *,
+        max_cycle_length: int = 4,
+        max_items: int = 40,
+    ) -> List[Dict[str, Any]]:
+        """Bounded DFS for directed cycles of length 2..max_cycle_length.
+
+        Rotation-invariant signatures dedupe the same loop; the search is hard
+        capped at ``max_items`` so a dense graph cannot blow up the validation."""
+        max_cycle_length = max(2, int(max_cycle_length))
+        cycles: List[Dict[str, Any]] = []
+        seen_signatures: set = set()
+
+        def signature(path: List[str]) -> str:
+            rotations = ["||".join(path[i:] + path[:i]) for i in range(len(path))]
+            return min(rotations) if rotations else ""
+
+        def dfs(start: str, current: str, path: List[str]) -> None:
+            if len(cycles) >= max_items:
+                return
+            for nxt in sorted(adjacency.get(current, set())):
+                if nxt == start and len(path) >= 2:
+                    sig = signature(path)
+                    if sig not in seen_signatures:
+                        seen_signatures.add(sig)
+                        cycles.append({"nodes": list(path), "length": len(path)})
+                    continue
+                if nxt in path or len(path) >= max_cycle_length:
+                    continue
+                dfs(start, nxt, path + [nxt])
+
+        for node in sorted(adjacency.keys()):
+            if len(cycles) >= max_items:
+                break
+            dfs(node, node, [node])
+        return cycles
+
+    def _build_anchor_index(self, context: Dict[str, Any], profiles: List[EnvAgentProfile]) -> Dict[str, Any]:
+        """Collect external grounding anchors: named regions/entities + a source
+        corpus. Profile (persona) names are intentionally excluded — they are
+        LLM-generated, not external evidence."""
+        del profiles
+        corpus_parts: List[str] = [
+            str(context.get("document_excerpt") or ""),
+            str(context.get("simulation_requirement") or ""),
+        ]
+        names: set[str] = set()
+
+        def _add_named(value: Any) -> None:
+            text = str(value or "").strip().lower()
+            if len(text) >= 2:
+                names.add(text)
+
+        for region in (context.get("regions") or []) + (context.get("subregions") or []):
+            if isinstance(region, dict):
+                _add_named(region.get("name"))
+                corpus_parts.append(str(region.get("name") or ""))
+                corpus_parts.append(str(region.get("description") or ""))
+        for entity in context.get("entities") or []:
+            if isinstance(entity, dict):
+                _add_named(entity.get("name"))
+                corpus_parts.append(str(entity.get("name") or ""))
+                corpus_parts.append(str(entity.get("summary") or ""))
+        return {"corpus": " ".join(corpus_parts).lower(), "names": names}
+
+    def _anchor_evidence(self, texts: Iterable[str], anchor_index: Dict[str, Any]) -> List[str]:
+        """Return the subset of texts that genuinely anchor to external grounding:
+        they reference a named region/entity, or quote a >=4-char CJK fragment
+        present in the source corpus. Placeholder strings never anchor."""
+        names = anchor_index.get("names") or set()
+        corpus = anchor_index.get("corpus") or ""
+        anchored: List[str] = []
+        for item in texts or []:
+            text = str(item or "").strip()
+            if not text or _is_placeholder_evidence(text):
+                continue
+            low = text.lower()
+            hit = any(name in low for name in names if len(name) >= 2)
+            if not hit and corpus:
+                for fragment in re.findall(r"[一-鿿]{4,}", low):
+                    if fragment in corpus:
+                        hit = True
+                        break
+            if hit:
+                anchored.append(text)
+        return list(dict.fromkeys(anchored))
 
     def _build_audit(
         self,
@@ -693,7 +944,9 @@ class MechanismSimulationPlanner:
         relation_edges: List[AgentRelationshipEdge],
         relation_ledger: List[Dict[str, Any]],
         fallback_relation_count: int,
+        consistency: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
+        consistency = consistency or {}
         accepted_count = sum(1 for item in relation_ledger if item.get("status") == "accepted")
         rejected_count = sum(1 for item in relation_ledger if item.get("status") == "rejected")
         cross_region_count = sum(1 for edge in relation_edges if edge.source_region_id != edge.target_region_id)
@@ -715,13 +968,28 @@ class MechanismSimulationPlanner:
             "cross_region_relation_count": cross_region_count,
             "relation_label_count": len(relation_labels),
             "relation_labels": relation_labels[:80],
-            "quality_flags": self._quality_flags(relation_edges, fallback_relation_count),
+            "contradiction_count": int(consistency.get("contradiction_count") or 0),
+            "cycle_count": int(consistency.get("cycle_count") or 0),
+            "quality_flags": self._quality_flags(
+                relation_edges,
+                fallback_relation_count,
+                consistency_flags=consistency.get("quality_flags") or [],
+            ),
         }
 
-    def _quality_flags(self, relation_edges: List[AgentRelationshipEdge], fallback_relation_count: int) -> List[str]:
+    def _quality_flags(
+        self,
+        relation_edges: List[AgentRelationshipEdge],
+        fallback_relation_count: int,
+        *,
+        consistency_flags: Optional[List[str]] = None,
+    ) -> List[str]:
         flags: List[str] = []
         if fallback_relation_count:
             flags.append("fallback_relations_present")
+        for flag in consistency_flags or []:
+            if flag and flag not in flags:
+                flags.append(flag)
         if not relation_edges:
             flags.append("no_valid_relations")
             return flags
@@ -733,6 +1001,13 @@ class MechanismSimulationPlanner:
             flags.append("low_relation_label_diversity")
         if any(not edge.mechanism for edge in relation_edges):
             flags.append("missing_mechanism_on_some_relations")
+        total = len(relation_edges)
+        speculative = sum(1 for edge in relation_edges if getattr(edge, "epistemic_status", "") == "speculative")
+        observed = sum(1 for edge in relation_edges if getattr(edge, "epistemic_status", "") == "observed")
+        if total and speculative / total > 0.5:
+            flags.append("majority_speculative_relations")
+        if total and observed == 0:
+            flags.append("no_externally_grounded_relations")
         return flags
 
     def _scenario_state_schema(self, scenario_model: Dict[str, Any]) -> Dict[str, Any]:

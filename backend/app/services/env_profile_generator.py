@@ -3333,6 +3333,22 @@ class EnvProfileGenerator:
                 "action_space": ["migrate", "breed_decline", "signal_loss"],
                 "impact_profile": {"panic_delta": 0.0, "trust_delta": 0.0, "economic_delta": -0.3, "ecology_delta": -1.2},
             },
+            "transport_node": {
+                "action_space": ["route_flow", "throttle_capacity", "report_disruption"],
+                "capabilities": ["routing", "flow_observation"],
+                "motivation_stack": ["维持通行能力", "降低中断扩散"],
+                "impact_profile": {"panic_delta": 0.2, "trust_delta": 0.0, "economic_delta": 0.6, "ecology_delta": -0.2},
+                "bio": f"{subregion_name} 的基础设施节点，承载并传导人流/物流压力。",
+                "persona": f"该基础设施节点位于{subregion_name}，按通行与承载约束传导上下游压力，本身不主动决策。",
+            },
+            "unspecified": {
+                # Role could not be defensibly inferred from evidence. Keep it a
+                # neutral observer rather than dressing it up as a specific actor.
+                "action_space": ["observe", "signal", "adapt"],
+                "motivation_stack": ["感知局部变化", "维持自身状态"],
+                "bio": f"{subregion_name} 的一个角色未定主体，证据不足以判定其具体身份。",
+                "persona": f"该主体位于{subregion_name}，其具体角色尚无足够证据判定，暂作中性观察者参与互动。",
+            },
         }
         merged = dict(defaults)
         merged.update(presets.get(agent_subtype, {}))
@@ -3382,6 +3398,17 @@ class EnvProfileGenerator:
                 [item.description or item.name for item in relevant_variables[:2]],
             )
 
+        # Decide identity first so persona/bio stay consistent with agent_subtype
+        # even on the no-LLM fallback path (avoids "ecologist" persona on a resident).
+        agent_type, agent_subtype = self._agent_identity(prepared)
+        behavior = self._behavior_bundle(
+            node_family=prepared.node_family,
+            agent_subtype=agent_subtype,
+            region_name=primary_region.name,
+            subregion_name=primary_subregion.name,
+            land_use_class=primary_subregion.land_use_class or "residential",
+        )
+
         llm_payload = None
         if use_llm and self.llm_client:
             llm_payload = self._generate_profile_with_llm(
@@ -3400,10 +3427,12 @@ class EnvProfileGenerator:
         )
         bio = (
             (llm_payload or {}).get("bio")
+            or behavior.get("bio")
             or f"{prepared.entity.name} is a {prepared.entity_type} rooted in {primary_region.name}."
         )
         persona = (
             (llm_payload or {}).get("persona")
+            or behavior.get("persona")
             or f"{prepared.entity.name} tracks local ecological change, social pressure, and risk trade-offs."
         )
         goals = [str(item) for item in ((llm_payload or {}).get("goals") or base_goals)][:6]
@@ -3413,13 +3442,12 @@ class EnvProfileGenerator:
             for region in regions
             if region.region_id != primary_region.region_id and region.region_id in primary_region.neighbors[:2]
         ]
-        agent_type, agent_subtype = self._agent_identity(prepared)
-        behavior = self._behavior_bundle(
-            node_family=prepared.node_family,
-            agent_subtype=agent_subtype,
-            region_name=primary_region.name,
-            subregion_name=primary_subregion.name,
-            land_use_class=primary_subregion.land_use_class or "residential",
+
+        # Grounding gate (entity_template path): stamp provenance + evidence so this
+        # path is no longer ungated relative to the map_seed path. Honest tiers only.
+        evidence_refs = self._entity_evidence_refs(prepared, primary_subregion)
+        provenance, evidence_confidence, grounding_reason = self._entity_provenance(
+            prepared, agent_subtype, evidence_refs
         )
 
         return EnvAgentProfile(
@@ -3452,6 +3480,11 @@ class EnvProfileGenerator:
             state_vector=state_vector,
             source_entity_uuid=prepared.entity.uuid,
             source_entity_type=prepared.entity_type,
+            generation_mode="entity_template",
+            evidence_refs=evidence_refs,
+            evidence_confidence=evidence_confidence,
+            review_status=provenance,
+            grounding_reason=grounding_reason,
         )
 
     def _match_region(self, prepared: PreparedEntityContext, regions: List[RegionNode]) -> RegionNode:
@@ -3522,43 +3555,166 @@ class EnvProfileGenerator:
                 return subregion
         return candidates[0]
 
+    def _identity_signal_text(self, prepared: PreparedEntityContext) -> str:
+        """Pool every available role signal so identity is decided by evidence, not a blind default.
+
+        We fold in the structured attributes the upstream extractor carries
+        (role / role_type / profession / category / subtype) plus the entity's
+        own relation hints, not just its name. This is what stops the
+        entity_template path from collapsing everything onto ("human","resident").
+        """
+        attrs = prepared.entity.attributes or {}
+        signal_keys = ("role", "role_type", "profession", "occupation", "category", "subtype", "function", "kind")
+        attr_signals = " ".join(
+            str(attrs.get(key) or "") for key in signal_keys if attrs.get(key)
+        )
+        relation_signals = " ".join(prepared.relation_hints or [])
+        return " ".join(
+            [
+                prepared.entity_type,
+                prepared.entity.name,
+                prepared.summary,
+                attr_signals,
+                relation_signals,
+            ]
+        ).lower()
+
     def _agent_identity(self, prepared: PreparedEntityContext) -> Tuple[str, str]:
-        haystack = f"{prepared.entity_type} {prepared.entity.name} {prepared.summary}".lower()
+        haystack = self._identity_signal_text(prepared)
+
+        def has(*tokens: str) -> bool:
+            return any(token in haystack for token in tokens)
+
         if prepared.node_family == "GovernmentActor":
-            if "emergency" in haystack:
+            if has("emergency", "应急", "disaster"):
                 return ("governance", "emergency_office")
-            if "environment" in haystack or "ecology" in haystack:
+            if has("environment", "ecology", "环保", "生态", "环境"):
                 return ("governance", "environment_bureau")
+            if has("inspect", "safety", "监察", "执法", "安全"):
+                return ("governance", "safety_inspector")
             return ("governance", "public_agency")
         if prepared.node_family == "OrganizationActor":
-            if "media" in haystack or "news" in haystack:
+            if has("media", "news", "press", "媒体", "新闻", "报"):
                 return ("organization", "media_outlet")
-            if "school" in haystack or "lab" in haystack or "research" in haystack:
+            if has("school", "lab", "research", "university", "institute", "学校", "研究", "实验"):
                 return ("organization", "research_lab")
-            if "company" in haystack or "enterprise" in haystack or "market" in haystack:
+            if has("ngo", "volunteer", "charity", "conservation", "公益", "志愿", "环保组织"):
+                return ("organization", "conservation_station")
+            if has("company", "enterprise", "market", "factory", "plant", "industry", "企业", "工厂", "市场", "商"):
                 return ("organization", "market_association")
             return ("organization", "community_committee")
         if prepared.node_family == "EcologicalReceptor":
-            if "mangrove" in haystack:
+            if has("mangrove", "habitat", "fish", "reef", "红树", "栖息", "鱼"):
                 return ("ecology", "habitat_species")
-            if "bird" in haystack or "gull" in haystack:
+            if has("bird", "gull", "egret", "鸟", "鸥", "鹭"):
                 return ("ecology", "urban_birds")
+            if has("soil", "microb", "biome", "土壤", "微生物"):
+                return ("ecology", "soil_biome")
             return ("ecology", "urban_ecology")
         if prepared.node_family == "EnvironmentalCarrier":
             return ("carrier", self._default_carriers("generic")[0])
-        if "scient" in haystack or "research" in haystack:
+        if prepared.node_family == "Infrastructure":
+            if has("plant", "factory", "operator", "wastewater", "power", "厂", "处理", "电厂"):
+                return ("organization", "plant_operator")
+            if has("hospital", "clinic", "医院", "诊所"):
+                return ("organization", "community_committee")
+            # Roads / ports / pipelines / hubs propagate flows -> treat as carrier-like infra.
+            return ("infrastructure", "transport_node")
+
+        # HumanActor / unknown family: decide by role signals across the real spectrum.
+        if has("scient", "research", "ecolog", "expert", "professor", "科学", "研究", "专家", "生态学"):
             return ("human", "scientist")
-        if "journal" in haystack or "media" in haystack or "reporter" in haystack:
+        if has("journal", "media", "reporter", "press", "记者", "媒体"):
             return ("human", "journalist")
-        if "worker" in haystack or "factory" in haystack:
+        if has("worker", "factory", "labor", "operator", "工人", "工厂", "操作"):
             return ("human", "worker")
-        if "fisher" in haystack or "farmer" in haystack:
+        if has("fisher", "farmer", "fish", "farm", "渔", "农", "养殖"):
             return ("human", "field_observer")
-        if "activist" in haystack or "volunteer" in haystack or "ngo" in haystack:
+        if has("activist", "volunteer", "ngo", "campaign", "志愿", "环保人士", "倡导"):
             return ("human", "activist")
-        if "white" in haystack or "office" in haystack or "staff" in haystack:
+        if has("official", "officer", "committee", "cadre", "干部", "居委", "社区工作"):
+            return ("human", "community_committee")
+        if has("white", "office", "staff", "employee", "clerk", "白领", "职员", "上班"):
             return ("human", "white_collar")
-        return ("human", "resident")
+        if has("resident", "citizen", "household", "family", "居民", "市民", "住户", "家庭"):
+            return ("human", "resident")
+        # No defensible role signal: be honest rather than silently calling everyone a resident.
+        return ("human", "unspecified")
+
+    def _entity_evidence_refs(
+        self,
+        prepared: PreparedEntityContext,
+        primary_subregion: RegionNode,
+    ) -> List[str]:
+        """Collect evidence anchors for an entity_template profile.
+
+        Mirrors the spirit of the map path's evidence stamping: an anchor only
+        counts if it points at something concrete (the source entity, its
+        observed/detected provenance, a real subregion, or a named relation).
+        Imagined attributes do not become anchors.
+        """
+        refs: List[str] = []
+        attrs = prepared.entity.attributes or {}
+        if prepared.entity.uuid:
+            refs.append(f"entity::{prepared.entity.uuid}")
+        source_kind = str(attrs.get("source_kind") or attrs.get("provenance") or "").strip().lower()
+        if source_kind in {"observed", "detected", "measured", "surveyed"}:
+            refs.append(f"source_kind::{source_kind}")
+        for key in ("osm_id", "feature_id", "ref_id", "external_id"):
+            value = attrs.get(key)
+            if value:
+                refs.append(f"{key}::{value}")
+        if primary_subregion.region_id:
+            refs.append(f"subregion::{primary_subregion.region_id}")
+        return list(dict.fromkeys(ref for ref in refs if ref))[:8]
+
+    def _entity_provenance(
+        self,
+        prepared: PreparedEntityContext,
+        agent_subtype: str,
+        evidence_refs: List[str],
+    ) -> Tuple[str, float, str]:
+        """Decide provenance tier honestly for an entity_template profile.
+
+        - observed: backed by concrete external evidence (source entity carries
+          an observed/detected anchor beyond just a subregion placeholder).
+        - inferred: derived from a real source entity but without independent
+          external corroboration of the assigned role.
+        - assumed: the role itself could not be defended from evidence
+          (identity fell through to "unspecified").
+        Confidence is surfaced honestly: never claim 1.0.
+        """
+        concrete_refs = [
+            ref
+            for ref in evidence_refs
+            if ref
+            and not ref.startswith("subregion::")
+            and not ref.startswith("entity::")
+        ]
+        has_external = bool(concrete_refs)
+        has_source_entity = bool(prepared.entity.uuid)
+
+        if agent_subtype == "unspecified":
+            provenance = "assumed"
+            confidence = 0.3
+            note = "角色无法从证据判定（未定身份）。"
+        elif has_external:
+            provenance = "observed"
+            confidence = 0.74
+            note = "由真实来源实体的观测/探测证据支撑。"
+        elif has_source_entity:
+            provenance = "inferred"
+            confidence = 0.55
+            note = "源自真实来源实体，但角色判定无独立外部证据。"
+        else:
+            provenance = "inferred"
+            confidence = 0.42
+            note = "缺少来源实体锚点，角色由规则推断。"
+        # Encode provenance in grounding_reason in a uniformly parseable way
+        # (`provenance=<tier>; ...`) so downstream can read the tier without a
+        # new model field, mirroring how the map path explains its grounding.
+        reason = f"provenance={provenance}; {note}"
+        return provenance, round(confidence, 3), reason
 
     def _generate_profile_with_llm(
         self,

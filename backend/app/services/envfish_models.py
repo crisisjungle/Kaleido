@@ -974,6 +974,8 @@ class AgentRelationshipEdge:
     mechanism_edge_ids: List[str] = field(default_factory=list)
     origin: str = ""
     validation_status: str = ""
+    epistemic_status: str = "inferred"  # observed | inferred | speculative
+    evidence_anchors: List[str] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -997,6 +999,8 @@ class AgentRelationshipEdge:
             "mechanism_edge_ids": list(dict.fromkeys(self.mechanism_edge_ids)),
             "origin": self.origin,
             "validation_status": self.validation_status,
+            "epistemic_status": self.epistemic_status or "inferred",
+            "evidence_anchors": list(dict.fromkeys(self.evidence_anchors)),
         }
 
 

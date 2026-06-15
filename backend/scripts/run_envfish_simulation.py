@@ -227,7 +227,28 @@ class EnvFishRuntime:
         )
         self.allowed_cross_region_hops = int(self.interaction_policies.get("allowed_cross_region_hops") or 1)
         self.llm_relation_search_budget = int(self.interaction_policies.get("llm_relation_search_budget") or 0)
-        self.edge_promotion_enabled = bool(self.interaction_policies.get("edge_promotion_enabled"))
+        self.edge_promotion_enabled = bool(self.interaction_policies.get("edge_promotion_enabled", True))
+        # M8: relationships are no longer a read-only decoration — an active edge
+        # transmits stress between its endpoint regions (state is a byproduct of
+        # relationships). Bounded by the state gap and edge strength.
+        self.relationship_coupling_enabled = bool(self.interaction_policies.get("relationship_coupling_enabled", True))
+        self.relationship_coupling_gain = float(self.interaction_policies.get("relationship_coupling_gain", 0.06))
+        self.latest_relationship_coupling: Dict[str, Any] = {"coupled_edges": 0, "total_transfer": 0.0}
+
+        # M7: the scenario mechanism graph used to be written-then-frozen — it
+        # never entered the physical loop, so its directions/signs drove nothing.
+        # We now let mechanism edges (whose endpoints map to regions) apply a
+        # LIGHT, BOUNDED, signed nudge to the target region's pressure dimensions.
+        # Guarded behind the mechanism runtime + an explicit flag so legacy runs
+        # are unaffected, and a no-op if no edge endpoint resolves to a region.
+        self.mechanism_propagation_enabled = bool(
+            self.interaction_policies.get("mechanism_propagation_enabled", True)
+        )
+        self.mechanism_propagation_gain = float(
+            self.interaction_policies.get("mechanism_propagation_gain", 0.04)
+        )
+        self.latest_mechanism_propagation: Dict[str, Any] = {"nudged_edges": 0, "total_nudge": 0.0}
+        self._mechanism_region_index: Optional[Dict[str, str]] = None
 
         for region in self.region_graph:
             region["state_vector"] = normalize_state_vector(region.get("state_vector") or {})
@@ -439,6 +460,9 @@ class EnvFishRuntime:
         transition_events = self.risk_event_engine.build_transition_events(previous_bundle, next_bundle)
         if transition_events:
             self.risk_events.extend(transition_events)
+        runtime_events = self.risk_event_engine.build_runtime_events(previous_bundle, next_bundle)
+        if runtime_events:
+            self.risk_events.extend(runtime_events)
 
         artifacts = write_risk_artifacts(
             sim_dir=self.sim_dir,
@@ -476,7 +500,11 @@ class EnvFishRuntime:
             active_variables = self._active_variables(round_num)
             diffusion = self._environmental_diffusion_update(round_num, active_variables)
             interactions = self._agent_interaction_update(round_num, active_variables, diffusion)
+            self._apply_relationship_coupling(round_num)
+            self._apply_mechanism_propagation(round_num)
             feedback = self._human_nature_feedback_update(round_num, active_variables, diffusion, interactions)
+            if isinstance(feedback, dict):
+                feedback["detected_feedback_loops"] = self._detect_feedback_loops()
             snapshot = self._build_snapshot(round_num, active_variables, diffusion, interactions, feedback)
             latest_risk_runtime = self._refresh_risk_runtime(
                 round_num=round_num,
@@ -754,7 +782,7 @@ class EnvFishRuntime:
                 turning_points.append(action_bundle["turning_point"])
 
         self._roll_up_subregions()
-        active_dynamic_edges = [edge for edge in self.dynamic_edge_lookup.values() if edge.get("status") != "expired"]
+        active_dynamic_edges = [edge for edge in self.dynamic_edge_lookup.values() if edge.get("status") not in ("expired", "dormant")]
 
         return {
             "active_agent_ids": [int(actor.get("agent_id", -1)) for actor in active_agents],
@@ -835,7 +863,7 @@ class EnvFishRuntime:
     def _rebuild_dynamic_edge_index(self) -> None:
         self.dynamic_edges_by_source = defaultdict(list)
         for edge in self.dynamic_edge_lookup.values():
-            if edge.get("status") == "expired":
+            if edge.get("status") in ("expired", "dormant"):
                 continue
             try:
                 source_agent_id = int(edge.get("source_agent_id"))
@@ -883,13 +911,14 @@ class EnvFishRuntime:
     def _advance_dynamic_edges(self, round_num: int) -> None:
         changed = False
         for edge in self.dynamic_edge_lookup.values():
-            if edge.get("status") == "expired":
+            if edge.get("status") in ("expired", "dormant"):
                 continue
             previous_status = edge.get("status") or "active"
             expires_after_round = int(edge.get("expires_after_round") or 0)
             if expires_after_round and round_num > expires_after_round:
-                edge["status"] = "expired"
-                self._record_dynamic_edge_event(round_num, "expired", edge)
+                # Relationships are not hard-deleted: they go dormant and keep
+                # their history, so they carry scars and can be reawakened.
+                self._mark_edge_dormant(edge, round_num, "ttl_elapsed")
                 changed = True
                 continue
 
@@ -901,11 +930,14 @@ class EnvFishRuntime:
             if last_activated_round < round_num - 1:
                 decay = clamp_probability(edge.get("decay_per_round") or self.default_dynamic_decay)
                 edge["strength"] = clamp_probability(float(edge.get("strength") or 0) * max(0.0, 1.0 - decay))
-                edge["status"] = "cooling" if float(edge.get("strength") or 0) >= 0.12 else "expired"
+                if float(edge.get("strength") or 0) >= 0.12:
+                    edge["status"] = "cooling"
+                else:
+                    self._mark_edge_dormant(edge, round_num, "decayed")
             else:
                 edge["status"] = "active"
 
-            if edge.get("status") != previous_status:
+            if edge.get("status") not in (previous_status, "dormant"):
                 event_type = "cooling" if edge.get("status") == "cooling" else edge.get("status")
                 self._record_dynamic_edge_event(round_num, str(event_type), edge)
                 changed = True
@@ -913,8 +945,289 @@ class EnvFishRuntime:
         if changed or self.dynamic_edge_lookup:
             self._rebuild_dynamic_edge_index()
 
+    def _mark_edge_dormant(self, edge: Dict[str, Any], round_num: int, reason: str) -> None:
+        edge["status"] = "dormant"
+        edge["dormant_since_round"] = round_num
+        edge.setdefault("history", []).append(
+            {
+                "round": round_num,
+                "event": "dormant",
+                "reason": reason,
+                "strength": clamp_probability(edge.get("strength") or 0),
+            }
+        )
+        self._record_dynamic_edge_event(round_num, "dormant", edge)
+
     def _dynamic_edges_for_source(self, source_agent_id: int) -> List[Dict[str, Any]]:
         return list(self.dynamic_edges_by_source.get(int(source_agent_id), []))
+
+    # Interaction channels and how strongly they transmit stress along an edge.
+    _COUPLING_CHANNEL_GAIN = {
+        "information": 0.5,
+        "social": 0.6,
+        "community": 0.6,
+        "ecological": 1.0,
+        "ecology_corridor_signal": 1.0,
+        "water_flow": 1.0,
+        "transport": 0.8,
+        "economic": 0.7,
+        "governance": 0.6,
+        "mechanism": 0.8,
+    }
+    # Higher = worse; an upstream-stressed source pushes these UP at the target.
+    _COUPLING_PRESSURE_KEYS = ("exposure_score", "spread_pressure", "panic_level", "economic_stress")
+    # Higher = better; a degraded source erodes these at the target.
+    _COUPLING_PROTECT_KEYS = (
+        "ecosystem_integrity",
+        "public_trust",
+        "service_capacity",
+        "response_capacity",
+        "livelihood_stability",
+    )
+
+    def _apply_relationship_coupling(self, round_num: int) -> Dict[str, Any]:
+        """Active dynamic edges transmit stress between their endpoint regions:
+        a strong relationship pulls the target region toward the source region's
+        stressed state. This is what makes the relationship layer DRIVE state
+        instead of being a read-only decoration. The transfer is bounded by the
+        state gap and the edge strength, so it cannot run away."""
+        if not self.relationship_coupling_enabled:
+            return {"coupled_edges": 0, "total_transfer": 0.0}
+        coupled = 0
+        total_transfer = 0.0
+        base_gain = max(0.0, float(self.relationship_coupling_gain))
+        for edge in self.dynamic_edge_lookup.values():
+            if edge.get("status") != "active":
+                continue
+            strength = float(edge.get("strength") or 0.0)
+            if strength < 0.25:
+                continue
+            source_region = self.region_lookup.get(edge.get("source_region_id"))
+            target_region = self.region_lookup.get(edge.get("target_region_id"))
+            if not source_region or not target_region or source_region is target_region:
+                continue
+            channel = str(edge.get("interaction_channel") or edge.get("edge_type") or "").lower()
+            gain = strength * self._COUPLING_CHANNEL_GAIN.get(channel, 0.6) * base_gain
+            if gain <= 0:
+                continue
+            source_state = source_region.get("state_vector") or {}
+            target_state = target_region.get("state_vector") or {}
+            delta: Dict[str, float] = {}
+            for key in self._COUPLING_PRESSURE_KEYS:
+                gap = float(source_state.get(key, 50.0)) - float(target_state.get(key, 50.0))
+                if gap > 0:
+                    delta[key] = round(gap * gain, 3)
+            for key in self._COUPLING_PROTECT_KEYS:
+                gap = float(target_state.get(key, 50.0)) - float(source_state.get(key, 50.0))
+                if gap > 0:
+                    delta[key] = round(-gap * gain * 0.5, 3)
+            if not delta:
+                continue
+            target_region["state_vector"] = merge_state_vectors(target_region.get("state_vector") or {}, delta)
+            edge["last_coupled_round"] = round_num
+            total_transfer += sum(abs(value) for value in delta.values())
+            coupled += 1
+            if coupled <= 40:
+                self._record_dynamic_edge_event(round_num, "coupled", edge)
+        summary = {"coupled_edges": coupled, "total_transfer": round(total_transfer, 3)}
+        self.latest_relationship_coupling = summary
+        return summary
+
+    # Mechanism-edge nudge targets. A positive (amplifying) mechanism edge raises
+    # the target region's PRESSURE dims; a negative (dampening) edge lowers them.
+    # Bounded by a small gain so the mechanism graph informs — not dominates —
+    # the engine. These are the same canonical state keys used elsewhere.
+    _MECHANISM_PRESSURE_KEYS = ("spread_pressure", "exposure_score", "panic_level", "economic_stress")
+    # Mechanism node types that anchor to a place / region in the graph.
+    _MECHANISM_PLACE_NODE_TYPES = {"place", "region", "receptor"}
+
+    def _mechanism_node_region_index(self) -> Dict[str, str]:
+        """Map mechanism-graph node ids -> region_id, when a node clearly anchors
+        to a known region. We resolve by (a) the conventional ``place_<region>``
+        id prefix, (b) an explicit region_id field on the node, or (c) a node name
+        that matches a region name. Built once and cached; empty mapping => the
+        propagation pass is a graceful no-op (we never invent a region)."""
+        if self._mechanism_region_index is not None:
+            return self._mechanism_region_index
+
+        index: Dict[str, str] = {}
+        nodes = list((self.mechanism_graph or {}).get("nodes") or [])
+        for node in nodes:
+            if not isinstance(node, dict):
+                continue
+            node_id = str(node.get("id") or "").strip()
+            if not node_id:
+                continue
+            node_type = str(node.get("node_type") or "").strip().lower()
+            # (b) explicit region binding wins.
+            explicit = str(node.get("region_id") or node.get("home_region_id") or "").strip()
+            if explicit and explicit in self.region_lookup:
+                index[node_id] = explicit
+                continue
+            # (a) conventional place_<region_slug> id: compare slugged region ids.
+            if node_id.startswith("place_"):
+                slug = node_id[len("place_"):]
+                for region_id in self.region_lookup:
+                    if self._mechanism_slug(region_id) == slug:
+                        index[node_id] = region_id
+                        break
+                if node_id in index:
+                    continue
+            # (c) name match against region names (only for place-like nodes, to
+            # avoid binding a process node to a region by coincidental wording).
+            if node_type in self._MECHANISM_PLACE_NODE_TYPES:
+                name_key = str(node.get("name") or "").strip().lower()
+                region_id = self.region_name_lookup.get(name_key)
+                if region_id:
+                    index[node_id] = region_id
+
+        self._mechanism_region_index = index
+        return index
+
+    @staticmethod
+    def _mechanism_slug(value: Any) -> str:
+        text = str(value or "").strip().lower()
+        out = []
+        for ch in text:
+            if ch.isalnum() or "一" <= ch <= "鿿":
+                out.append(ch)
+            else:
+                out.append("_")
+        slug = "".join(out)
+        while "__" in slug:
+            slug = slug.replace("__", "_")
+        return slug.strip("_")
+
+    def _apply_mechanism_propagation(self, round_num: int) -> Dict[str, Any]:
+        """LIGHT, GUARDED mechanism-driven state nudge.
+
+        For each mechanism edge with a signed direction whose endpoints both map
+        to a known region, nudge the target region's pressure dimensions along the
+        edge sign (positive => raise pressure, negative => lower it). The nudge is
+        scaled by the edge confidence and a small gain, and is bounded by
+        merge_state_vectors' clamp — it can inform but never dominate the engine.
+
+        Conservative by construction: if the mechanism runtime is off, the flag is
+        off, or no edge endpoint resolves to a region, this is a graceful no-op and
+        the run loop is unaffected (legacy/non-mechanism runs see nothing)."""
+        summary = {"nudged_edges": 0, "total_nudge": 0.0}
+        if not self.is_mechanism_runtime or not self.mechanism_propagation_enabled:
+            self.latest_mechanism_propagation = summary
+            return summary
+
+        mechanism_edges = list((self.mechanism_graph or {}).get("edges") or [])
+        if not mechanism_edges:
+            self.latest_mechanism_propagation = summary
+            return summary
+
+        region_index = self._mechanism_node_region_index()
+        if not region_index:
+            self.latest_mechanism_propagation = summary
+            return summary
+
+        base_gain = max(0.0, float(self.mechanism_propagation_gain))
+        if base_gain <= 0:
+            self.latest_mechanism_propagation = summary
+            return summary
+
+        nudged = 0
+        total_nudge = 0.0
+        for edge in mechanism_edges:
+            if not isinstance(edge, dict):
+                continue
+            direction = str(edge.get("direction") or "").strip().lower()
+            if direction == "positive":
+                sign = 1.0
+            elif direction == "negative":
+                sign = -1.0
+            else:
+                # bidirectional/conditional/unknown carry no defensible sign here.
+                continue
+            target_region_id = region_index.get(str(edge.get("target") or "").strip())
+            if not target_region_id:
+                continue
+            target_region = self.region_lookup.get(target_region_id)
+            if not target_region:
+                continue
+            confidence = clamp_probability(edge.get("confidence", 0.5))
+            magnitude = sign * confidence * base_gain * 100.0
+            if magnitude == 0:
+                continue
+            delta = {key: round(magnitude, 3) for key in self._MECHANISM_PRESSURE_KEYS}
+            target_region["state_vector"] = merge_state_vectors(
+                target_region.get("state_vector") or {}, delta
+            )
+            nudged += 1
+            total_nudge += abs(magnitude) * len(self._MECHANISM_PRESSURE_KEYS)
+
+        summary = {"nudged_edges": nudged, "total_nudge": round(total_nudge, 3)}
+        self.latest_mechanism_propagation = summary
+        return summary
+
+    # Channels that tend to DAMPEN (negative feedback) rather than amplify.
+    _BALANCING_CHANNELS = {"governance", "response", "service", "mechanism"}
+
+    def _detect_feedback_loops(self, max_length: int = 5, max_loops: int = 12) -> List[Dict[str, Any]]:
+        """Detect directed cycles among ACTIVE relationships at the region level —
+        the reinforcing/balancing feedback loops that are the heart of systems
+        thinking but were never computed (the old feedback tab rendered a fixed
+        decorative chain template). Polarity is a transparent channel heuristic,
+        explicitly flagged as such."""
+        adjacency: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+        for edge in self.dynamic_edge_lookup.values():
+            if edge.get("status") not in ("active", "stable"):
+                continue
+            src = edge.get("source_region_id")
+            dst = edge.get("target_region_id")
+            if not src or not dst or src == dst:
+                continue
+            adjacency[src].append(
+                {"to": dst, "channel": str(edge.get("interaction_channel") or edge.get("edge_type") or "")}
+            )
+
+        loops: List[Dict[str, Any]] = []
+        seen_signatures: set = set()
+
+        def dfs(start: str, current: str, path: List[str], channels: List[str]) -> None:
+            if len(loops) >= max_loops:
+                return
+            for nxt in adjacency.get(current, []):
+                target = nxt["to"]
+                if target == start and len(path) >= 2:
+                    signature = self._loop_signature(path)
+                    if signature not in seen_signatures:
+                        seen_signatures.add(signature)
+                        loops.append(
+                            self._build_loop_record(path, channels + [nxt["channel"]], len(loops) + 1)
+                        )
+                    continue
+                if target in path or len(path) >= max_length:
+                    continue
+                dfs(start, target, path + [target], channels + [nxt["channel"]])
+
+        for node in list(adjacency.keys()):
+            if len(loops) >= max_loops:
+                break
+            dfs(node, node, [node], [])
+        return loops
+
+    def _loop_signature(self, cycle: List[str]) -> str:
+        # rotation-invariant signature so the same cycle is not counted N times
+        rotations = ["||".join(cycle[i:] + cycle[:i]) for i in range(len(cycle))]
+        return min(rotations) if rotations else ""
+
+    def _build_loop_record(self, regions: List[str], channels: List[str], index: int) -> Dict[str, Any]:
+        names = [self.region_lookup.get(region, {}).get("name", region) for region in regions]
+        balancing = any(str(channel).lower() in self._BALANCING_CHANNELS for channel in channels)
+        return {
+            "loop_id": f"loop_{index}",
+            "regions": list(regions),
+            "region_names": names,
+            "length": len(regions),
+            "channels": list(channels),
+            "loop_type": "balancing" if balancing else "reinforcing",
+            "classification_basis": "heuristic_channel",
+        }
 
     def _candidate_relationship_edges(self, actor: Dict[str, Any]) -> List[Dict[str, Any]]:
         actor_id = int(actor.get("agent_id", -1))
@@ -1336,6 +1649,11 @@ class EnvFishRuntime:
         edge = self.dynamic_edge_lookup.get(edge_id)
 
         if edge:
+            if edge.get("status") == "dormant":
+                # a dormant relationship re-forms: reawaken it, keeping its scar history
+                edge.setdefault("history", []).append({"round": round_num, "event": "reawakened", "reason": "reconfirmed"})
+                edge["reawakened_round"] = round_num
+                self._record_dynamic_edge_event(round_num, "reawakened", edge)
             edge["strength"] = clamp_probability(max(float(edge.get("strength") or 0), strength))
             edge["confidence"] = clamp_probability(max(float(edge.get("confidence") or 0), confidence))
             edge["ttl_rounds"] = max(int(edge.get("ttl_rounds") or 1), ttl_rounds)
@@ -1351,6 +1669,7 @@ class EnvFishRuntime:
             edge["rationale"] = str(proposal.get("rationale") or edge.get("rationale") or "")
             edge["reconfirm_count"] = int(edge.get("reconfirm_count") or 1) + 1
             self._record_dynamic_edge_event(round_num, "updated", edge)
+            self._maybe_promote_edge(edge, round_num)
         else:
             edge = {
                 "edge_id": edge_id,
@@ -1380,8 +1699,29 @@ class EnvFishRuntime:
             self.dynamic_edge_lookup[edge_id] = edge
             self._record_dynamic_edge_event(round_num, "created", edge)
 
+        self._maybe_promote_edge(edge, round_num)
         self._rebuild_dynamic_edge_index()
         return edge
+
+    def _maybe_promote_edge(self, edge: Dict[str, Any], round_num: int) -> bool:
+        """Promote a repeatedly-reconfirmed, strong relationship into the stable
+        structural skeleton — relationships that keep re-forming should consolidate
+        instead of jittering create/expire/recreate forever. Lowered to reconfirm
+        >= 2 (the old >= 3 + disabled-by-default meant 0 promotions ever fired)."""
+        if not self.edge_promotion_enabled or edge.get("layer") == "structural":
+            return False
+        if (
+            int(edge.get("reconfirm_count") or 0) >= 2
+            and float(edge.get("strength") or 0) >= 0.55
+            and float(edge.get("confidence") or 0) >= 0.6
+        ):
+            edge["layer"] = "structural"
+            edge["origin"] = "runtime_promoted"
+            edge["status"] = "stable"
+            edge["expires_after_round"] = self.total_rounds + int(edge.get("ttl_rounds") or self.default_dynamic_ttl)
+            self._record_dynamic_edge_event(round_num, "promoted", edge)
+            return True
+        return False
 
     def _activate_dynamic_edge(self, edge_id: str, round_num: int) -> None:
         edge = self.dynamic_edge_lookup.get(edge_id)
@@ -1396,16 +1736,7 @@ class EnvFishRuntime:
             round_num + int(edge.get("ttl_rounds") or self.default_dynamic_ttl) - 1,
         )
         edge["reconfirm_count"] = int(edge.get("reconfirm_count") or 1) + 1
-        if (
-            self.edge_promotion_enabled
-            and int(edge.get("reconfirm_count") or 0) >= 3
-            and float(edge.get("strength") or 0) >= 0.62
-            and float(edge.get("confidence") or 0) >= 0.7
-        ):
-            edge["layer"] = "structural"
-            edge["origin"] = "runtime_promoted"
-            edge["status"] = "stable"
-            edge["expires_after_round"] = self.total_rounds + int(edge.get("ttl_rounds") or self.default_dynamic_ttl)
+        self._maybe_promote_edge(edge, round_num)
         self._record_dynamic_edge_event(round_num, "activated", edge)
         self._rebuild_dynamic_edge_index()
 
@@ -1810,7 +2141,7 @@ class EnvFishRuntime:
         dynamic_edges = [
             self._serialize_dynamic_edge(edge)
             for edge in self.dynamic_edge_lookup.values()
-            if edge.get("status") != "expired"
+            if edge.get("status") not in ("expired", "dormant")
         ]
         dynamic_edges.sort(
             key=lambda item: (
