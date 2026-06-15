@@ -391,20 +391,11 @@ class SimulationRunner:
             cls._graph_memory_enabled[simulation_id] = False
         
         # 确定运行哪个脚本（脚本位于 backend/scripts/ 目录）
-        if engine_mode == "envfish":
-            script_name = "run_envfish_simulation.py"
-            state.twitter_running = True
-            state.reddit_running = True
-        elif platform == "twitter":
-            script_name = "run_twitter_simulation.py"
-            state.twitter_running = True
-        elif platform == "reddit":
-            script_name = "run_reddit_simulation.py"
-            state.reddit_running = True
-        else:
-            script_name = "run_parallel_simulation.py"
-            state.twitter_running = True
-            state.reddit_running = True
+        # OASIS Twitter/Reddit/parallel social-simulation paths are retired —
+        # Kaleido always runs the envfish ecological relationship engine.
+        script_name = "run_envfish_simulation.py"
+        state.twitter_running = True
+        state.reddit_running = True
         
         script_path = os.path.join(cls.SCRIPTS_DIR, script_name)
         
