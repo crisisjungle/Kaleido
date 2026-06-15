@@ -396,6 +396,171 @@ HAZARD_TEMPLATE_CATALOG: Dict[str, Dict[str, Any]] = {
     },
 }
 
+# M6: the hazard catalog's secondary_channels used to be dead strings — they were
+# never consumed by the runtime. This table gives each known channel a *defensible
+# qualitative* binding: which receptor dimension of the target state-vector it
+# preferentially loads, and a relative gain (a multiplier on the per-channel share
+# of a transfer, NOT a calibrated effect size). Channels absent from this table
+# fall back to a neutral default in build_propagation_channels, so legacy/unknown
+# channels remain a graceful no-op rather than an error. Honest-by-design: these
+# are direction+sign hints, never claims of magnitude precision.
+PROPAGATION_CHANNEL_RULES: Dict[str, Dict[str, Any]] = {
+    # marine / coastal
+    "sediment_retention": {"receptor_dim": "spread_pressure", "gain": 1.15, "label": "沉积物滞留"},
+    "food_web_bioaccumulation": {"receptor_dim": "ecosystem_integrity", "gain": 1.25, "label": "食物网累积"},
+    "shoreline_exposure": {"receptor_dim": "exposure_score", "gain": 1.2, "label": "岸线暴露"},
+    "nutrient_accumulation": {"receptor_dim": "ecosystem_integrity", "gain": 1.1, "label": "营养盐累积"},
+    "hypoxia": {"receptor_dim": "ecosystem_integrity", "gain": 1.3, "label": "低氧"},
+    "fishery_exposure": {"receptor_dim": "exposure_score", "gain": 1.1, "label": "渔业暴露"},
+    "saline_intrusion": {"receptor_dim": "ecosystem_integrity", "gain": 1.1, "label": "盐水入侵"},
+    "debris_transport": {"receptor_dim": "spread_pressure", "gain": 1.05, "label": "漂浮碎片"},
+    "harbor_contamination": {"receptor_dim": "exposure_score", "gain": 1.1, "label": "港湾污染"},
+    "coastal_backflow": {"receptor_dim": "spread_pressure", "gain": 1.1, "label": "沿海回灌"},
+    # atmospheric / fallout / wildfire
+    "dry_wet_deposition": {"receptor_dim": "exposure_score", "gain": 1.2, "label": "干湿沉降"},
+    "surface_runoff": {"receptor_dim": "spread_pressure", "gain": 1.1, "label": "地表径流"},
+    "soil_accumulation": {"receptor_dim": "ecosystem_integrity", "gain": 1.15, "label": "土壤累积"},
+    "ash_runoff": {"receptor_dim": "spread_pressure", "gain": 1.1, "label": "灰烬径流"},
+    "soil_hydrophobicity": {"receptor_dim": "ecosystem_integrity", "gain": 1.1, "label": "土壤疏水化"},
+    "habitat_loss": {"receptor_dim": "ecosystem_integrity", "gain": 1.3, "label": "栖息地丧失"},
+    "acid_deposition": {"receptor_dim": "ecosystem_integrity", "gain": 1.15, "label": "酸性沉降"},
+    "river_siltation": {"receptor_dim": "spread_pressure", "gain": 1.05, "label": "河道淤积"},
+    # inland water
+    "reservoir_retention": {"receptor_dim": "spread_pressure", "gain": 1.15, "label": "库区滞留"},
+    "groundwater_exchange": {"receptor_dim": "spread_pressure", "gain": 1.1, "label": "地下水交换"},
+    "irrigation_exposure": {"receptor_dim": "exposure_score", "gain": 1.2, "label": "灌溉暴露"},
+    "sewage_overflow": {"receptor_dim": "exposure_score", "gain": 1.15, "label": "污水外溢"},
+    "sediment_rework": {"receptor_dim": "spread_pressure", "gain": 1.05, "label": "沉积再悬浮"},
+    "food_chain_exposure": {"receptor_dim": "exposure_score", "gain": 1.15, "label": "食物链暴露"},
+    "service_disruption": {"receptor_dim": "spread_pressure", "gain": 1.05, "label": "服务受压"},
+    # ecological / bio
+    "habitat_corridor": {"receptor_dim": "spread_pressure", "gain": 1.2, "label": "栖息地走廊"},
+    "human_transport_vector": {"receptor_dim": "spread_pressure", "gain": 1.25, "label": "人为携带"},
+    "establishment_feedback": {"receptor_dim": "ecosystem_integrity", "gain": 1.2, "label": "建立反馈"},
+    "host_density": {"receptor_dim": "spread_pressure", "gain": 1.15, "label": "宿主密度"},
+    "vector_mobility": {"receptor_dim": "spread_pressure", "gain": 1.25, "label": "媒介移动"},
+    "habitat_fragmentation": {"receptor_dim": "ecosystem_integrity", "gain": 1.2, "label": "栖息地破碎化"},
+    # cascade / impact
+    "landslide": {"receptor_dim": "spread_pressure", "gain": 1.2, "label": "滑坡"},
+    "liquefaction": {"receptor_dim": "ecosystem_integrity", "gain": 1.1, "label": "液化"},
+    "pipeline_release": {"receptor_dim": "exposure_score", "gain": 1.2, "label": "管线泄漏"},
+    "lahar_runoff": {"receptor_dim": "spread_pressure", "gain": 1.2, "label": "火山泥流"},
+    "ejecta_fallout": {"receptor_dim": "exposure_score", "gain": 1.2, "label": "抛射物沉降"},
+    "wildfire_trigger": {"receptor_dim": "ecosystem_integrity", "gain": 1.2, "label": "次生火灾"},
+    "impact_tsunami": {"receptor_dim": "spread_pressure", "gain": 1.3, "label": "撞击海啸"},
+    # drought / slow decline
+    "water_shortage": {"receptor_dim": "ecosystem_integrity", "gain": 1.2, "label": "水资源短缺"},
+    "vegetation_dieback": {"receptor_dim": "ecosystem_integrity", "gain": 1.3, "label": "植被衰退"},
+    "wildfire_susceptibility": {"receptor_dim": "exposure_score", "gain": 1.1, "label": "火险易感"},
+    # generic
+    "environmental_link": {"receptor_dim": "exposure_score", "gain": 1.0, "label": "环境链路"},
+}
+
+# Receptor dimensions a propagation channel is allowed to load. Any channel that
+# resolves to a dimension outside this set is rejected (a no-op) so a malformed
+# config can never push a transfer into an unintended state variable.
+PROPAGATION_RECEPTOR_DIMS = {"exposure_score", "spread_pressure", "ecosystem_integrity"}
+
+# The default binding for an unknown / free-text channel: neutral gain on the
+# generic exposure dimension. Keeps unknown channels honest (they nudge nothing
+# extra) instead of silently dropping the whole modulation pass.
+DEFAULT_PROPAGATION_CHANNEL_RULE = {"receptor_dim": "exposure_score", "gain": 1.0, "label": "未知通道"}
+
+
+def get_propagation_channel_rule(channel: Optional[str]) -> Dict[str, Any]:
+    """Resolve a (possibly free-text) channel name to its receptor binding.
+
+    Lookup is exact then normalized (spaces/dashes -> underscores, lowercased).
+    Unknown channels fall back to the neutral default so the runtime can always
+    treat the return value uniformly without special-casing."""
+    raw = str(channel or "").strip()
+    if not raw:
+        return dict(DEFAULT_PROPAGATION_CHANNEL_RULE)
+    if raw in PROPAGATION_CHANNEL_RULES:
+        return dict(PROPAGATION_CHANNEL_RULES[raw])
+    normalized = raw.lower().replace("-", "_").replace(" ", "_")
+    rule = PROPAGATION_CHANNEL_RULES.get(normalized)
+    if rule:
+        return dict(rule)
+    return dict(DEFAULT_PROPAGATION_CHANNEL_RULE)
+
+
+def build_propagation_channels(
+    secondary_channels: Optional[List[str]] = None,
+    impact_chain: Optional[List[str]] = None,
+    extra_channels: Optional[List[Dict[str, Any]]] = None,
+) -> List[Dict[str, Any]]:
+    """Turn a hazard template's (previously dead) ``secondary_channels`` strings
+    plus its ``impact_chain`` into structured, runtime-consumable propagation
+    channels. Each channel is an honest direction+sign hint, not a calibrated
+    coefficient — ``epistemic_status`` defaults to ``inferred`` and the gain is a
+    *relative* multiplier on the channel's share of a transfer.
+
+    ``extra_channels`` lets a caller pass already-structured channels (e.g. from a
+    LLM scenario plan); these are normalized and merged. The function is purely
+    additive and returns ``[]`` for empty input, so legacy runs are unaffected."""
+    channels: List[Dict[str, Any]] = []
+    seen: set[str] = set()
+    chain = [str(step) for step in (impact_chain or []) if str(step).strip()]
+
+    def _append(channel_id: str, rule: Dict[str, Any], mechanism: str, epistemic_status: str) -> None:
+        key = channel_id.lower()
+        if not channel_id or key in seen:
+            return
+        receptor_dim = str(rule.get("receptor_dim") or "exposure_score")
+        if receptor_dim not in PROPAGATION_RECEPTOR_DIMS:
+            receptor_dim = "exposure_score"
+        seen.add(key)
+        channels.append(
+            {
+                "channel_id": channel_id,
+                "label": str(rule.get("label") or channel_id),
+                "receptor_dim": receptor_dim,
+                "gain": round(max(0.0, float(rule.get("gain", 1.0))), 3),
+                "mechanism": str(mechanism or ""),
+                "confidence": clamp_probability(rule.get("confidence", 0.5)),
+                "epistemic_status": str(rule.get("epistemic_status") or epistemic_status or "inferred"),
+                "evidence_anchors": list(rule.get("evidence_anchors") or []),
+            }
+        )
+
+    for idx, channel in enumerate(secondary_channels or []):
+        channel_id = str(channel or "").strip()
+        if not channel_id:
+            continue
+        rule = get_propagation_channel_rule(channel_id)
+        mechanism = chain[idx] if idx < len(chain) else " → ".join(chain) if chain else ""
+        _append(channel_id, rule, mechanism, "inferred")
+
+    for channel in extra_channels or []:
+        if not isinstance(channel, dict):
+            continue
+        channel_id = str(channel.get("channel_id") or channel.get("id") or channel.get("name") or "").strip()
+        if not channel_id:
+            continue
+        base = get_propagation_channel_rule(channel_id)
+        if channel.get("receptor_dim"):
+            base["receptor_dim"] = channel.get("receptor_dim")
+        if channel.get("gain") is not None:
+            base["gain"] = channel.get("gain")
+        if channel.get("label"):
+            base["label"] = channel.get("label")
+        if channel.get("confidence") is not None:
+            base["confidence"] = channel.get("confidence")
+        if channel.get("epistemic_status"):
+            base["epistemic_status"] = channel.get("epistemic_status")
+        if channel.get("evidence_anchors"):
+            base["evidence_anchors"] = channel.get("evidence_anchors")
+        _append(
+            channel_id,
+            base,
+            str(channel.get("mechanism") or ""),
+            str(channel.get("epistemic_status") or "speculative"),
+        )
+
+    return channels
+
+
 NODE_FAMILY_KEYWORDS = {
     "Region": ("region", "city", "county", "district", "province", "coast", "bay", "port", "island"),
     "EnvironmentalCarrier": ("current", "river", "air", "wind", "soil", "water", "ocean", "stream"),
@@ -500,6 +665,8 @@ def build_transport_profile(
     primary_family: Optional[str],
     secondary_channels: Optional[List[str]] = None,
     context_provider: Optional[str] = None,
+    impact_chain: Optional[List[str]] = None,
+    extra_propagation_channels: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     family = normalize_transport_family(primary_family)
     rules = get_template_rules(family)
@@ -507,6 +674,13 @@ def build_transport_profile(
     return {
         "primary_family": family,
         "secondary_channels": list(secondary_channels or []),
+        # M6: structured, runtime-consumable form of secondary_channels. Additive
+        # and defaults to [] for legacy callers that pass nothing.
+        "propagation_channels": build_propagation_channels(
+            secondary_channels=secondary_channels,
+            impact_chain=impact_chain,
+            extra_channels=extra_propagation_channels,
+        ),
         "default_lag_rounds": max(0, int(rules.get("default_lag_rounds", 1))),
         "default_decay": clamp_probability(rules.get("default_decay", 0.88)),
         "default_persistence": clamp_score(rules.get("default_persistence", 55)),

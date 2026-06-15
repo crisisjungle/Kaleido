@@ -12,9 +12,46 @@ import os
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 
+# Additive edge-layer taxonomy so the frontend can separate the spatial skeleton
+# from causal coupling instead of rendering one undifferentiated hairball.
+# "spatial_fact" = grounded structural skeleton (regions, hierarchy, transport,
+# agent anchoring); "causal" = inferred/dynamic relationships that carry coupling.
+SPATIAL_FACT_FACT_TYPES = {
+    "region_neighbor",
+    "region_hierarchy",
+    "subregion_parent",
+    "transport_edge",
+    "agent_anchor",
+}
+CAUSAL_FACT_TYPES = {
+    "agent_influence",
+    "dynamic_edge",
+}
+
+
 class SimulationRealtimeGraphBuilder:
     def __init__(self, sim_dir: str):
         self.sim_dir = sim_dir
+
+    def _edge_layer_for(self, *, fact_type: str, name: str, attributes: Dict[str, Any]) -> str:
+        """Classify an edge into the spatial skeleton vs the causal coupling layer.
+
+        Additive only: callers may pass an explicit ``edge_layer`` to override.
+        agent_relationship edges are surfaced via the relationships emitter and are
+        causal (they encode inferred coupling between agents).
+        """
+        ft = str(fact_type or "").strip().lower()
+        nm = str(name or "").strip().lower()
+        if ft in SPATIAL_FACT_FACT_TYPES or nm in {"neighbor_of", "belongs_to", "located_in"}:
+            return "spatial_fact"
+        if ft in CAUSAL_FACT_TYPES or nm == "influences_region":
+            return "causal"
+        # Structural agent relationships and any other LLM-derived relation are causal.
+        if str(attributes.get("kind") or "").lower() == "structural_agent_relationship":
+            return "causal"
+        # region_hierarchy via belongs_to handled above; default unknown relations to causal
+        # since the spatial skeleton is an explicit, enumerable set.
+        return "causal"
 
     def build(self) -> Dict[str, Any]:
         regions = self._load_json("region_graph_snapshot.json", [])
@@ -329,6 +366,9 @@ class SimulationRealtimeGraphBuilder:
                 dynamic_edge_id=edge_id,
             )
 
+        spatial_edge_count = sum(1 for edge in edges if edge.get("edge_layer") == "spatial_fact")
+        causal_edge_count = sum(1 for edge in edges if edge.get("edge_layer") == "causal")
+
         return {
             "nodes": nodes,
             "edges": edges,
@@ -340,6 +380,9 @@ class SimulationRealtimeGraphBuilder:
                 "dynamic_edge_count": len(dynamic_edges),
                 "node_count": len(nodes),
                 "edge_count": len(edges),
+                # Additive: lets the frontend separate skeleton from coupling.
+                "spatial_fact_edge_count": spatial_edge_count,
+                "causal_edge_count": causal_edge_count,
             },
         }
 
@@ -395,6 +438,7 @@ class SimulationRealtimeGraphBuilder:
         fact: str = "",
         attributes: Optional[Dict[str, Any]] = None,
         dynamic_edge_id: str = "",
+        edge_layer: Optional[str] = None,
     ) -> None:
         edge_key = str(edge_id or "")
         if not edge_key:
@@ -402,18 +446,50 @@ class SimulationRealtimeGraphBuilder:
         if edge_key in edge_ids:
             return
         edge_ids.add(edge_key)
-        edges.append(
-            {
-                "uuid": edge_key,
-                "name": name or "related_to",
-                "fact": fact or "",
-                "fact_type": fact_type or "related_to",
-                "source_node_uuid": source_node_uuid,
-                "target_node_uuid": target_node_uuid,
-                "attributes": attributes or {},
-                "dynamic_edge_id": dynamic_edge_id or None,
-            }
+        attrs = attributes or {}
+
+        # Additive semantic tagging so the frontend can split the spatial skeleton
+        # from causal coupling instead of flattening every edge into one hairball.
+        layer = str(edge_layer or "").strip() or self._edge_layer_for(
+            fact_type=fact_type, name=name, attributes=attrs
         )
+
+        # Surface provenance / epistemic honesty where the source data carries it.
+        provenance = (
+            attrs.get("origin")
+            or attrs.get("relation_origin")
+            or ("structural" if layer == "spatial_fact" else None)
+        )
+        epistemic = (
+            attrs.get("epistemic_status")
+            or attrs.get("validation_status")
+            or ("observed" if layer == "spatial_fact" else "inferred")
+        )
+        # Surface the interaction/transport channel where present so the frontend
+        # can bucket causal edges by channel.
+        channel = (
+            attrs.get("interaction_channel")
+            or attrs.get("channel_type")
+            or attrs.get("channel")
+        )
+
+        edge_payload: Dict[str, Any] = {
+            "uuid": edge_key,
+            "name": name or "related_to",
+            "fact": fact or "",
+            "fact_type": fact_type or "related_to",
+            "source_node_uuid": source_node_uuid,
+            "target_node_uuid": target_node_uuid,
+            "attributes": attrs,
+            "dynamic_edge_id": dynamic_edge_id or None,
+            # Additive honesty/semantic keys (do not remove keys the frontend reads).
+            "edge_layer": layer,
+            "provenance": provenance,
+            "epistemic": epistemic,
+        }
+        if channel is not None:
+            edge_payload["channel"] = channel
+        edges.append(edge_payload)
 
     def _agent_labels(self, profile: Dict[str, Any]) -> List[str]:
         labels: List[str] = ["Entity"]

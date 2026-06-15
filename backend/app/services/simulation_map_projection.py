@@ -75,6 +75,17 @@ class SimulationMapProjectionBuilder:
         ) or context.get("center") or {"lat": 20.0, "lon": 0.0}
         radius_m = int(context.get("radius_m") or 0)
 
+        # Additive honesty: distinguish map-seed grounded projections from pure
+        # synthetic (radial/hash) scatter so the frontend can render "非地理示意"
+        # instead of dressing a hash layout as real geography.
+        geographic_node_count = sum(1 for node in projected_nodes if node.get("is_geographic"))
+        synthetic_node_count = len(projected_nodes) - geographic_node_count
+        has_anchor_context = bool(context.get("anchor_points"))
+        if geographic_node_count > 0 and has_anchor_context:
+            geographic_grounding = "map_seed"
+        else:
+            geographic_grounding = "synthetic"
+
         return {
             "simulation_id": self.simulation_id,
             "source_mode": self.source_mode,
@@ -84,6 +95,8 @@ class SimulationMapProjectionBuilder:
             "zoom_hint": self._zoom_hint_from_radius(radius_m),
             "analysis_polygon": context.get("analysis_polygon"),
             "layers": list(context.get("layers") or []),
+            # Additive top-level honesty flag.
+            "geographic_grounding": geographic_grounding,
             "nodes": projected_nodes,
             "edges": projected_edges,
             "meta": {
@@ -96,6 +109,10 @@ class SimulationMapProjectionBuilder:
                 "has_map_seed_context": bool(self.map_seed_id and map_layers_payload),
                 "water_polygon_count": len(context.get("water_geometries") or []),
                 "anchor_point_count": len(context.get("anchor_points") or []),
+                # Additive: per-node grounding breakdown.
+                "geographic_node_count": geographic_node_count,
+                "synthetic_node_count": synthetic_node_count,
+                "geographic_grounding": geographic_grounding,
             },
         }
 
@@ -300,8 +317,9 @@ class SimulationMapProjectionBuilder:
             node_id = item["uuid"]
             if node_id in position_by_id or item["kind"] != "region":
                 continue
-            lat, lon = self._place_region_node(item, context=context, used_points=used_points)
+            lat, lon, anchored = self._place_region_node(item, context=context, used_points=used_points)
             position_by_id[node_id] = (lat, lon)
+            item["anchored_to_real_feature"] = anchored
             used_points.append((lat, lon))
 
         # Subregion placement.
@@ -309,7 +327,7 @@ class SimulationMapProjectionBuilder:
             node_id = item["uuid"]
             if node_id in position_by_id or item["kind"] != "subregion":
                 continue
-            lat, lon = self._place_subregion_node(
+            lat, lon, anchored = self._place_subregion_node(
                 item,
                 context=context,
                 region_by_key=region_by_key,
@@ -317,6 +335,7 @@ class SimulationMapProjectionBuilder:
                 used_points=used_points,
             )
             position_by_id[node_id] = (lat, lon)
+            item["anchored_to_real_feature"] = anchored
             used_points.append((lat, lon))
 
         # Agent placement.
@@ -324,7 +343,7 @@ class SimulationMapProjectionBuilder:
             node_id = item["uuid"]
             if node_id in position_by_id or item["kind"] != "agent":
                 continue
-            lat, lon = self._place_agent_node(
+            lat, lon, anchored = self._place_agent_node(
                 item,
                 context=context,
                 region_by_key=region_by_key,
@@ -334,6 +353,7 @@ class SimulationMapProjectionBuilder:
                 used_points=used_points,
             )
             position_by_id[node_id] = (lat, lon)
+            item["anchored_to_real_feature"] = anchored
             used_points.append((lat, lon))
 
         # Any remaining node types.
@@ -341,8 +361,9 @@ class SimulationMapProjectionBuilder:
             node_id = item["uuid"]
             if node_id in position_by_id:
                 continue
-            lat, lon = self._place_generic_node(item, context=context, used_points=used_points)
+            lat, lon, anchored = self._place_generic_node(item, context=context, used_points=used_points)
             position_by_id[node_id] = (lat, lon)
+            item["anchored_to_real_feature"] = anchored
             used_points.append((lat, lon))
 
         projected_nodes: List[Dict[str, Any]] = []
@@ -355,7 +376,15 @@ class SimulationMapProjectionBuilder:
             attributes["lat"] = round(lat, 6)
             attributes["lon"] = round(lon, 6)
             attributes["map_kind"] = item["kind"]
-            attributes["map_projected"] = not bool(item["attributes"].get("lat") and item["attributes"].get("lon"))
+            had_real_coords = bool(item["attributes"].get("lat") and item["attributes"].get("lon"))
+            attributes["map_projected"] = not had_real_coords
+            # Additive honesty flag: when the node had no real lat/lon and we fell
+            # back to radial/hash synthetic placement, this is NOT geographically
+            # grounded. The frontend uses this to label "非地理示意" instead of
+            # pretending the dot is a real location.
+            is_geographic = had_real_coords or bool(item.get("anchored_to_real_feature"))
+            attributes["is_geographic"] = is_geographic
+            attributes["placement"] = "geographic" if is_geographic else "synthetic"
             projected_nodes.append(
                 {
                     "uuid": node_id,
@@ -363,6 +392,7 @@ class SimulationMapProjectionBuilder:
                     "labels": item["labels"],
                     "summary": item["summary"],
                     "kind": item["kind"],
+                    "is_geographic": is_geographic,
                     "attributes": attributes,
                 }
             )
@@ -375,7 +405,7 @@ class SimulationMapProjectionBuilder:
         *,
         context: Dict[str, Any],
         used_points: List[Tuple[float, float]],
-    ) -> Tuple[float, float]:
+    ) -> Tuple[float, float, bool]:
         attributes = node.get("attributes") or {}
         region_type = str(attributes.get("region_type") or "")
         desired_tags = self._desired_tags_for_region(region_type)
@@ -389,7 +419,7 @@ class SimulationMapProjectionBuilder:
             index = self._stable_hash_mod(f"region::{node['uuid']}", len(candidates))
             candidate = candidates[index]
             lat, lon = candidate["lat"], candidate["lon"]
-            return self._resolve_conflict(
+            resolved = self._resolve_conflict(
                 lat=lat,
                 lon=lon,
                 used_points=used_points,
@@ -398,7 +428,9 @@ class SimulationMapProjectionBuilder:
                 require_water=require_water,
                 stable_key=node["uuid"],
             )
-        return self._radial_fallback(
+            # Anchored to a real map-seed feature -> geographically grounded.
+            return resolved[0], resolved[1], True
+        fallback = self._radial_fallback(
             center=context["center"],
             stable_key=f"region-fallback::{node['uuid']}",
             used_points=used_points,
@@ -407,6 +439,8 @@ class SimulationMapProjectionBuilder:
             require_water=require_water,
             radius_m=1200.0,
         )
+        # Synthetic radial/hash placement -> NOT geographically grounded.
+        return fallback[0], fallback[1], False
 
     def _place_subregion_node(
         self,
@@ -416,7 +450,7 @@ class SimulationMapProjectionBuilder:
         region_by_key: Dict[str, str],
         position_by_id: Dict[str, Tuple[float, float]],
         used_points: List[Tuple[float, float]],
-    ) -> Tuple[float, float]:
+    ) -> Tuple[float, float, bool]:
         attributes = node.get("attributes") or {}
         parent_ref = str(attributes.get("parent_region_id") or "").strip()
         parent_id = region_by_key.get(parent_ref) or region_by_key.get(str(node.get("name") or "").split("·")[0])
@@ -437,7 +471,7 @@ class SimulationMapProjectionBuilder:
 
         region_type = str(attributes.get("region_type") or "")
         require_water = self._prefers_water(region_type, fallback_name=node.get("name"))
-        return self._radial_fallback(
+        fallback = self._radial_fallback(
             center={"lat": parent_position[0], "lon": parent_position[1]},
             stable_key=f"subregion::{node['uuid']}",
             used_points=used_points,
@@ -446,6 +480,8 @@ class SimulationMapProjectionBuilder:
             require_water=require_water,
             radius_m=radius_m,
         )
+        # Subregions are offset radially from a parent center -> synthetic placement.
+        return fallback[0], fallback[1], False
 
     def _place_agent_node(
         self,
@@ -457,7 +493,7 @@ class SimulationMapProjectionBuilder:
         node_meta_by_id: Dict[str, Dict[str, Any]],
         position_by_id: Dict[str, Tuple[float, float]],
         used_points: List[Tuple[float, float]],
-    ) -> Tuple[float, float]:
+    ) -> Tuple[float, float, bool]:
         attributes = node.get("attributes") or {}
         home_subregion = str(attributes.get("home_subregion_id") or "").strip()
         home_region = str(attributes.get("home_region_id") or attributes.get("primary_region") or "").strip()
@@ -496,7 +532,7 @@ class SimulationMapProjectionBuilder:
             if dry_candidates:
                 index = self._stable_hash_mod(f"agent-dry-anchor::{node['uuid']}", len(dry_candidates))
                 candidate = dry_candidates[index]
-                return self._resolve_conflict(
+                resolved = self._resolve_conflict(
                     lat=candidate["lat"],
                     lon=candidate["lon"],
                     used_points=used_points,
@@ -505,10 +541,12 @@ class SimulationMapProjectionBuilder:
                     require_water=False,
                     stable_key=f"agent-dry::{node['uuid']}",
                 )
+                # Anchored to a real map-seed feature -> geographically grounded.
+                return resolved[0], resolved[1], True
 
         region_radius = max(float(context.get("radius_m") or 0), 3000.0)
         agent_radius = max(260.0, min(region_radius * 0.06, 1400.0))
-        return self._radial_fallback(
+        fallback = self._radial_fallback(
             center={"lat": base_lat, "lon": base_lon},
             stable_key=f"agent::{node['uuid']}",
             used_points=used_points,
@@ -517,6 +555,8 @@ class SimulationMapProjectionBuilder:
             require_water=require_water,
             radius_m=agent_radius,
         )
+        # Synthetic radial/hash placement around a base center -> not grounded.
+        return fallback[0], fallback[1], False
 
     def _desired_tags_for_agent(self, node: Dict[str, Any]) -> List[str]:
         attributes = node.get("attributes") or {}
@@ -564,7 +604,7 @@ class SimulationMapProjectionBuilder:
         *,
         context: Dict[str, Any],
         used_points: List[Tuple[float, float]],
-    ) -> Tuple[float, float]:
+    ) -> Tuple[float, float, bool]:
         attributes = node.get("attributes") or {}
         source_kind = str(attributes.get("source_kind") or "")
         if source_kind:
@@ -577,7 +617,7 @@ class SimulationMapProjectionBuilder:
             if candidates:
                 index = self._stable_hash_mod(f"generic::{node['uuid']}", len(candidates))
                 lat, lon = candidates[index]["lat"], candidates[index]["lon"]
-                return self._resolve_conflict(
+                resolved = self._resolve_conflict(
                     lat=lat,
                     lon=lon,
                     used_points=used_points,
@@ -586,7 +626,9 @@ class SimulationMapProjectionBuilder:
                     require_water=self._prefers_water(source_kind, fallback_name=node.get("name")),
                     stable_key=node["uuid"],
                 )
-        return self._radial_fallback(
+                # Anchored to a real map-seed feature -> geographically grounded.
+                return resolved[0], resolved[1], True
+        fallback = self._radial_fallback(
             center=context["center"],
             stable_key=f"generic-fallback::{node['uuid']}",
             used_points=used_points,
@@ -595,6 +637,8 @@ class SimulationMapProjectionBuilder:
             require_water=False,
             radius_m=600.0,
         )
+        # Synthetic radial/hash placement -> not grounded.
+        return fallback[0], fallback[1], False
 
     def _project_edges(
         self,

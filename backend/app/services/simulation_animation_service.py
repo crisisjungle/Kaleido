@@ -102,6 +102,13 @@ class SimulationAnimationService:
             if isinstance(item, dict)
         }
 
+        # Precompute the real per-round value map (node_id -> pressure metric) so
+        # each frame can carry the actual value AND the delta vs the previous round,
+        # instead of inferring status purely from a fabricated reveal order.
+        value_map_by_round: Dict[int, Dict[str, float]] = {}
+        for round_num, snapshot in snapshot_by_round.items():
+            value_map_by_round[round_num] = self._node_values_from_snapshot(snapshot)
+
         frames: List[Dict[str, Any]] = [
             self._build_frame(
                 round_num=0,
@@ -116,6 +123,8 @@ class SimulationAnimationService:
                 edge_first_seen=edge_first_seen,
                 edge_last_active=edge_last_active,
                 map_projection=map_projection,
+                value_map=value_map_by_round.get(0, {}),
+                prev_value_map={},
             )
         ]
 
@@ -123,6 +132,10 @@ class SimulationAnimationService:
             snapshot = snapshot_by_round.get(round_num)
             if not snapshot and round_num == total_rounds:
                 snapshot = latest_snapshot
+            value_map = value_map_by_round.get(round_num)
+            if value_map is None:
+                value_map = self._node_values_from_snapshot(snapshot)
+            prev_value_map = self._latest_value_map_before(value_map_by_round, round_num)
             frames.append(
                 self._build_frame(
                     round_num=round_num,
@@ -137,6 +150,8 @@ class SimulationAnimationService:
                     edge_first_seen=edge_first_seen,
                     edge_last_active=edge_last_active,
                     map_projection=map_projection,
+                    value_map=value_map,
+                    prev_value_map=prev_value_map,
                 )
             )
 
@@ -604,6 +619,110 @@ class SimulationAnimationService:
             result[edge_id] = int(item.get("last_activated_round") or item.get("created_round") or item.get("round") or 0)
         return result
 
+    def _node_values_from_snapshot(self, snapshot: Optional[Dict[str, Any]]) -> Dict[str, float]:
+        """Extract the real per-round pressure metric keyed by layout node id.
+
+        Regions/subregions use ``vulnerability_score``; agents use the highest of
+        ``vulnerability_score`` / ``panic_level`` from the state vector. This is the
+        actual round state, NOT a reveal heuristic.
+        """
+        values: Dict[str, float] = {}
+        if not isinstance(snapshot, dict):
+            return values
+
+        for region in list(snapshot.get("regions") or []):
+            if not isinstance(region, dict):
+                continue
+            region_id = str(region.get("region_id") or "").strip()
+            if not region_id:
+                continue
+            score = self._safe_float(region.get("vulnerability_score"))
+            if score is None:
+                continue
+            layer = str(region.get("layer") or "").lower()
+            if layer == "subregion" or region.get("parent_region_id"):
+                values[f"subregion::{region_id}"] = score
+            else:
+                values[f"region::{region_id}"] = score
+
+        for sub in list(snapshot.get("subregions") or []):
+            if not isinstance(sub, dict):
+                continue
+            region_id = str(sub.get("region_id") or "").strip()
+            if not region_id:
+                continue
+            score = self._safe_float(sub.get("vulnerability_score"))
+            if score is None:
+                continue
+            values[f"subregion::{region_id}"] = score
+
+        for agent in list(snapshot.get("agents") or []):
+            if not isinstance(agent, dict):
+                continue
+            agent_id = self._safe_int(agent.get("agent_id"))
+            if not agent_id:
+                continue
+            state_vector = agent.get("state_vector") or {}
+            vuln = self._safe_float(
+                state_vector.get("vulnerability_score")
+                if state_vector.get("vulnerability_score") is not None
+                else agent.get("vulnerability_score")
+            )
+            panic = self._safe_float(
+                state_vector.get("panic_level")
+                if state_vector.get("panic_level") is not None
+                else agent.get("panic_level")
+            )
+            candidates = [value for value in (vuln, panic) if value is not None]
+            if not candidates:
+                continue
+            values[f"agent::{agent_id}"] = max(candidates)
+
+        return values
+
+    def _latest_value_map_before(
+        self,
+        value_map_by_round: Dict[int, Dict[str, float]],
+        round_num: int,
+    ) -> Dict[str, float]:
+        """Return the most recent populated value map strictly before ``round_num``.
+
+        Rounds can be sparse (not every round writes a snapshot); the delta should be
+        measured against the last round that actually carried state.
+        """
+        for candidate_round in range(round_num - 1, -1, -1):
+            candidate = value_map_by_round.get(candidate_round)
+            if candidate:
+                return candidate
+        return {}
+
+    def _state_status_from_value(
+        self,
+        *,
+        kind: str,
+        value: Optional[float],
+        delta: Optional[float],
+    ) -> Optional[str]:
+        """Derive an additive status from REAL thresholds on the round value/delta.
+
+        Returns None when no real value is available (so callers can fall back to the
+        reveal-order status without pretending state moved).
+        """
+        if value is None:
+            return None
+        # Delta-driven movement takes priority: a real numeric drift is the signal.
+        if delta is not None:
+            if delta >= 1.0:
+                return "rising"
+            if delta <= -1.0:
+                return "falling"
+        # No meaningful movement: classify the standing level.
+        if value >= 70.0:
+            return "critical"
+        if value >= 55.0:
+            return "elevated"
+        return "steady"
+
     def _build_frame(
         self,
         *,
@@ -619,6 +738,8 @@ class SimulationAnimationService:
         edge_first_seen: Dict[str, int],
         edge_last_active: Dict[str, int],
         map_projection: Dict[str, Any],
+        value_map: Optional[Dict[str, float]] = None,
+        prev_value_map: Optional[Dict[str, float]] = None,
     ) -> Dict[str, Any]:
         latest_agents = list((snapshot or {}).get("agents") or [])
         active_agent_ids = {
@@ -628,25 +749,44 @@ class SimulationAnimationService:
             or float((item.get("state_vector") or {}).get("panic_level") or item.get("panic_level") or 0) >= 35
         }
 
+        current_values = value_map or {}
+        previous_values = prev_value_map or {}
+
         node_states: List[Dict[str, Any]] = []
         for index, node in enumerate(layout_nodes):
             node_id = str(node.get("id") or "")
+            kind = str(node.get("kind") or "")
             first_seen = int(node_first_seen.get(node_id, 0))
             status = "hidden"
             if round_num >= first_seen:
                 status = "new" if round_num == first_seen else "steady"
             attrs = node.get("attributes") or {}
-            if str(node.get("kind") or "") == "agent" and int(attrs.get("agent_id") or 0) in active_agent_ids:
+            if kind == "agent" and int(attrs.get("agent_id") or 0) in active_agent_ids:
                 status = "active"
-            node_states.append(
-                {
-                    "id": node_id,
-                    "status": status,
-                    "first_seen_round": first_seen,
-                    "last_active_round": round_num if status == "active" else max(0, round_num - 1),
-                    "delay_ms": 80 * index if round_num == 0 else 30 * (index % 12),
-                }
-            )
+
+            # Bind the node to its REAL per-round state. value travels in the frame
+            # (so the frontend can size radius / color from physics), delta is the
+            # drift vs the previous populated round, and state_status comes from real
+            # thresholds — the reveal timing above no longer stands in for the state.
+            value = current_values.get(node_id)
+            prev_value = previous_values.get(node_id)
+            delta: Optional[float] = None
+            if value is not None and prev_value is not None:
+                delta = round(value - prev_value, 4)
+            state_status = self._state_status_from_value(kind=kind, value=value, delta=delta)
+
+            node_state: Dict[str, Any] = {
+                "id": node_id,
+                "status": status,
+                "first_seen_round": first_seen,
+                "last_active_round": round_num if status == "active" else max(0, round_num - 1),
+                "delay_ms": 80 * index if round_num == 0 else 30 * (index % 12),
+                # Additive real-state fields (do not remove keys the frontend reads).
+                "value": round(value, 4) if value is not None else None,
+                "delta": delta,
+                "state_status": state_status,
+            }
+            node_states.append(node_state)
 
         edge_states: List[Dict[str, Any]] = []
         for index, edge in enumerate(layout_edges):
@@ -811,3 +951,11 @@ class SimulationAnimationService:
             return int(value)
         except Exception:
             return 0
+
+    def _safe_float(self, value: Any) -> Optional[float]:
+        try:
+            if value in (None, ""):
+                return None
+            return float(value)
+        except Exception:
+            return None

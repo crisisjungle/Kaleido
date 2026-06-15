@@ -313,10 +313,22 @@ class EnvSimulationConfigGenerator:
             plan=plan,
             fallback_family=canonical_diffusion_template,
         )
+        # M6: surface a structured propagation-channel graph so the runtime can
+        # actually modulate diffusion by channel (previously secondary_channels /
+        # impact_chain were dead strings). Caller-supplied channels in
+        # diffusion_context or the LLM plan are merged in additively.
+        plan_transport_profile = plan.get("transport_profile") or {}
+        extra_propagation_channels = (
+            (diffusion_context or {}).get("propagation_channels")
+            or plan_transport_profile.get("propagation_channels")
+            or []
+        )
         transport_profile = build_transport_profile(
             primary_family=primary_family,
             secondary_channels=template_definition.get("secondary_channels"),
-            context_provider=(plan.get("transport_profile") or {}).get("context_provider"),
+            context_provider=plan_transport_profile.get("context_provider"),
+            impact_chain=template_definition.get("impact_chain"),
+            extra_propagation_channels=extra_propagation_channels,
         )
         time_plan = self._resolve_time_plan(
             plan=plan,
@@ -361,6 +373,7 @@ class EnvSimulationConfigGenerator:
                 "impact_chain": template_definition.get("impact_chain"),
                 "primary_family": transport_profile["primary_family"],
                 "secondary_channels": transport_profile.get("secondary_channels", []),
+                "propagation_channels": transport_profile.get("propagation_channels", []),
                 "reasoning_summary": hazard_template_reasoning,
             },
             transport_profile=transport_profile,

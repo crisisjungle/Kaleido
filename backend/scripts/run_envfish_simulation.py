@@ -107,6 +107,16 @@ class EnvFishRuntime:
         self.risk_definitions = deepcopy(self.config.get("risk_definitions") or [])
         self.latest_risk_runtime_state = deepcopy(self.config.get("latest_risk_runtime_state") or {})
         self.diffusion_context = deepcopy(self.config.get("diffusion_context") or {})
+        # M6: structured propagation channels (channel -> receptor dim + gain). They
+        # MODULATE the diffusion transfer per channel. Read from the transport
+        # profile, the diffusion_context, or the hazard recommendation, in that
+        # order. Empty => the modulation pass is a graceful no-op (legacy runs).
+        self.propagation_channels = self._load_propagation_channels()
+        self.propagation_channels_by_id = {
+            str(channel.get("channel_id") or "").lower(): channel
+            for channel in self.propagation_channels
+            if str(channel.get("channel_id") or "").strip()
+        }
         self.search_mode = normalize_search_mode(
             self.config.get("search_mode") or self.interaction_policies.get("search_mode") or "fast"
         )
@@ -249,6 +259,36 @@ class EnvFishRuntime:
         )
         self.latest_mechanism_propagation: Dict[str, Any] = {"nudged_edges": 0, "total_nudge": 0.0}
         self._mechanism_region_index: Optional[Dict[str, str]] = None
+
+        # M6: per-channel modulation knobs. `propagation_channel_gain` is a small
+        # base multiplier applied on top of each channel's relative gain, bounded
+        # so channels inform — never dominate — the transfer.
+        self.propagation_channels_enabled = bool(
+            self.interaction_policies.get("propagation_channels_enabled", True)
+        )
+        self.propagation_channel_gain = float(
+            self.interaction_policies.get("propagation_channel_gain", 0.5)
+        )
+        self.latest_propagation_modulation: Dict[str, Any] = {"modulated_transfers": 0, "total_delta": 0.0}
+
+        # M8: every N rounds the LLM is asked to RE-LABEL the live relationship
+        # graph (semantic relabels / leverage hints / emergent-pattern notes). It
+        # is the only thing the LLM does to relationships; a deterministic fallback
+        # runs when there is no LLM so the ledger is never silently empty. Bounded
+        # and additive — emitted into the round_reasoning_ledger record only.
+        self.relation_relabel_enabled = bool(
+            self.interaction_policies.get("relation_relabel_enabled", True)
+        )
+        self.relation_relabel_interval = max(
+            1, int(self.interaction_policies.get("relation_relabel_interval_rounds", 3))
+        )
+        self.latest_relation_relabel: Dict[str, Any] = {}
+
+        # M8: cap on co-location interaction candidates per actor (keeps the
+        # interaction ledger bounded in dense regions).
+        self._colocation_candidate_limit = max(
+            1, int(self.interaction_policies.get("colocation_candidates_per_agent", 3))
+        )
 
         for region in self.region_graph:
             region["state_vector"] = normalize_state_vector(region.get("state_vector") or {})
@@ -583,6 +623,75 @@ class EnvFishRuntime:
         self._write_env_status("stopped")
         self.ipc.stop()
 
+    def _load_propagation_channels(self) -> List[Dict[str, Any]]:
+        """Resolve the structured propagation channels for this run.
+
+        Prefers the pre-built ``propagation_channels`` (emitted by the config
+        generator) and otherwise rebuilds them from the still-present
+        ``secondary_channels`` + ``impact_chain`` so older configs without the new
+        field also get channel modulation. Returns ``[]`` when nothing is present,
+        which makes the modulation pass a no-op."""
+        candidates = (
+            (self.transport_profile or {}).get("propagation_channels")
+            or (self.diffusion_context or {}).get("propagation_channels")
+            or (self.config.get("hazard_template_recommendation") or {}).get("propagation_channels")
+            or []
+        )
+        channels = [dict(channel) for channel in candidates if isinstance(channel, dict)]
+        if channels:
+            return channels
+        secondary = (self.transport_profile or {}).get("secondary_channels") or []
+        impact_chain = (self.config.get("hazard_template_recommendation") or {}).get("impact_chain") or []
+        if not secondary:
+            return []
+        try:
+            from app.services.envfish_models import build_propagation_channels  # noqa: E402
+
+            return build_propagation_channels(secondary_channels=secondary, impact_chain=impact_chain)
+        except Exception:
+            return []
+
+    def _channel_modulation_for_transfer(self, transfer: Dict[str, Any]) -> Dict[str, float]:
+        """Compute the per-receptor-dimension EXTRA delta a transfer should carry
+        because of its propagation channel(s).
+
+        Reads the transfer's resolved ``channel_type`` (set by _validate_transfer
+        from the transport edge) and, failing a match, applies the run's channels
+        as a scenario-wide carrier set. Returns an additive delta keyed by receptor
+        dimension. Bounded by ``propagation_channel_gain`` and the transfer
+        intensity; empty when channels are disabled/absent so legacy behavior is
+        preserved."""
+        if not self.propagation_channels_enabled or not self.propagation_channels:
+            return {}
+        base_delta = min(18.0, float(transfer.get("transfer_intensity") or 0.0) * 0.18)
+        if base_delta <= 0:
+            return {}
+        gain = max(0.0, float(self.propagation_channel_gain))
+        if gain <= 0:
+            return {}
+
+        channel_type = str(transfer.get("channel_type") or "").strip().lower()
+        matched = self.propagation_channels_by_id.get(channel_type) if channel_type else None
+        selected = [matched] if matched else list(self.propagation_channels)
+        if not selected:
+            return {}
+
+        # Spread the modulation budget across the contributing channels so adding
+        # more channels redistributes rather than runs away.
+        share = 1.0 / float(len(selected))
+        modulation: Dict[str, float] = defaultdict(float)
+        for channel in selected:
+            receptor_dim = str(channel.get("receptor_dim") or "exposure_score")
+            channel_gain = max(0.0, float(channel.get("gain") or 1.0))
+            extra = base_delta * gain * share * (channel_gain - 1.0)
+            # ecosystem_integrity is a "higher = better" dim: a loading channel
+            # erodes it (negative), all others (pressure/exposure) load up.
+            if receptor_dim == "ecosystem_integrity":
+                modulation[receptor_dim] += -abs(extra)
+            else:
+                modulation[receptor_dim] += extra
+        return {key: round(value, 4) for key, value in modulation.items() if abs(value) > 1e-6}
+
     def _environmental_diffusion_update(
         self,
         round_num: int,
@@ -606,6 +715,8 @@ class EnvFishRuntime:
 
         immediate = [transfer for transfer in valid_transfers if transfer["delay_rounds"] <= 0]
         region_updates = defaultdict(lambda: defaultdict(float))
+        modulated_transfers = 0
+        total_channel_delta = 0.0
         for transfer in due_transfers + immediate:
             target = self.region_lookup.get(transfer["target_region"])
             if not target:
@@ -614,6 +725,17 @@ class EnvFishRuntime:
             region_updates[target["region_id"]]["exposure_score"] += delta
             region_updates[target["region_id"]]["spread_pressure"] += max(3.0, delta * 0.65)
             region_updates[target["region_id"]]["ecosystem_integrity"] -= max(2.0, delta * 0.22)
+
+            # M6: the scenario's propagation channels MODULATE this transfer — a
+            # channel adds a small, bounded, channel-specific load to its receptor
+            # dimension on top of the base transfer. No-op when channels absent.
+            channel_modulation = self._channel_modulation_for_transfer(transfer)
+            if channel_modulation:
+                modulated_transfers += 1
+                for receptor_dim, extra in channel_modulation.items():
+                    region_updates[target["region_id"]][receptor_dim] += extra
+                    total_channel_delta += abs(extra)
+                transfer["channel_modulation"] = channel_modulation
 
             append_jsonl(
                 self.spread_log,
@@ -626,6 +748,8 @@ class EnvFishRuntime:
                     "delay_rounds": transfer["delay_rounds"],
                     "persistence": transfer["persistence"],
                     "confidence": transfer["confidence"],
+                    "channel_type": transfer.get("channel_type"),
+                    "channel_modulation": transfer.get("channel_modulation") or {},
                     "rationale": transfer["rationale"],
                 },
             )
@@ -657,11 +781,17 @@ class EnvFishRuntime:
             key=lambda item: item["exposure_score"],
             reverse=True,
         )
+        self.latest_propagation_modulation = {
+            "modulated_transfers": modulated_transfers,
+            "total_delta": round(total_channel_delta, 3),
+            "channel_count": len(self.propagation_channels),
+        }
         return {
             "transfers": valid_transfers,
             "applied_transfers": due_transfers + immediate,
             "region_ranking": ranking,
             "likely_next_impacted_regions": [item["name"] for item in ranking[:3]],
+            "propagation_modulation": self.latest_propagation_modulation,
         }
 
     def _agent_interaction_update(
@@ -1283,7 +1413,82 @@ class EnvFishRuntime:
             )
             seen_targets.add(target_id)
 
+        # M8: real runs ship an empty agent_relationship_graph and empty link
+        # fields, so the interaction ledger was always empty — agents never had a
+        # counterpart to act on. When (and only when) an actor has no candidate so
+        # far, fall back to CO-LOCATION: agents that share a region — or whose
+        # regions are joined by a transport edge — are plausible interaction
+        # partners. This is a routing heuristic (epistemic_status=speculative), it
+        # is bounded by `_colocation_candidate_limit`, and it is additive so any
+        # run that already carries structural edges is untouched.
+        if not relation_edges:
+            relation_edges.extend(
+                self._colocation_candidate_edges(actor, seen_targets)
+            )
+
         return relation_edges
+
+    def _colocation_candidate_edges(
+        self,
+        actor: Dict[str, Any],
+        seen_targets: set,
+    ) -> List[Dict[str, Any]]:
+        """Bounded co-location interaction candidates for an actor with no
+        structural / dynamic partner. Prefers same-region peers, then peers one
+        transport hop away, capped so a dense region cannot explode the ledger."""
+        actor_id = int(actor.get("agent_id", -1))
+        if actor_id < 0:
+            return []
+        home_region_id = str(actor.get("primary_region") or actor.get("home_region_id") or "").strip()
+        if not home_region_id:
+            return []
+        limit = int(getattr(self, "_colocation_candidate_limit", 3) or 3)
+
+        candidate_edges: List[Dict[str, Any]] = []
+        local_seen = set(seen_targets)
+        local_seen.add(actor_id)
+
+        def _consume(peer: Dict[str, Any], route_source: str) -> bool:
+            peer_id = int(peer.get("agent_id", -1))
+            if peer_id < 0 or peer_id in local_seen:
+                return False
+            edge = self._make_fallback_relationship_edge(
+                source_actor=actor,
+                target_actor=peer,
+                rationale=(
+                    f"{actor.get('name') or actor.get('username')} 与 "
+                    f"{peer.get('name') or peer.get('username')} 同处 {home_region_id}，构成就近互动候选。"
+                ),
+                route_sources=[route_source],
+            )
+            edge["layer"] = "colocation"
+            edge["epistemic_status"] = "speculative"
+            edge["strength"] = 0.38
+            edge["confidence"] = 0.35
+            candidate_edges.append(edge)
+            local_seen.add(peer_id)
+            return True
+
+        # (1) same region
+        for peer in self.agents_by_region.get(home_region_id, []) or []:
+            if len(candidate_edges) >= limit:
+                return candidate_edges
+            _consume(peer, "shared_region")
+
+        # (2) one transport hop away (regions joined by a transport edge)
+        if len(candidate_edges) < limit:
+            for transport_edge in self._transport_edges_for_source(home_region_id):
+                if len(candidate_edges) >= limit:
+                    break
+                neighbor_region = str(transport_edge.get("target_region_id") or "").strip()
+                if not neighbor_region or neighbor_region == home_region_id:
+                    continue
+                for peer in self.agents_by_region.get(neighbor_region, []) or []:
+                    if len(candidate_edges) >= limit:
+                        break
+                    _consume(peer, "transport_neighbor")
+
+        return candidate_edges
 
     def _make_fallback_relationship_edge(
         self,
@@ -1891,6 +2096,23 @@ class EnvFishRuntime:
             actor_delta = {"response_capacity": 0.4}
             region_delta = {"public_trust": 0.1}
 
+        # M8: every action carries at least a faint, channel-appropriate effect on
+        # its interaction partner, so that when an actor DOES have a counterpart the
+        # interaction is real (and recorded) rather than silently dropped because a
+        # particular branch left target_delta empty. Channel-typed so the sign is
+        # defensible (information builds a little response capacity; media/ecology
+        # raise stress). Tiny by design — it never dominates the explicit branches.
+        if not target_delta:
+            minimal_target = {
+                "information": {"response_capacity": 0.3},
+                "governance": {"response_capacity": 0.3},
+                "environment": {"public_trust": 0.2},
+                "media": {"panic_level": 0.3},
+                "market": {"economic_stress": 0.3},
+                "ecology": {"vulnerability_score": 0.3},
+            }
+            target_delta = dict(minimal_target.get(channel, {"public_trust": 0.1}))
+
         return {
             "actor_delta": actor_delta,
             "region_delta": region_delta,
@@ -2249,7 +2471,170 @@ class EnvFishRuntime:
         record.setdefault("round", round_num)
         record.setdefault("timestamp", self._now())
         record.setdefault("simulation_architecture", LLM_MECHANISM_ARCHITECTURE)
+        # M8: every N rounds, re-label the live relationship graph (semantic
+        # relabels / leverage hints / emergent-pattern notes). Guarded + bounded;
+        # deterministic fallback when no LLM. Emitted into the reasoning record so
+        # it lands in the round_reasoning_ledger alongside the rest of the round.
+        relabel = self._relation_relabel_pass(round_num=round_num, interactions=interactions)
+        if relabel:
+            record["relation_relabel"] = relabel
         return record
+
+    def _build_relationship_brief(self, interactions: Dict[str, Any]) -> Dict[str, Any]:
+        """Compact, bounded snapshot of the live relationship graph for the LLM /
+        fallback relabel pass: the strongest active dynamic edges, this round's new
+        edges and detected feedback loops. Pure read — never mutates state."""
+        active_edges = [
+            self._serialize_dynamic_edge(edge)
+            for edge in self.dynamic_edge_lookup.values()
+            if edge.get("status") not in ("expired", "dormant")
+        ]
+        active_edges.sort(key=lambda item: float(item.get("strength") or 0.0), reverse=True)
+        return {
+            "active_edge_count": len(active_edges),
+            "top_active_edges": active_edges[:12],
+            "new_edges_this_round": list(interactions.get("new_dynamic_edges") or [])[:8],
+            "feedback_loops": self._detect_feedback_loops(max_loops=6),
+        }
+
+    def _relation_relabel_pass(
+        self,
+        *,
+        round_num: int,
+        interactions: Dict[str, Any],
+    ) -> Optional[Dict[str, Any]]:
+        """Re-label / annotate the relationship graph. Runs only on relabel rounds.
+        Tries the LLM first (guarded), then a deterministic fallback so the ledger
+        is never silently empty when there is something to talk about. Additive:
+        produces an annotation record, it does not mutate any edge in place."""
+        if not getattr(self, "relation_relabel_enabled", False):
+            return None
+        interval = max(1, int(getattr(self, "relation_relabel_interval", 3)))
+        if round_num % interval != 0:
+            return None
+        brief = self._build_relationship_brief(interactions)
+        if not brief.get("top_active_edges") and not brief.get("feedback_loops"):
+            return None
+        llm_relabel = self._llm_relation_relabel(round_num=round_num, brief=brief)
+        if llm_relabel:
+            self.latest_relation_relabel = llm_relabel
+            return llm_relabel
+        fallback = self._fallback_relation_relabel(round_num=round_num, brief=brief)
+        self.latest_relation_relabel = fallback
+        return fallback
+
+    def _llm_relation_relabel(
+        self,
+        *,
+        round_num: int,
+        brief: Dict[str, Any],
+    ) -> Optional[Dict[str, Any]]:
+        if not getattr(self, "llm", None):
+            return None
+        prompt = {
+            "task": (
+                "Re-label and interpret this evolving ecological relationship graph. "
+                "Only describe structure, direction and sign — never invent magnitudes."
+            ),
+            "round": round_num,
+            "relationship_brief": brief,
+            "schema": {
+                "relabels": [
+                    {"edge_id": "id from brief", "semantic_label": "short label", "reason": "why"}
+                ],
+                "leverage_hints": [
+                    {"edge_id": "id", "why_leverage": "why this edge is a control point"}
+                ],
+                "emergent_patterns": ["one-line note about an emergent pattern / loop"],
+            },
+            "rules": [
+                "Reference only edge_ids present in the brief.",
+                "Do not fabricate facts; qualitative only.",
+                "Return valid JSON only.",
+            ],
+        }
+        try:
+            response = self.llm.chat_json(
+                messages=[
+                    {
+                        "role": "system",
+                        "content": "You relabel ecological relationship graphs. Qualitative, structural, honest.",
+                    },
+                    {"role": "user", "content": json.dumps(prompt, ensure_ascii=False)},
+                ],
+                temperature=0.3,
+                max_tokens=1400,
+            )
+            return {
+                "round": round_num,
+                "timestamp": self._now(),
+                "participation": "live",
+                "fallback_used": False,
+                "relabels": list(response.get("relabels") or [])[:12],
+                "leverage_hints": list(response.get("leverage_hints") or [])[:8],
+                "emergent_patterns": list(response.get("emergent_patterns") or [])[:8],
+            }
+        except Exception as exc:
+            logger.warning(f"Relation relabel LLM failed, using explicit fallback: round={round_num}, error={exc}")
+            return None
+
+    def _fallback_relation_relabel(
+        self,
+        *,
+        round_num: int,
+        brief: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Deterministic relabel: derive a semantic label from each strong edge's
+        channel + endpoints, flag the strongest as leverage, and name any detected
+        feedback loop as an emergent pattern. No LLM, no network."""
+        channel_labels = {
+            "ecology": "生态受体耦合",
+            "ecology_corridor_signal": "生态走廊信号",
+            "water_flow": "水文输运耦合",
+            "media": "舆论传导",
+            "information": "信息协同",
+            "market": "市场联动",
+            "governance": "治理协调",
+            "social": "社会联系",
+        }
+        relabels: List[Dict[str, Any]] = []
+        leverage_hints: List[Dict[str, Any]] = []
+        for edge in (brief.get("top_active_edges") or [])[:8]:
+            channel = str(edge.get("interaction_channel") or edge.get("edge_type") or "").lower()
+            label = channel_labels.get(channel, "结构性关系")
+            relabels.append(
+                {
+                    "edge_id": edge.get("edge_id"),
+                    "semantic_label": label,
+                    "reason": f"基于通道 {channel or 'unknown'} 与端点角色的确定性重标。",
+                    "epistemic_status": "inferred",
+                }
+            )
+        strongest = (brief.get("top_active_edges") or [])[:1]
+        for edge in strongest:
+            if float(edge.get("strength") or 0.0) >= 0.4:
+                leverage_hints.append(
+                    {
+                        "edge_id": edge.get("edge_id"),
+                        "why_leverage": "本轮强度最高的活跃关系，最可能是结构性控制点。",
+                    }
+                )
+        emergent_patterns: List[str] = []
+        for loop in (brief.get("feedback_loops") or [])[:4]:
+            regions = "→".join(str(rid) for rid in (loop.get("regions") or []))
+            emergent_patterns.append(
+                f"检测到{loop.get('loop_type', 'reinforcing')}反馈环：{regions}（长度 {loop.get('length')}）。"
+            )
+        return {
+            "round": round_num,
+            "timestamp": self._now(),
+            "participation": "fallback_explicit",
+            "fallback_used": True,
+            "fallback_reason": "relation_relabel_llm_unavailable_or_failed",
+            "relabels": relabels,
+            "leverage_hints": leverage_hints,
+            "emergent_patterns": emergent_patterns,
+        }
 
     def _llm_round_reasoning(
         self,
