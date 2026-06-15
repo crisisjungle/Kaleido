@@ -9,9 +9,9 @@
     </div>
     <p class="agent-summary">{{ summary }}</p>
     <div class="agent-meta">
-      <span v-if="agent.primary_region">{{ agent.primary_region }}</span>
-      <span v-if="agent.agent_subtype">{{ agent.agent_subtype }}</span>
-      <span v-if="agent.source">{{ agent.source }}</span>
+      <span v-if="primaryRegion">主区域：{{ primaryRegion }}</span>
+      <span v-if="roleLabel">角色：{{ roleLabel }}</span>
+      <span v-if="sourceLabel">来源：{{ sourceLabel }}</span>
     </div>
   </article>
 </template>
@@ -31,9 +31,12 @@ const props = defineProps({
   }
 })
 
-const displayName = computed(() => props.agent.name || props.agent.agent_name || props.agent.username || `代理体 ${props.index}`)
-const typeLabel = computed(() => formatTokenLabelZh(props.agent.agent_type || props.agent.type || 'agent'))
+const displayName = computed(() => props.agent.displayName || props.agent.name || props.agent.agent_name || props.agent.username || `代理体 ${props.index}`)
+const typeLabel = computed(() => props.agent.agentTypeLabel || formatTokenLabelZh(props.agent.agent_type || props.agent.type || 'agent'))
 const summary = computed(() => props.agent.summary || props.agent.description || props.agent.motivation || '等待场景配置生成后补全代理体画像。')
+const primaryRegion = computed(() => props.agent.primaryRegionLabel || props.agent.primary_region || '')
+const roleLabel = computed(() => props.agent.roleTypeLabel || props.agent.agent_subtype || '')
+const sourceLabel = computed(() => props.agent.sourceLabel || props.agent.source || '')
 </script>
 
 <style scoped>

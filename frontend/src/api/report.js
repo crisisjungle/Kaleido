@@ -1,6 +1,7 @@
 import service from './index'
 
 export const generateReport = (data) => service.post('/api/report/generate', data)
+export const generateReportAsync = (data) => service.post('/api/report/generate/async', data)
 export const getReport = (reportId) => service.get(`/api/report/${reportId}`)
 export const getReportProgress = (reportId) => service.get(`/api/report/${reportId}/progress`)
 export const getReportSections = (reportId) => service.get(`/api/report/${reportId}/sections`)

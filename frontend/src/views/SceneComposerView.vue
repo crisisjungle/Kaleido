@@ -4,10 +4,6 @@
       <KaleidoNavBrand to="/" />
 
       <WorkflowStepMenu :current-step="1" current-name="背景生成" />
-
-      <button class="demo-entry-btn" type="button" :disabled="restoringDemo" @click="openWuhanDemo">
-        {{ restoringDemo ? '正在恢复演示...' : '武汉疫情演示' }}
-      </button>
     </header>
 
     <main class="workspace-shell" :class="{ 'report-finished-layout': reportStepDone }">
@@ -36,21 +32,12 @@
                 <small class="field-hint">{{ locationMessage }}</small>
               </label>
 
-              <label class="field">
-                <span>背景时间</span>
-                <input
-                  v-model="form.timeScope"
-                  type="text"
-                  placeholder="例：1986 年事故发生至长期恢复期 / 2024 年夏季常态"
-                />
-              </label>
-
               <label class="field field-grow">
                 <span>稳态描述</span>
                 <textarea
                   v-model="form.eventOrBaseline"
                   rows="4"
-                  placeholder="说明这个地点在所选时间背景下的常态结构、生态基线、活动节奏和关键约束。"
+                  placeholder="说明这个地点在当前时间背景下的常态结构、生态基线、活动节奏和关键约束。"
                 ></textarea>
               </label>
 
@@ -141,9 +128,6 @@
               <p v-if="message" class="message">{{ message }}</p>
 
               <div class="button-row">
-                <button class="demo-case-btn" type="button" @click="openWuhanDemo" :disabled="composing || restoringDemo">
-                  {{ restoringDemo ? '正在恢复演示...' : '播放武汉疫情演示' }}
-                </button>
                 <button class="primary-btn" type="button" :disabled="composeDisabled" @click="composeBackground">
                   {{ backgroundActionLabel }}
                 </button>
@@ -283,6 +267,18 @@
               />
             </div>
 
+            <div v-if="showMapAnalysisSummary" class="map-overlay map-analysis-summary">
+              <div class="analysis-summary-head">
+                <span>区域类型分析</span>
+                <strong>{{ primarySceneLabel }}</strong>
+              </div>
+              <div class="analysis-score-list">
+                <span v-for="item in sceneScoreItems" :key="item.key" class="analysis-score-chip">
+                  {{ item.label }} {{ item.score }}
+                </span>
+              </div>
+            </div>
+
             <div v-if="!showReportStage" class="map-overlay radius-overlay">
               <div class="radius-header">
                 <span>分析半径</span>
@@ -313,7 +309,6 @@ import {
   getMapSeedStatus,
   reverseGeocodeMapLocation
 } from '../api/mapSeed'
-import { restoreGoldenCase } from '../api/goldenCases'
 import { setPendingUpload } from '../store/pendingUpload'
 import {
   clearSceneComposerSnapshot,
@@ -327,11 +322,9 @@ import { renderMarkdown } from '../utils/markdown'
 const router = useRouter()
 const route = useRoute()
 const DEFAULT_CENTER = [22.5431, 114.0579]
-const restoringDemo = ref(false)
 
 const form = ref({
   location: '',
-  timeScope: '',
   eventOrBaseline: '',
   focus: '',
   additionalContext: '',
@@ -353,6 +346,7 @@ const mapSeedTaskId = ref('')
 const mapSeedStatus = ref('idle')
 const mapSeedLoading = ref(false)
 const mapSeedMessage = ref('等待背景生成时触发区域地理分析')
+const mapSceneClassification = ref(null)
 const locationSyncMode = ref('empty')
 const locationResolving = ref(false)
 const locationMessage = ref('输入地点会自动定位地图，也可以直接在地图上选点。')
@@ -367,6 +361,7 @@ const composing = ref(false)
 const revising = ref(false)
 const revisionInstruction = ref('')
 const message = ref('')
+const composeErrorMessage = ref('')
 const showReportStage = ref(false)
 const reportTyping = ref(false)
 
@@ -387,7 +382,7 @@ const planStepStatusLabel = computed(() => {
 const reportStepDone = computed(() => !composing.value && !reportTyping.value && reportMarkdown.value.length > 0)
 const reportStepActive = computed(() => reportTyping.value || (composing.value && planStepDone.value))
 const hasComposeError = computed(() => !composing.value && !reportStepDone.value && (
-  mapSeedStatus.value === 'failed' || String(message.value || '').trim().length > 0
+  mapSeedStatus.value === 'failed' || String(composeErrorMessage.value || '').trim().length > 0
 ))
 const reportStepStatusLabel = computed(() => {
   if (hasComposeError.value) return '失败'
@@ -441,6 +436,16 @@ const radiusMetersDisplay = computed(() => {
   return `${radiusMeters.value} m`
 })
 
+function formatCurrentTimeScope(date = new Date()) {
+  const pad = (value) => String(value).padStart(2, '0')
+  const year = date.getFullYear()
+  const month = pad(date.getMonth() + 1)
+  const day = pad(date.getDate())
+  const hours = pad(date.getHours())
+  const minutes = pad(date.getMinutes())
+  return `当前时间（${year}-${month}-${day} ${hours}:${minutes}）`
+}
+
 const derivedSimulationRequirement = computed(() => {
   return (
     form.value.simulationRequirement.trim() ||
@@ -458,7 +463,6 @@ const composeDisabled = computed(() => {
   if (!selectedPoint.value) return true
   return !(
     form.value.location.trim() ||
-    form.value.timeScope.trim() ||
     form.value.eventOrBaseline.trim() ||
     form.value.additionalContext.trim() ||
     form.value.knownEntities.trim() ||
@@ -480,30 +484,6 @@ const backgroundActionLabel = computed(() => {
 const areaNamePreview = computed(() => {
   return autoAreaLabel.value || form.value.location.trim() || '尚未确定分析区域'
 })
-
-const openWuhanDemo = async () => {
-  if (restoringDemo.value) return
-  restoringDemo.value = true
-  try {
-    const res = await restoreGoldenCase('wuhan_covid_v1')
-    const routeConfig = res.data?.route
-    if (routeConfig?.name) {
-      router.push({
-        name: routeConfig.name,
-        params: routeConfig.params || {},
-        query: {
-          ...(routeConfig.query || {}),
-          replay: '1',
-          report_id: res.data?.report_id || ''
-        }
-      })
-    }
-  } catch (err) {
-    message.value = `恢复武汉演示失败：${err.message || '未知错误'}`
-  } finally {
-    restoringDemo.value = false
-  }
-}
 
 const mapPointLabel = computed(() => {
   if (!selectedPoint.value) return '未定位'
@@ -531,6 +511,38 @@ const reportStageLabel = computed(() => {
   if (reportMarkdown.value.trim()) return `${reportMarkdown.value.length} chars`
   return '待开始'
 })
+
+const SCENE_TYPE_LABELS = {
+  coastal: '滨海岸线',
+  inland_water: '内陆水系',
+  wetland: '湿地生态',
+  urban_edge: '城市边缘',
+  agricultural: '农业空间',
+  mixed: '混合区域'
+}
+
+const primarySceneLabel = computed(() => {
+  const key = String(mapSceneClassification.value?.primary_scene || '').trim()
+  return SCENE_TYPE_LABELS[key] || key || '待判定'
+})
+
+const sceneScoreItems = computed(() => {
+  const scores = mapSceneClassification.value?.scores || {}
+  return Object.entries(scores)
+    .map(([key, value]) => ({
+      key,
+      label: SCENE_TYPE_LABELS[key] || key,
+      score: Number(value) || 0
+    }))
+    .filter((item) => item.score > 0)
+    .sort((a, b) => b.score - a.score)
+    .slice(0, 4)
+})
+
+const showMapAnalysisSummary = computed(() => (
+  Boolean(mapSceneClassification.value?.primary_scene)
+  && (showReportStage.value || mapSeedStatus.value === 'ready')
+))
 
 const previewReportMarkdown = computed(() => {
   if (displayedReportMarkdown.value.trim()) return displayedReportMarkdown.value
@@ -609,7 +621,7 @@ function buildPendingReportDraft() {
     `- **中心点**：${pointText}`,
     '',
     '## 时间背景',
-    form.value.timeScope.trim() || '正在整理时间范围与历史背景线索。',
+    formatCurrentTimeScope(),
     '',
     '## 当前稳态',
     stableDescription,
@@ -731,6 +743,7 @@ function resetMapAnalysis(statusMessage = '等待背景生成时触发区域地�
   mapSeedStatus.value = 'idle'
   mapSeedLoading.value = false
   mapSeedMessage.value = statusMessage
+  mapSceneClassification.value = null
 }
 
 function updateLocationValue(nextValue, mode = 'auto') {
@@ -885,6 +898,9 @@ async function loadMapSeedArtifacts() {
     if (seed.admin_context) {
       resolvedAdminContext.value = seed.admin_context
     }
+    if (seed.scene_classification) {
+      mapSceneClassification.value = seed.scene_classification
+    }
     if (seed.area_of_interest?.label) {
       autoAreaLabel.value = seed.area_of_interest.label
       if (!form.value.location.trim() || locationSyncMode.value === 'auto') {
@@ -934,7 +950,7 @@ function buildFormData() {
   files.value.forEach((file) => data.append('files', file))
   data.append('scene_type', 'stable_environment')
   data.append('location', form.value.location || autoAreaLabel.value)
-  data.append('time_scope', form.value.timeScope)
+  data.append('time_scope', formatCurrentTimeScope())
   data.append('event_or_baseline', form.value.eventOrBaseline)
   data.append('focus', form.value.focus)
   data.append('additional_context', form.value.additionalContext)
@@ -961,6 +977,7 @@ function buildFormData() {
 async function composeBackground() {
   if (composeDisabled.value) return
   composing.value = true
+  composeErrorMessage.value = ''
   showReportStage.value = true
   startReportTyping(buildPendingReportDraft(), { reset: true, interval: 14 })
   message.value = '正在准备区域背景...'
@@ -979,6 +996,7 @@ async function composeBackground() {
     }
   } catch (error) {
     clearReportTyping()
+    composeErrorMessage.value = error.message || '背景生成失败'
     if (mapSeedStatus.value === 'processing') {
       mapSeedStatus.value = 'failed'
     }
@@ -993,6 +1011,7 @@ async function composeBackground() {
 function retryComposeBackground() {
   resetMapAnalysis('准备重新启动区域地理分析')
   message.value = ''
+  composeErrorMessage.value = ''
   composeBackground()
 }
 
@@ -1051,7 +1070,8 @@ function enterProcess() {
     initialVariables: Array.isArray(sceneSeed.value?.initial_variables) ? sceneSeed.value.initial_variables : [],
     selectedPoints,
     mapSeedId: mapSeedId.value || sceneSeed.value?.map_seed_id || '',
-    areaLabel: areaNamePreview.value || autoAreaLabel.value || form.value.location || ''
+    areaLabel: areaNamePreview.value || autoAreaLabel.value || form.value.location || '',
+    radiusMeters: Number(radiusMeters.value) || 0
   })
   saveComposerSnapshot()
   router.push({ name: 'Process', params: { projectId: 'new' } })
@@ -1064,7 +1084,6 @@ function resetComposer() {
   reverseRequestId += 1
   form.value = {
     location: '',
-    timeScope: '',
     eventOrBaseline: '',
     focus: '',
     additionalContext: '',
@@ -1090,6 +1109,7 @@ function resetComposer() {
   displayedReportMarkdown.value = ''
   revisionInstruction.value = ''
   message.value = ''
+  composeErrorMessage.value = ''
   showReportStage.value = false
   clearReportTyping()
   clearSceneComposerSnapshot()
@@ -1118,6 +1138,7 @@ function buildComposerSnapshot() {
     mapSeedTaskId: mapSeedTaskId.value,
     mapSeedStatus: mapSeedStatus.value,
     mapSeedMessage: mapSeedMessage.value,
+    mapSceneClassification: mapSceneClassification.value,
     autoAreaLabel: autoAreaLabel.value,
     resolvedAdminContext: resolvedAdminContext.value,
     sceneId: sceneId.value,
@@ -1126,6 +1147,7 @@ function buildComposerSnapshot() {
     displayedReportMarkdown: displayedReportMarkdown.value,
     revisionInstruction: revisionInstruction.value,
     message: message.value,
+    composeErrorMessage: composeErrorMessage.value,
     showReportStage: showReportStage.value,
     advancedOpen: advancedOpen.value,
     locationSyncMode: locationSyncMode.value,
@@ -1164,6 +1186,7 @@ function restoreComposerSnapshot() {
   mapSeedTaskId.value = snapshot.mapSeedTaskId || ''
   mapSeedStatus.value = snapshot.mapSeedStatus || 'idle'
   mapSeedMessage.value = snapshot.mapSeedMessage || '等待背景生成时触发区域地理分析'
+  mapSceneClassification.value = snapshot.mapSceneClassification || null
   autoAreaLabel.value = snapshot.autoAreaLabel || ''
   resolvedAdminContext.value = snapshot.resolvedAdminContext || null
   sceneId.value = snapshot.sceneId || ''
@@ -1172,6 +1195,7 @@ function restoreComposerSnapshot() {
   displayedReportMarkdown.value = snapshot.reportMarkdown || snapshot.displayedReportMarkdown || ''
   revisionInstruction.value = snapshot.revisionInstruction || ''
   message.value = snapshot.message || ''
+  composeErrorMessage.value = snapshot.composeErrorMessage || ''
   showReportStage.value = Boolean(snapshot.showReportStage || snapshot.reportMarkdown)
   advancedOpen.value = Boolean(snapshot.advancedOpen)
   locationSyncMode.value = snapshot.locationSyncMode || 'empty'
@@ -1300,26 +1324,6 @@ onBeforeUnmount(() => {
   gap: 10px;
 }
 
-.demo-entry-btn {
-  margin-left: auto;
-  padding: 4px 12px;
-  border-radius: 20px;
-  border: 1px solid rgba(16, 35, 29, 0.15);
-  background: rgba(255, 248, 230, 0.85);
-  color: #8a6d1b;
-  font-size: 12px;
-  font-weight: 600;
-  cursor: pointer;
-  transition: all 0.2s ease;
-}
-.demo-entry-btn:hover {
-  transform: scale(1.02);
-}
-.demo-entry-btn:disabled {
-  opacity: 0.5;
-  cursor: wait;
-}
-
 .topbar-step-num {
   font-family: 'JetBrains Mono', monospace;
   font-size: 14px;
@@ -1372,29 +1376,6 @@ onBeforeUnmount(() => {
   opacity: 0.55;
   transform: none;
   box-shadow: none;
-}
-
-.demo-case-btn {
-  min-height: 2.75rem;
-  padding: 0 1rem;
-  border-radius: 12px;
-  border: 1px dashed rgba(180, 140, 40, 0.5);
-  background: rgba(255, 248, 230, 0.85);
-  color: #8a6d1b;
-  font-weight: 700;
-  font-size: 13px;
-  cursor: pointer;
-  transition: transform 0.18s ease, box-shadow 0.18s ease, border-color 0.18s ease;
-}
-.demo-case-btn:hover {
-  transform: translateY(-1px);
-  box-shadow: 0 6px 16px rgba(180, 140, 40, 0.15);
-  border-color: rgba(180, 140, 40, 0.7);
-}
-.demo-case-btn:disabled {
-  cursor: not-allowed;
-  opacity: 0.55;
-  transform: none;
 }
 
 .workspace-shell {
@@ -1964,6 +1945,50 @@ textarea {
   position: absolute;
   z-index: 500;
   backdrop-filter: blur(12px);
+}
+
+.map-analysis-summary {
+  left: 1rem;
+  bottom: 1rem;
+  width: min(24rem, calc(100% - 2rem));
+  padding: 0.85rem 0.95rem;
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.92);
+  border: 1px solid rgba(16, 35, 29, 0.1);
+  box-shadow: 0 14px 32px rgba(16, 35, 29, 0.14);
+}
+
+.analysis-summary-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  font-size: 0.86rem;
+  color: rgba(16, 35, 29, 0.68);
+}
+
+.analysis-summary-head strong {
+  color: #10231d;
+  font-size: 0.98rem;
+}
+
+.analysis-score-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  margin-top: 0.55rem;
+}
+
+.analysis-score-chip {
+  display: inline-flex;
+  align-items: center;
+  min-height: 1.6rem;
+  padding: 0 0.55rem;
+  border-radius: 999px;
+  background: rgba(23, 76, 58, 0.08);
+  color: #174c3a;
+  font-size: 0.78rem;
+  font-weight: 700;
 }
 
 .radius-overlay {

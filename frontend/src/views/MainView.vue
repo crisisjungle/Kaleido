@@ -59,7 +59,7 @@ import GraphPanel from '../components/GraphPanel.vue'
 import Step2EnvSetup from '../components/Step2EnvSetup.vue'
 import { generateOntology, getProject, buildGraph, getTaskStatus, getGraphData } from '../api/graph'
 import { getPendingUpload, clearPendingUpload } from '../store/pendingUpload'
-import { createSimulation, listSimulations } from '../api/simulation'
+import { createSimulation, getSimulationGraphRealtime, listSimulations } from '../api/simulation'
 import { attachSceneSeedContextToProject, attachSceneSeedContextToSimulation, getSceneSeedContextByProject } from '../store/sceneSeedBridge'
 import { markWorkflowStep } from '../store/workflowNavigation'
 
@@ -80,6 +80,7 @@ const graphLoading = ref(false)
 const error = ref('')
 const projectData = ref(null)
 const graphData = ref(null)
+const realtimeMapProjection = ref(null)
 const currentSimulationId = ref('')
 const initialInjectedVariables = ref([])
 const stepStatus = ref('idle')
@@ -144,21 +145,32 @@ const mapKindForNode = (node) => {
   return 'subregion'
 }
 
-const projectNodeToMap = (node, index, center) => {
+const radiusToZoomHint = (radiusMeters = 0) => {
+  const radius = Number(radiusMeters) || 0
+  if (radius <= 3000) return 12
+  if (radius <= 10000) return 11
+  if (radius <= 20000) return 10
+  if (radius <= 50000) return 9
+  return 8
+}
+
+const projectNodeToMap = (node, index, center, radiusMeters = 12000) => {
   const parsed = extractNodeLatLon(node)
   const attrs = { ...(node?.attributes || {}) }
   const kind = mapKindForNode(node)
+  const spreadRadiusMeters = Math.max(2500, Math.min(Number(radiusMeters) || 12000, 50000))
 
   let lat = parsed?.lat
   let lon = parsed?.lon
   if (!Number.isFinite(lat) || !Number.isFinite(lon)) {
     const hash = hashString(node?.uuid || node?.name || index)
     const angle = (hash % 3600) / 3600 * Math.PI * 2
-    const ringByKind = { region: 0.018, subregion: 0.035, agent: 0.055 }
-    const ring = ringByKind[kind] || 0.045
-    const jitter = ((hash >>> 8) % 1000) / 1000 * 0.016
-    lat = center.lat + Math.sin(angle) * (ring + jitter)
-    lon = center.lon + Math.cos(angle) * (ring + jitter) / Math.max(0.35, Math.cos(center.lat * Math.PI / 180))
+    const ringRatioByKind = { region: 0.18, subregion: 0.38, agent: 0.62 }
+    const ringMeters = spreadRadiusMeters * (ringRatioByKind[kind] || 0.48)
+    const jitterMeters = (((hash >>> 8) % 1000) / 1000) * spreadRadiusMeters * 0.18
+    const offsetMeters = ringMeters + jitterMeters
+    lat = center.lat + Math.sin(angle) * offsetMeters / 111320
+    lon = center.lon + Math.cos(angle) * offsetMeters / Math.max(1, Math.cos(center.lat * Math.PI / 180) * 111320)
   }
 
   return {
@@ -174,10 +186,15 @@ const projectNodeToMap = (node, index, center) => {
 }
 
 const mapProjection = computed(() => {
+  if (realtimeMapProjection.value?.nodes?.length || realtimeMapProjection.value?.edges?.length) {
+    return realtimeMapProjection.value
+  }
+
   const pending = currentProjectId.value === 'new' ? getPendingUpload() : null
   const context = getSceneSeedContextByProject(currentProjectId.value) || pending
   const nodes = Array.isArray(graphData.value?.nodes) ? graphData.value.nodes : []
   const edges = Array.isArray(graphData.value?.edges) ? graphData.value.edges : []
+  const radiusMeters = Number(context?.radiusMeters || context?.radius_m || realtimeMapProjection.value?.radius_m || 12000)
   let center = null
 
   if (context?.selectedPoints?.[0]) {
@@ -204,9 +221,13 @@ const mapProjection = computed(() => {
 
   return {
     center,
-    zoom_hint: 12,
-    nodes: nodes.map((node, index) => projectNodeToMap(node, index, center)),
-    edges
+    radius_m: radiusMeters,
+    zoom_hint: radiusToZoomHint(radiusMeters),
+    nodes: nodes.map((node, index) => projectNodeToMap(node, index, center, radiusMeters)),
+    edges,
+    meta: {
+      source: 'frontend_fallback_projection'
+    }
   }
 })
 
@@ -373,6 +394,7 @@ const ensureSimulationForProject = async () => {
       attachSceneSeedContextToSimulation(existing.simulation_id, sceneSeedContext)
     }
     addLog(`已复用模拟入口: ${existing.simulation_id}`)
+    await refreshMapProjection()
     return existing.simulation_id
   }
 
@@ -391,6 +413,7 @@ const ensureSimulationForProject = async () => {
       attachSceneSeedContextToSimulation(res.data.simulation_id, sceneSeedContext)
     }
     addLog(`已创建模拟入口: ${res.data.simulation_id}`)
+    await refreshMapProjection()
     return res.data.simulation_id
   }
 
@@ -435,7 +458,8 @@ const handleNewProject = async () => {
           initialVariables: pending.initialVariables,
           selectedPoints: pending.selectedPoints,
           mapSeedId: pending.mapSeedId,
-          areaLabel: pending.areaLabel
+          areaLabel: pending.areaLabel,
+          radiusMeters: pending.radiusMeters
         })
       }
       clearPendingUpload()
@@ -637,11 +661,31 @@ const loadGraph = async (graphId) => {
   }
 }
 
+const refreshMapProjection = async () => {
+  if (!currentSimulationId.value) return
+  try {
+    const res = await getSimulationGraphRealtime(currentSimulationId.value, {
+      include_map: true,
+      key_edges_only: true
+    })
+    const projection = res?.data?.map_projection
+    if (res.success && projection && Array.isArray(projection.nodes)) {
+      realtimeMapProjection.value = projection
+      const nodeCount = projection.meta?.node_count || projection.nodes.length
+      const source = projection.source_mode || res.data?.source || 'map_projection'
+      addLog(`地图投影已刷新: ${nodeCount} 个节点 / ${source}`)
+    }
+  } catch (err) {
+    console.warn('Map projection refresh failed:', err)
+  }
+}
+
 const refreshGraph = () => {
   if (projectData.value?.graph_id) {
     addLog('Manual graph refresh triggered.')
     loadGraph(projectData.value.graph_id)
   }
+  refreshMapProjection()
 }
 
 const stopPolling = () => {

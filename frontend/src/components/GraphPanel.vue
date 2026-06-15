@@ -2,7 +2,7 @@
   <div class="graph-panel">
     <div class="panel-header">
       <div class="panel-title-wrap">
-        <span v-if="graphMode !== 'map'" class="panel-title">Graph Relationship Visualization</span>
+        <span v-if="graphMode !== 'map'" class="panel-title">图谱关系可视化</span>
         <span v-if="highlightLabel && graphMode !== 'map'" class="focus-badge">{{ highlightLabel }}</span>
       </div>
       <!-- 顶部工具栏 (Internal Top Right) -->
@@ -35,7 +35,7 @@
         </div>
         <button class="tool-btn" @click="$emit('refresh')" :disabled="loading" title="刷新图谱">
           <span class="icon-refresh" :class="{ 'spinning': loading }">↻</span>
-          <span class="btn-text">Refresh</span>
+          <span class="btn-text">刷新</span>
         </button>
         <button class="tool-btn" @click="$emit('toggle-maximize')" title="最大化/还原">
           <span class="icon-maximize">⛶</span>
@@ -109,9 +109,9 @@
         <!-- 节点/边详情面板 -->
         <div v-if="selectedItem" class="detail-panel">
           <div class="detail-panel-header">
-            <span class="detail-title">{{ selectedItem.type === 'node' ? 'Node Details' : 'Relationship' }}</span>
+            <span class="detail-title">{{ selectedItem.type === 'node' ? '节点详情' : '关系详情' }}</span>
             <span v-if="selectedItem.type === 'node'" class="detail-type-badge" :style="{ background: selectedItem.color, color: '#fff' }">
-              {{ selectedItem.entityType }}
+              {{ displayToken(selectedItem.entityType) }}
             </span>
             <button class="detail-close" @click="closeDetailPanel">×</button>
           </div>
@@ -119,7 +119,7 @@
           <!-- 节点详情 -->
           <div v-if="selectedItem.type === 'node'" class="detail-content">
             <div class="detail-row">
-              <span class="detail-label">Name:</span>
+              <span class="detail-label">名称：</span>
               <span class="detail-value">{{ selectedItem.data.name }}</span>
             </div>
             <div class="detail-row">
@@ -127,33 +127,33 @@
               <span class="detail-value uuid-text">{{ selectedItem.data.uuid }}</span>
             </div>
             <div class="detail-row" v-if="selectedItem.data.created_at">
-              <span class="detail-label">Created:</span>
+              <span class="detail-label">创建时间：</span>
               <span class="detail-value">{{ formatDateTime(selectedItem.data.created_at) }}</span>
             </div>
             
             <!-- Properties -->
             <div class="detail-section" v-if="selectedItem.data.attributes && Object.keys(selectedItem.data.attributes).length > 0">
-              <div class="section-title">Properties:</div>
+              <div class="section-title">属性</div>
               <div class="properties-list">
                 <div v-for="(value, key) in selectedItem.data.attributes" :key="key" class="property-item">
-                  <span class="property-key">{{ key }}:</span>
-                  <span class="property-value">{{ value || 'None' }}</span>
+                  <span class="property-key">{{ formatPropertyKey(key) }}：</span>
+                  <span class="property-value">{{ formatPropertyValue(value) }}</span>
                 </div>
               </div>
             </div>
             
             <!-- Summary -->
             <div class="detail-section" v-if="selectedItem.data.summary">
-              <div class="section-title">Summary:</div>
+              <div class="section-title">摘要</div>
               <div class="summary-text">{{ selectedItem.data.summary }}</div>
             </div>
             
             <!-- Labels -->
             <div class="detail-section" v-if="selectedItem.data.labels && selectedItem.data.labels.length > 0">
-              <div class="section-title">Labels:</div>
+              <div class="section-title">标签</div>
               <div class="labels-list">
                 <span v-for="label in selectedItem.data.labels" :key="label" class="label-tag">
-                  {{ label }}
+                  {{ displayToken(label) }}
                 </span>
               </div>
             </div>
@@ -173,8 +173,8 @@
             <!-- 自环组详情 -->
             <template v-if="selectedItem.data.isSelfLoopGroup">
               <div class="edge-relation-header self-loop-header">
-                {{ selectedItem.data.source_name }} - Self Relations
-                <span class="self-loop-count">{{ selectedItem.data.selfLoopCount }} items</span>
+                {{ selectedItem.data.source_name }} - 自关联
+                <span class="self-loop-count">{{ selectedItem.data.selfLoopCount }} 条</span>
               </div>
               
               <div class="self-loop-list">
@@ -199,19 +199,19 @@
                       <span class="detail-value uuid-text">{{ loop.uuid }}</span>
                     </div>
                     <div class="detail-row" v-if="loop.fact">
-                      <span class="detail-label">Fact:</span>
+                      <span class="detail-label">事实：</span>
                       <span class="detail-value fact-text">{{ loop.fact }}</span>
                     </div>
                     <div class="detail-row" v-if="loop.fact_type">
-                      <span class="detail-label">Type:</span>
-                      <span class="detail-value">{{ loop.fact_type }}</span>
+                      <span class="detail-label">类型：</span>
+                      <span class="detail-value">{{ displayToken(loop.fact_type) }}</span>
                     </div>
                     <div class="detail-row" v-if="loop.created_at">
-                      <span class="detail-label">Created:</span>
+                      <span class="detail-label">创建时间：</span>
                       <span class="detail-value">{{ formatDateTime(loop.created_at) }}</span>
                     </div>
                     <div v-if="loop.episodes && loop.episodes.length > 0" class="self-loop-episodes">
-                      <span class="detail-label">Episodes:</span>
+                      <span class="detail-label">片段：</span>
                       <div class="episodes-list compact">
                         <span v-for="ep in loop.episodes" :key="ep" class="episode-tag small">{{ ep }}</span>
                       </div>
@@ -224,7 +224,7 @@
             <!-- 普通边详情 -->
             <template v-else>
               <div class="edge-relation-header">
-                {{ selectedItem.data.source_name }} → {{ selectedItem.data.name || 'RELATED_TO' }} → {{ selectedItem.data.target_name }}
+                {{ selectedItem.data.source_name }} → {{ displayToken(selectedItem.data.name || 'RELATED_TO') }} → {{ selectedItem.data.target_name }}
               </div>
               
               <div class="detail-row">
@@ -232,21 +232,21 @@
                 <span class="detail-value uuid-text">{{ selectedItem.data.uuid }}</span>
               </div>
               <div class="detail-row">
-                <span class="detail-label">Label:</span>
-                <span class="detail-value">{{ selectedItem.data.name || 'RELATED_TO' }}</span>
+                <span class="detail-label">标签：</span>
+                <span class="detail-value">{{ displayToken(selectedItem.data.name || 'RELATED_TO') }}</span>
               </div>
               <div class="detail-row">
-                <span class="detail-label">Type:</span>
-                <span class="detail-value">{{ selectedItem.data.fact_type || 'Unknown' }}</span>
+                <span class="detail-label">类型：</span>
+                <span class="detail-value">{{ displayToken(selectedItem.data.fact_type || 'Unknown') }}</span>
               </div>
               <div class="detail-row" v-if="selectedItem.data.fact">
-                <span class="detail-label">Fact:</span>
+                <span class="detail-label">事实：</span>
                 <span class="detail-value fact-text">{{ selectedItem.data.fact }}</span>
               </div>
               
               <!-- Episodes -->
               <div class="detail-section" v-if="selectedItem.data.episodes && selectedItem.data.episodes.length > 0">
-                <div class="section-title">Episodes:</div>
+                <div class="section-title">片段</div>
                 <div class="episodes-list">
                   <span v-for="ep in selectedItem.data.episodes" :key="ep" class="episode-tag">
                     {{ ep }}
@@ -255,7 +255,7 @@
               </div>
               
               <div class="detail-row" v-if="selectedItem.data.created_at">
-                <span class="detail-label">Created:</span>
+                <span class="detail-label">创建时间：</span>
                 <span class="detail-value">{{ formatDateTime(selectedItem.data.created_at) }}</span>
               </div>
               <div class="detail-row" v-if="selectedItem.data.valid_at">
@@ -309,7 +309,7 @@
 
     <!-- 底部图例 (Bottom Left) -->
     <div v-if="hasGraphContent && graphMode !== 'map' && entityTypes.length" class="graph-legend">
-      <span class="legend-title">Entity Types</span>
+      <span class="legend-title">实体类型</span>
       <div class="legend-items">
         <div class="legend-item" v-for="type in entityTypes" :key="type.name">
           <span class="legend-dot" :style="{ background: type.color }"></span>
@@ -324,7 +324,7 @@
         <input type="checkbox" v-model="showEdgeLabels" />
         <span class="slider"></span>
       </label>
-      <span class="toggle-label">Show Edge Labels</span>
+      <span class="toggle-label">显示关系标签</span>
     </div>
   </div>
 </template>
@@ -333,6 +333,7 @@
 import { ref, onMounted, onUnmounted, watch, nextTick, computed } from 'vue'
 import * as d3 from 'd3'
 import MapRelationPanel from './MapRelationPanel.vue'
+import { formatTokenLabelZh, translateDisplayToken } from '../utils/displayText'
 
 const props = defineProps({
   graphData: Object,
@@ -437,6 +438,19 @@ const dismissFinishedHint = () => {
   showSimulationFinishedHint.value = false
 }
 
+const displayToken = (value, fallback = '') => {
+  return translateDisplayToken(value, fallback || String(value || ''))
+}
+
+const formatPropertyKey = (key) => formatTokenLabelZh(key, key)
+
+const formatPropertyValue = (value) => {
+  if (value === null || value === undefined || value === '') return '无'
+  if (Array.isArray(value)) return value.map((item) => displayToken(item)).join('、')
+  if (typeof value === 'object') return JSON.stringify(value)
+  return displayToken(value)
+}
+
 // 监听 isSimulating 变化，检测模拟结束
 watch(() => props.isSimulating, (newValue, oldValue) => {
   if (newValue) {
@@ -469,8 +483,9 @@ const entityTypes = computed(() => {
   
   props.graphData.nodes.forEach(node => {
     const type = node.labels?.find(l => l !== 'Entity') || 'Entity'
+    const displayName = displayToken(type)
     if (!typeMap[type]) {
-      typeMap[type] = { name: type, count: 0, color: colors[Object.keys(typeMap).length % colors.length] }
+      typeMap[type] = { rawType: type, name: displayName, count: 0, color: colors[Object.keys(typeMap).length % colors.length] }
     }
     typeMap[type].count++
   })
@@ -508,13 +523,13 @@ const formatDateTime = (dateStr) => {
   if (!dateStr) return ''
   try {
     const date = new Date(dateStr)
-    return date.toLocaleString('en-US', { 
-      month: 'short', 
+    return date.toLocaleString('zh-CN', {
+      month: 'short',
       day: 'numeric', 
       year: 'numeric',
       hour: 'numeric',
       minute: '2-digit',
-      hour12: true 
+      hour12: false
     })
   } catch {
     return dateStr
@@ -559,6 +574,9 @@ let SpriteTextClass = null
 let renderFrame = null
 let resizeTimer = null
 let containerResizeObserver = null
+let graph2DState = null
+let last2DStructureSignature = ''
+let currentZoomTransform = d3.zoomIdentity
 
 const scheduleGraphRender = () => {
   if (renderFrame !== null) {
@@ -615,6 +633,7 @@ const destroy3DGraph = () => {
 const getNodeColorByType = (type) => {
   const colorMap = {}
   entityTypes.value.forEach(t => {
+    colorMap[t.rawType || t.name] = t.color
     colorMap[t.name] = t.color
   })
   return colorMap[type] || '#999'
@@ -809,6 +828,98 @@ const getEntityDelayMs = (entity, ratio = 1) => {
   return clamp(Math.round(raw * ratio), 0, 520)
 }
 
+const getEntityAnimationProgress = (entity) => {
+  const raw = Number(entity?.rawData?.attributes?.animation_progress ?? entity?.attributes?.animation_progress ?? 1)
+  if (!Number.isFinite(raw)) return 1
+  return clamp(raw, 0, 1)
+}
+
+const getNodeStableId = (node) => String(node?.uuid || node?.id || '')
+
+const getEdgeStableId = (edge, fallbackIndex = 0) => {
+  const explicit = edge?.uuid || edge?.id || edge?.edge_id || edge?.edgeId || edge?.fact_id || edge?.factId
+  if (explicit) return String(explicit)
+  const source = edge?.source_node_uuid || edge?.source || edge?.from || ''
+  const target = edge?.target_node_uuid || edge?.target || edge?.to || ''
+  const type = edge?.fact_type || edge?.name || edge?.type || 'related'
+  return `${source}->${target}:${type}:${fallbackIndex}`
+}
+
+const buildGraphStructureSignature = (graph) => {
+  const nodes = Array.isArray(graph?.nodes) ? graph.nodes : []
+  const edges = Array.isArray(graph?.edges) ? graph.edges : []
+  const nodePart = nodes
+    .map(node => getNodeStableId(node))
+    .filter(Boolean)
+    .sort()
+    .join('|')
+  const edgePart = edges
+    .map((edge, index) => [
+      getEdgeStableId(edge, index),
+      edge?.source_node_uuid || edge?.source || '',
+      edge?.target_node_uuid || edge?.target || '',
+      edge?.fact_type || edge?.name || ''
+    ].join(':'))
+    .sort()
+    .join('|')
+  return `${nodes.length}:${edges.length}:${nodePart}::${edgePart}`
+}
+
+const updateRenderedGraphData = () => {
+  if (!graph2DState || graphMode.value !== '2d' || !props.graphData) return false
+  const latestNodes = new Map(
+    (Array.isArray(props.graphData.nodes) ? props.graphData.nodes : [])
+      .map(node => [getNodeStableId(node), node])
+      .filter(([id]) => Boolean(id))
+  )
+  const latestEdges = new Map(
+    (Array.isArray(props.graphData.edges) ? props.graphData.edges : [])
+      .map((edge, index) => [getEdgeStableId(edge, index), edge])
+      .filter(([id]) => Boolean(id))
+  )
+
+  graph2DState.nodes.forEach((node) => {
+    const latest = latestNodes.get(node.id)
+    if (!latest) return
+    node.name = latest.name || node.name
+    node.type = latest.labels?.find(label => label !== 'Entity') || node.type
+    node.rawData = latest
+    node.layer = nodeLayerKey(node)
+  })
+
+  graph2DState.edges.forEach((edge) => {
+    if (edge.rawData?.isSelfLoopGroup) {
+      const updatedLoops = (edge.rawData.selfLoopEdges || []).map((loopEdge, index) => {
+        const latest = latestEdges.get(getEdgeStableId(loopEdge, index))
+        return latest ? { ...loopEdge, ...latest } : loopEdge
+      })
+      edge.rawData = {
+        ...edge.rawData,
+        selfLoopEdges: updatedLoops,
+        attributes: mergeAnimationAttributes(updatedLoops)
+      }
+      return
+    }
+    const latest = latestEdges.get(getEdgeStableId(edge.rawData))
+    if (!latest) return
+    edge.type = latest.fact_type || latest.name || edge.type
+    edge.name = latest.name || latest.fact_type || edge.name
+    edge.rawData = {
+      ...latest,
+      source_name: graph2DState.nodeMap.get(latest.source_node_uuid || latest.source)?.name,
+      target_name: graph2DState.nodeMap.get(latest.target_node_uuid || latest.target)?.name
+    }
+  })
+
+  graph2DState.nodeLabels?.text(d => {
+    const label = displayToken(d.name)
+    return label.length > 8 ? `${label.substring(0, 8)}…` : label
+  })
+  graph2DState.linkLabels?.text(d => displayToken(d.name))
+  graph2DState.applyBaseGraphState?.()
+  return true
+}
+
 const getLinkBaseColorByType = (type) => {
   const token = String(type || '').trim().toLowerCase()
   if (token === 'dynamic_edge') return '#b45309'
@@ -831,7 +942,11 @@ const getNodeBaseRadius = (node, is3D = false) => {
 }
 
 const getNodeAnimationStyle = (node, { highlightActive = false, highlighted = false, is3D = false } = {}) => {
-  const status = getEntityAnimationStatus(node)
+  const rawStatus = getEntityAnimationStatus(node)
+  const status = props.highlightMode === 'animation' && !['new', 'active'].includes(rawStatus)
+    ? 'hidden'
+    : rawStatus
+  const progress = getEntityAnimationProgress(node)
   const baseColor = getNodeColorByType(node.type)
   const baseRadius = getNodeBaseRadius(node, is3D)
   let color = baseColor
@@ -872,6 +987,21 @@ const getNodeAnimationStyle = (node, { highlightActive = false, highlighted = fa
     strokeWidth = is3D ? 0 : 1.5
     labelOpacity = 0.08
     labelScale = 0.9
+  } else if (status === 'hidden') {
+    radius = Math.max(is3D ? 1.8 : 4.4, radius - (is3D ? 1.6 : 3))
+    opacity = 0
+    strokeColor = '#d7dee8'
+    strokeWidth = is3D ? 0 : 0.8
+    labelOpacity = 0
+    haloOpacity = 0
+  }
+
+  if (status !== 'hidden') {
+    const revealScale = 0.58 + (progress * 0.42)
+    radius *= revealScale
+    opacity *= 0.18 + (progress * 0.82)
+    labelOpacity *= progress
+    haloOpacity *= progress
   }
 
   if (highlightActive) {
@@ -893,6 +1023,9 @@ const getNodeAnimationStyle = (node, { highlightActive = false, highlighted = fa
     } else if (status === 'faded') {
       opacity = Math.min(opacity, 0.08)
       labelOpacity = 0.04
+    } else if (status === 'hidden') {
+      opacity = 0
+      labelOpacity = 0
     } else {
       opacity = is3D ? 0.24 : 0.24
       labelOpacity = node.layer === 'agent' ? 0.08 : 0.22
@@ -916,7 +1049,11 @@ const getNodeAnimationStyle = (node, { highlightActive = false, highlighted = fa
 
 const shouldShowNodeLabel = (node, { highlightActive = false, highlighted = false } = {}) => {
   if (highlighted) return true
-  const status = getEntityAnimationStatus(node)
+  const rawStatus = getEntityAnimationStatus(node)
+  const status = props.highlightMode === 'animation' && !['new', 'active'].includes(rawStatus)
+    ? 'hidden'
+    : rawStatus
+  if (status === 'hidden') return false
   if (status === 'new' || status === 'active') return true
   const layer = node.layer || nodeLayerKey(node)
   if (layer === 'macro' || layer === 'subregion') return true
@@ -936,7 +1073,11 @@ const getLinkAnimationStyle = (
     neighborColor = '#E0A25A',
   } = {},
 ) => {
-  const status = getEntityAnimationStatus(link)
+  const rawStatus = getEntityAnimationStatus(link)
+  const status = props.highlightMode === 'animation' && !['new', 'active'].includes(rawStatus)
+    ? 'hidden'
+    : rawStatus
+  const progress = getEntityAnimationProgress(link)
   const baseColor = getLinkBaseColorByType(link.type || link?.rawData?.fact_type || link?.name)
   let color = baseColor
   let width = is3D ? 0.55 : 1.5
@@ -971,6 +1112,20 @@ const getLinkAnimationStyle = (
     dashArray = '3 7'
     labelOpacity = 0.08
     labelColor = '#94a3b8'
+  } else if (status === 'hidden') {
+    color = '#d8dee8'
+    width = is3D ? 0.08 : 0.45
+    opacity = 0
+    dashArray = '2 9'
+    labelOpacity = 0
+    labelColor = '#cbd5e1'
+  }
+
+  if (status !== 'hidden') {
+    width *= 0.55 + (progress * 0.45)
+    opacity *= 0.12 + (progress * 0.88)
+    labelOpacity *= progress
+    particles = progress >= 0.35 ? particles : 0
   }
 
   if (highlightActive) {
@@ -993,6 +1148,10 @@ const getLinkAnimationStyle = (
     } else if (status === 'new' || status === 'active') {
       opacity = Math.max(opacity, is3D ? 0.56 : 0.74)
       labelOpacity = Math.max(labelOpacity, 0.6)
+    } else if (status === 'hidden') {
+      opacity = 0
+      labelOpacity = 0
+      particles = 0
     } else {
       opacity = status === 'faded' ? 0.04 : (is3D ? 0.06 : 0.1)
       labelOpacity = Math.min(labelOpacity, 0.16)
@@ -1092,6 +1251,7 @@ const renderGraph3D = async () => {
   const getNodeId = (nodeRef) => (typeof nodeRef === 'object' ? nodeRef?.id : nodeRef)
   const isLinkFocused = (linkData) => {
     if (isEdgeHighlighted(linkData)) return true
+    if (props.highlightMode === 'animation') return false
     const sourceId = getNodeId(linkData.source)
     const targetId = getNodeId(linkData.target)
     return highlightedNodeIds.has(sourceId) || highlightedNodeIds.has(targetId)
@@ -1382,7 +1542,11 @@ const renderGraph = () => {
 
   // Prep data
   const nodeMap = {}
-  nodesData.forEach(n => nodeMap[n.uuid] = n)
+  const nodeLookup = new Map()
+  nodesData.forEach(n => {
+    nodeMap[n.uuid] = n
+    nodeLookup.set(n.uuid, n)
+  })
   
   const nodes = nodesData.map(n => {
     const oldNode = oldNodeMap.get(n.uuid)
@@ -1401,30 +1565,6 @@ const renderGraph = () => {
     }
   })
 
-  const highlightedIdSet = new Set(
-    (props.highlightNodeIds || [])
-      .map(item => String(item || '').trim())
-      .filter(Boolean)
-  )
-  const highlightedNameSet = new Set(
-    (props.highlightNodeNames || [])
-      .map(item => String(item || '').trim().toLowerCase())
-      .filter(Boolean)
-  )
-  const highlightedEdgeIdSet = new Set(uniqueTokens(props.highlightEdgeIds || []))
-  const highlightActive = highlightedIdSet.size > 0 || highlightedNameSet.size > 0 || highlightedEdgeIdSet.size > 0
-
-  nodes.forEach(node => {
-    const nodeName = String(node.name || '').trim().toLowerCase()
-    node.externallyHighlighted = highlightedIdSet.has(node.id) || highlightedNameSet.has(nodeName)
-  })
-
-  const highlightedNodeIds = new Set(
-    nodes
-      .filter(node => node.externallyHighlighted)
-      .map(node => node.id)
-  )
-  
   const nodeIds = new Set(nodes.map(n => n.id))
   
   // 处理边数据，计算同一对节点间的边数量和索引
@@ -1468,7 +1608,7 @@ const renderGraph = () => {
       processedSelfLoopNodes.add(e.source_node_uuid)
       
       const allSelfLoops = selfLoopEdges[e.source_node_uuid]
-      const nodeName = nodeMap[e.source_node_uuid]?.name || 'Unknown'
+      const nodeName = nodeMap[e.source_node_uuid]?.name || '未知节点'
       const highlightKeys = uniqueTokens(
         allSelfLoops.flatMap((loopEdge, loopIndex) =>
           buildEdgeHighlightKeys(loopEdge, e.source_node_uuid, e.target_node_uuid, loopEdge.fact_type || loopEdge.name || 'SELF_LOOP', loopIndex)
@@ -1479,7 +1619,7 @@ const renderGraph = () => {
         source: e.source_node_uuid,
         target: e.target_node_uuid,
         type: 'SELF_LOOP',
-        name: `Self Relations (${allSelfLoops.length})`,
+        name: `自关联（${allSelfLoops.length}）`,
         curvature: 0,
         isSelfLoop: true,
         highlightKeys,
@@ -1545,16 +1685,56 @@ const renderGraph = () => {
     
   // Color scale
   const colorMap = {}
-  entityTypes.value.forEach(t => colorMap[t.name] = t.color)
+  entityTypes.value.forEach(t => {
+    colorMap[t.rawType || t.name] = t.color
+    colorMap[t.name] = t.color
+  })
   const getColor = (type) => colorMap[type] || '#999'
-  const isEdgeHighlighted = (linkData) => (linkData.highlightKeys || []).some(token => highlightedEdgeIdSet.has(token))
-  const isLinkFocused = (linkData) => isEdgeHighlighted(linkData) || highlightedNodeIds.has(linkData.source.id) || highlightedNodeIds.has(linkData.target.id)
-  const edgeHighlightColor = props.highlightMode === 'risk_runtime'
-    ? '#E04F39'
-    : props.highlightMode === 'risk_definition'
-      ? '#F08A24'
-      : '#E0A25A'
   const edgeNeighborColor = '#E0A25A'
+  const getCurrentHighlightState = () => {
+    const highlightedIdSet = new Set(
+      (props.highlightNodeIds || [])
+        .map(item => String(item || '').trim())
+        .filter(Boolean)
+    )
+    const highlightedNameSet = new Set(
+      (props.highlightNodeNames || [])
+        .map(item => String(item || '').trim().toLowerCase())
+        .filter(Boolean)
+    )
+    const highlightedEdgeIdSet = new Set(uniqueTokens(props.highlightEdgeIds || []))
+
+    nodes.forEach(node => {
+      const nodeName = String(node.name || '').trim().toLowerCase()
+      node.externallyHighlighted = highlightedIdSet.has(node.id) || highlightedNameSet.has(nodeName)
+    })
+
+    const highlightedNodeIds = new Set(
+      nodes
+        .filter(node => node.externallyHighlighted)
+        .map(node => node.id)
+    )
+    const isEdgeHighlighted = (linkData) => (linkData.highlightKeys || []).some(token => highlightedEdgeIdSet.has(token))
+    const getLinkedNodeId = (nodeRef) => typeof nodeRef === 'object' ? nodeRef?.id : nodeRef
+    const isLinkFocused = (linkData) => {
+      if (isEdgeHighlighted(linkData)) return true
+      if (props.highlightMode === 'animation') return false
+      return highlightedNodeIds.has(getLinkedNodeId(linkData.source)) || highlightedNodeIds.has(getLinkedNodeId(linkData.target))
+    }
+    const highlightActive = highlightedIdSet.size > 0 || highlightedNameSet.size > 0 || highlightedEdgeIdSet.size > 0
+    const edgeHighlightColor = props.highlightMode === 'risk_runtime'
+      ? '#E04F39'
+      : props.highlightMode === 'risk_definition'
+        ? '#F08A24'
+        : '#E0A25A'
+    return {
+      highlightedNodeIds,
+      highlightActive,
+      isEdgeHighlighted,
+      isLinkFocused,
+      edgeHighlightColor,
+    }
+  }
   const shouldAnimateFrameTransition = props.highlightMode === 'animation'
 
   // Simulation - 根据边数量动态调整节点间距
@@ -1581,9 +1761,12 @@ const renderGraph = () => {
   const g = svg.append('g')
   
   // Zoom
-  svg.call(d3.zoom().extent([[0, 0], [width, height]]).scaleExtent([0.1, 4]).on('zoom', (event) => {
+  const zoomBehavior = d3.zoom().extent([[0, 0], [width, height]]).scaleExtent([0.1, 4]).on('zoom', (event) => {
+    currentZoomTransform = event.transform
     g.attr('transform', event.transform)
-  }))
+  })
+  svg.call(zoomBehavior)
+  svg.call(zoomBehavior.transform, currentZoomTransform)
 
   // Links - 使用 path 支持曲线
   const linkGroup = g.append('g').attr('class', 'links')
@@ -1706,7 +1889,7 @@ const renderGraph = () => {
   const linkLabels = linkGroup.selectAll('text')
     .data(edges)
     .enter().append('text')
-    .text(d => d.name)
+    .text(d => displayToken(d.name))
     .attr('font-size', '9px')
     .attr('fill', '#666')
     .attr('text-anchor', 'middle')
@@ -1806,8 +1989,9 @@ const renderGraph = () => {
     })
     .on('mouseleave', (event, d) => {
       if (!selectedItem.value || selectedItem.value.data?.uuid !== d.rawData.uuid) {
+        const highlightState = getCurrentHighlightState()
         const style = getNodeAnimationStyle(d, {
-          highlightActive,
+          highlightActive: highlightState.highlightActive,
           highlighted: Boolean(d.externallyHighlighted),
           is3D: false,
         })
@@ -1821,7 +2005,10 @@ const renderGraph = () => {
   const nodeLabels = nodeGroup.selectAll('text')
     .data(nodes)
     .enter().append('text')
-    .text(d => d.name.length > 8 ? d.name.substring(0, 8) + '…' : d.name)
+    .text(d => {
+      const label = displayToken(d.name)
+      return label.length > 8 ? label.substring(0, 8) + '…' : label
+    })
     .attr('font-size', '11px')
     .attr('fill', '#333')
     .attr('font-weight', '500')
@@ -1831,10 +2018,11 @@ const renderGraph = () => {
     .style('font-family', 'system-ui, sans-serif')
 
   if (shouldAnimateFrameTransition) {
+    const highlightState = getCurrentHighlightState()
     node
       .attr('r', d => {
         const style = getNodeAnimationStyle(d, {
-          highlightActive,
+          highlightActive: highlightState.highlightActive,
           highlighted: Boolean(d.externallyHighlighted),
           is3D: false,
         })
@@ -1842,7 +2030,7 @@ const renderGraph = () => {
       })
       .attr('opacity', d => {
         const style = getNodeAnimationStyle(d, {
-          highlightActive,
+          highlightActive: highlightState.highlightActive,
           highlighted: Boolean(d.externallyHighlighted),
           is3D: false,
         })
@@ -1852,11 +2040,11 @@ const renderGraph = () => {
     link
       .attr('opacity', d => {
         const style = getLinkAnimationStyle(d, {
-          highlightActive,
-          highlighted: isEdgeHighlighted(d),
-          focused: isLinkFocused(d),
+          highlightActive: highlightState.highlightActive,
+          highlighted: highlightState.isEdgeHighlighted(d),
+          focused: highlightState.isLinkFocused(d),
           is3D: false,
-          highlightColor: edgeHighlightColor,
+          highlightColor: highlightState.edgeHighlightColor,
           neighborColor: edgeNeighborColor,
         })
         return style.status === 'faded' ? 0.03 : Math.min(style.opacity, 0.12)
@@ -1868,6 +2056,7 @@ const renderGraph = () => {
   }
 
   const applyBaseGraphState = () => {
+    const highlightState = getCurrentHighlightState()
     const animateNode = shouldAnimateFrameTransition
       ? node.transition().duration(420).delay(d => getEntityDelayMs(d)).ease(d3.easeCubicOut)
       : node
@@ -1886,27 +2075,27 @@ const renderGraph = () => {
 
     animateNode
       .attr('r', d => getNodeAnimationStyle(d, {
-        highlightActive,
+        highlightActive: highlightState.highlightActive,
         highlighted: Boolean(d.externallyHighlighted),
         is3D: false,
       }).radius)
       .attr('fill', d => getNodeAnimationStyle(d, {
-        highlightActive,
+        highlightActive: highlightState.highlightActive,
         highlighted: Boolean(d.externallyHighlighted),
         is3D: false,
       }).color)
       .attr('opacity', d => getNodeAnimationStyle(d, {
-        highlightActive,
+        highlightActive: highlightState.highlightActive,
         highlighted: Boolean(d.externallyHighlighted),
         is3D: false,
       }).opacity)
       .attr('stroke', d => getNodeAnimationStyle(d, {
-        highlightActive,
+        highlightActive: highlightState.highlightActive,
         highlighted: Boolean(d.externallyHighlighted),
         is3D: false,
       }).strokeColor)
       .attr('stroke-width', d => getNodeAnimationStyle(d, {
-        highlightActive,
+        highlightActive: highlightState.highlightActive,
         highlighted: Boolean(d.externallyHighlighted),
         is3D: false,
       }).strokeWidth)
@@ -1914,61 +2103,61 @@ const renderGraph = () => {
     animateNodeLabels
       .attr('opacity', d => {
         const highlighted = Boolean(d.externallyHighlighted)
-        if (!shouldShowNodeLabel(d, { highlightActive, highlighted })) return 0
+        if (!shouldShowNodeLabel(d, { highlightActive: highlightState.highlightActive, highlighted })) return 0
         return getNodeAnimationStyle(d, {
-          highlightActive,
+          highlightActive: highlightState.highlightActive,
           highlighted,
           is3D: false,
         }).labelOpacity
       })
       .attr('font-weight', d => getNodeAnimationStyle(d, {
-        highlightActive,
+        highlightActive: highlightState.highlightActive,
         highlighted: Boolean(d.externallyHighlighted),
         is3D: false,
       }).status === 'active' ? 700 : 500)
 
     animateLink
       .attr('stroke', d => getLinkAnimationStyle(d, {
-        highlightActive,
-        highlighted: isEdgeHighlighted(d),
-        focused: isLinkFocused(d),
+        highlightActive: highlightState.highlightActive,
+        highlighted: highlightState.isEdgeHighlighted(d),
+        focused: highlightState.isLinkFocused(d),
         is3D: false,
-        highlightColor: edgeHighlightColor,
+        highlightColor: highlightState.edgeHighlightColor,
         neighborColor: edgeNeighborColor,
       }).color)
       .attr('stroke-width', d => getLinkAnimationStyle(d, {
-        highlightActive,
-        highlighted: isEdgeHighlighted(d),
-        focused: isLinkFocused(d),
+        highlightActive: highlightState.highlightActive,
+        highlighted: highlightState.isEdgeHighlighted(d),
+        focused: highlightState.isLinkFocused(d),
         is3D: false,
-        highlightColor: edgeHighlightColor,
+        highlightColor: highlightState.edgeHighlightColor,
         neighborColor: edgeNeighborColor,
       }).width)
       .attr('stroke-dasharray', d => getLinkAnimationStyle(d, {
-        highlightActive,
-        highlighted: isEdgeHighlighted(d),
-        focused: isLinkFocused(d),
+        highlightActive: highlightState.highlightActive,
+        highlighted: highlightState.isEdgeHighlighted(d),
+        focused: highlightState.isLinkFocused(d),
         is3D: false,
-        highlightColor: edgeHighlightColor,
+        highlightColor: highlightState.edgeHighlightColor,
         neighborColor: edgeNeighborColor,
       }).dashArray || null)
       .attr('opacity', d => getLinkAnimationStyle(d, {
-        highlightActive,
-        highlighted: isEdgeHighlighted(d),
-        focused: isLinkFocused(d),
+        highlightActive: highlightState.highlightActive,
+        highlighted: highlightState.isEdgeHighlighted(d),
+        focused: highlightState.isLinkFocused(d),
         is3D: false,
-        highlightColor: edgeHighlightColor,
+        highlightColor: highlightState.edgeHighlightColor,
         neighborColor: edgeNeighborColor,
       }).opacity)
 
     animateLinkLabelBg
       .attr('fill', d => {
         const style = getLinkAnimationStyle(d, {
-          highlightActive,
-          highlighted: isEdgeHighlighted(d),
-          focused: isLinkFocused(d),
+          highlightActive: highlightState.highlightActive,
+          highlighted: highlightState.isEdgeHighlighted(d),
+          focused: highlightState.isLinkFocused(d),
           is3D: false,
-          highlightColor: edgeHighlightColor,
+          highlightColor: highlightState.edgeHighlightColor,
           neighborColor: edgeNeighborColor,
         })
         if (style.status === 'active') return 'rgba(255,245,240,0.96)'
@@ -1977,44 +2166,56 @@ const renderGraph = () => {
       })
       .attr('opacity', d => showEdgeLabels.value
         ? getLinkAnimationStyle(d, {
-          highlightActive,
-          highlighted: isEdgeHighlighted(d),
-          focused: isLinkFocused(d),
+          highlightActive: highlightState.highlightActive,
+          highlighted: highlightState.isEdgeHighlighted(d),
+          focused: highlightState.isLinkFocused(d),
           is3D: false,
-          highlightColor: edgeHighlightColor,
+          highlightColor: highlightState.edgeHighlightColor,
           neighborColor: edgeNeighborColor,
         }).labelOpacity
         : 0)
 
     animateLinkLabels
       .attr('fill', d => getLinkAnimationStyle(d, {
-        highlightActive,
-        highlighted: isEdgeHighlighted(d),
-        focused: isLinkFocused(d),
+        highlightActive: highlightState.highlightActive,
+        highlighted: highlightState.isEdgeHighlighted(d),
+        focused: highlightState.isLinkFocused(d),
         is3D: false,
-        highlightColor: edgeHighlightColor,
+        highlightColor: highlightState.edgeHighlightColor,
         neighborColor: edgeNeighborColor,
       }).labelColor)
       .attr('opacity', d => showEdgeLabels.value
         ? getLinkAnimationStyle(d, {
-          highlightActive,
-          highlighted: isEdgeHighlighted(d),
-          focused: isLinkFocused(d),
+          highlightActive: highlightState.highlightActive,
+          highlighted: highlightState.isEdgeHighlighted(d),
+          focused: highlightState.isLinkFocused(d),
           is3D: false,
-          highlightColor: edgeHighlightColor,
+          highlightColor: highlightState.edgeHighlightColor,
           neighborColor: edgeNeighborColor,
         }).labelOpacity
         : 0)
       .attr('font-weight', d => getLinkAnimationStyle(d, {
-        highlightActive,
-        highlighted: isEdgeHighlighted(d),
-        focused: isLinkFocused(d),
+        highlightActive: highlightState.highlightActive,
+        highlighted: highlightState.isEdgeHighlighted(d),
+        focused: highlightState.isLinkFocused(d),
         is3D: false,
-        highlightColor: edgeHighlightColor,
+        highlightColor: highlightState.edgeHighlightColor,
         neighborColor: edgeNeighborColor,
       }).status === 'active' ? 700 : 500)
   }
 
+  graph2DState = {
+    nodes,
+    edges,
+    nodeMap: nodeLookup,
+    node,
+    nodeLabels,
+    link,
+    linkLabelBg,
+    linkLabels,
+    applyBaseGraphState,
+  }
+  last2DStructureSignature = buildGraphStructureSignature(props.graphData)
   applyBaseGraphState()
 
   const maxTicks = oldNodeMap.size > 0 ? 70 : 140
@@ -2070,6 +2271,11 @@ const renderGraph = () => {
 }
 
 watch(() => props.graphData, () => {
+  const nextSignature = buildGraphStructureSignature(props.graphData)
+  if (graphMode.value === '2d' && graph2DState && nextSignature && nextSignature === last2DStructureSignature) {
+    nextTick(updateRenderedGraphData)
+    return
+  }
   nextTick(scheduleGraphRender)
 })
 
@@ -2083,6 +2289,10 @@ watch(
     graphMode.value
   ],
   () => {
+    if (graphMode.value === '2d' && graph2DState) {
+      nextTick(updateRenderedGraphData)
+      return
+    }
     nextTick(scheduleGraphRender)
   }
 )

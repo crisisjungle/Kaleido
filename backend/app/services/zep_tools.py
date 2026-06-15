@@ -146,6 +146,8 @@ class ZepToolsService:
         interactions = artifacts.get("agent_interactions") or []
         spread_events = artifacts.get("spread_events") or []
         dynamic_edges = artifacts.get("dynamic_edge_events") or []
+        map_grounding = self._map_grounding_context(bundle)
+        map_grounding_summary = self._format_map_grounding(map_grounding)
 
         total_nodes = len(agents) + len(regions) + len(subregions) + len(risk_objects)
         total_edges = (
@@ -177,6 +179,8 @@ class ZepToolsService:
                 "engine_mode": config.get("engine_mode") or state.get("engine_mode"),
                 "scenario_mode": config.get("scenario_mode") or state.get("scenario_mode"),
                 "diffusion_template": config.get("diffusion_template") or state.get("diffusion_template"),
+                "map_grounding": map_grounding,
+                "map_grounding_summary": map_grounding_summary,
                 "total_rounds": (config.get("time_config") or {}).get("total_rounds") or state.get("configured_total_rounds"),
                 "minutes_per_round": (config.get("time_config") or {}).get("minutes_per_round") or state.get("configured_minutes_per_round"),
                 "agents_count": len(agents),
@@ -190,6 +194,8 @@ class ZepToolsService:
                 "active_variables": config.get("injected_variables") or latest.get("active_variables") or [],
                 "risk_objects": risk_objects,
             },
+            "map_grounding": map_grounding,
+            "map_grounding_summary": map_grounding_summary,
             "envfish_summary": self.get_envfish_summary(simulation_id, limit=8),
             "envfish_fact_bullets": self._fact_bullets(simulation_id, limit=12),
             "related_facts": self._fact_bullets(simulation_id, limit=12),
@@ -211,6 +217,9 @@ class ZepToolsService:
                 f"{len(config.get('risk_objects') or [])} 个风险对象"
             ),
         ]
+        map_summary = self._format_map_grounding(self._map_grounding_context(bundle))
+        if map_summary:
+            lines.append(map_summary)
         variables = config.get("injected_variables") or latest.get("active_variables") or []
         if variables:
             lines.append("注入变量: " + "；".join(self._variable_label(item) for item in variables[:limit]))
@@ -320,12 +329,141 @@ class ZepToolsService:
 
     def _fact_bullets(self, simulation_id: str, limit: int = 12) -> List[str]:
         rows = []
+        bundle = self._load_bundle(simulation_id)
+        map_summary = self._format_map_grounding(self._map_grounding_context(bundle))
+        if map_summary:
+            rows.extend(map_summary.splitlines())
         summary = self.get_envfish_summary(simulation_id, limit=4)
         if summary:
             rows.extend(summary.splitlines())
         rows.extend(self.get_envfish_regional_spread_summary(simulation_id, limit=4).splitlines())
         rows.extend(self.get_envfish_feedback_summary(simulation_id, limit=4).splitlines())
         return [row for row in rows if row][:limit]
+
+    def _map_grounding_context(self, bundle: Dict[str, Any]) -> Dict[str, Any]:
+        state = bundle.get("state") or {}
+        config = bundle.get("config") or {}
+        map_seed_id = str(state.get("map_seed_id") or config.get("map_seed_id") or "").strip()
+        if not map_seed_id:
+            return {}
+
+        try:
+            from .map_seed_manager import MapSeedManager
+
+            seed = MapSeedManager.get_seed(map_seed_id) or {}
+            graph = MapSeedManager.get_graph_snapshot(map_seed_id) or {}
+            report_text = MapSeedManager.get_report_text(map_seed_id) or ""
+        except Exception:
+            return {"map_seed_id": map_seed_id}
+
+        graph_data = graph.get("graph_data") or graph
+        nodes = [node for node in (graph_data.get("nodes") or []) if isinstance(node, dict)]
+        aoi = seed.get("area_of_interest") or {}
+        admin = seed.get("admin_context") or {}
+        input_payload = seed.get("input") or {}
+        center = aoi.get("center") or {
+            "lat": input_payload.get("lat"),
+            "lon": input_payload.get("lon"),
+        }
+
+        def node_source(node: Dict[str, Any]) -> str:
+            return str((node.get("attributes") or {}).get("source_kind") or "").strip().lower()
+
+        def feature_payload(node: Dict[str, Any]) -> Dict[str, Any]:
+            attrs = node.get("attributes") or {}
+            tags = attrs.get("tags") if isinstance(attrs.get("tags"), dict) else {}
+            return {
+                "name": node.get("name") or "未命名点位",
+                "summary": node.get("summary") or "",
+                "subtype": attrs.get("subtype") or tags.get("natural") or tags.get("landuse") or attrs.get("category") or "",
+                "distance_m": attrs.get("distance_m"),
+                "importance": attrs.get("importance"),
+                "lat": attrs.get("lat"),
+                "lon": attrs.get("lon"),
+                "source_kind": node_source(node),
+            }
+
+        observed = [
+            feature_payload(node)
+            for node in nodes
+            if node_source(node) == "observed" and (node.get("attributes") or {}).get("category") != "region"
+        ]
+        detected = [
+            feature_payload(node)
+            for node in nodes
+            if node_source(node) == "detected"
+        ]
+
+        def sort_key(item: Dict[str, Any]) -> tuple:
+            try:
+                importance = float(item.get("importance") or 0)
+            except Exception:
+                importance = 0
+            try:
+                distance = float(item.get("distance_m") or 999999)
+            except Exception:
+                distance = 999999
+            return (-importance, distance, str(item.get("name") or ""))
+
+        observed.sort(key=sort_key)
+        detected.sort(key=sort_key)
+
+        return {
+            "map_seed_id": map_seed_id,
+            "area_label": aoi.get("label") or seed.get("title") or admin.get("display_name") or "",
+            "display_name": admin.get("display_name") or "",
+            "city": admin.get("city") or "",
+            "district": admin.get("district") or "",
+            "road": admin.get("road") or "",
+            "center": center,
+            "radius_m": aoi.get("radius_m") or input_payload.get("radius_m"),
+            "scene_classification": seed.get("scene_classification") or {},
+            "environment_baseline": seed.get("environment_baseline") or {},
+            "observed_features": observed[:12],
+            "detected_features": detected[:8],
+            "map_report_excerpt": report_text[:4000],
+            "seed_summary": seed.get("summary") or "",
+        }
+
+    def _format_map_grounding(self, grounding: Dict[str, Any]) -> str:
+        if not grounding:
+            return ""
+
+        center = grounding.get("center") or {}
+        lat = center.get("lat")
+        lon = center.get("lon")
+        place = grounding.get("area_label") or grounding.get("display_name") or "地图选点区域"
+        radius = grounding.get("radius_m") or "-"
+        observed = grounding.get("observed_features") or []
+        detected = grounding.get("detected_features") or []
+
+        lines = [
+            f"地图选点事实: {place}，中心点 {lat}, {lon}，分析半径 {radius} 米。",
+        ]
+        admin_bits = [
+            grounding.get("city"),
+            grounding.get("district"),
+            grounding.get("road"),
+        ]
+        admin_line = " / ".join(str(item) for item in admin_bits if item)
+        if admin_line:
+            lines.append(f"行政与道路线索: {admin_line}。")
+        if grounding.get("display_name"):
+            lines.append(f"逆地理编码名称: {grounding['display_name']}。")
+
+        if observed:
+            feature_text = "；".join(
+                f"{item.get('name')}({item.get('subtype') or '空间要素'}, 距中心约{item.get('distance_m', '-')}米)"
+                for item in observed[:8]
+            )
+            lines.append(f"周边真实地图点位: {feature_text}。")
+        if detected:
+            detected_text = "；".join(
+                f"{item.get('name')}({item.get('subtype') or '遥感斑块'}, 距中心约{item.get('distance_m', '-')}米)"
+                for item in detected[:5]
+            )
+            lines.append(f"遥感/土地覆盖斑块: {detected_text}。")
+        return "\n".join(lines)
 
     def _fact_results(self, simulation_id: str, limit: int = 8) -> List[Dict[str, Any]]:
         return [{"name": f"工件事实 {idx + 1}", "summary": text} for idx, text in enumerate(self._fact_bullets(simulation_id, limit))]

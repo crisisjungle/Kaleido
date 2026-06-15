@@ -31,6 +31,9 @@ class Config:
     LLM_API_KEY = os.environ.get('LLM_API_KEY')
     LLM_BASE_URL = os.environ.get('LLM_BASE_URL', 'https://api.openai.com/v1')
     LLM_MODEL_NAME = os.environ.get('LLM_MODEL_NAME', 'gpt-4o-mini')
+    LLM_FALLBACK_API_KEY = os.environ.get('LLM_FALLBACK_API_KEY')
+    LLM_FALLBACK_BASE_URL = os.environ.get('LLM_FALLBACK_BASE_URL', LLM_BASE_URL)
+    LLM_FALLBACK_MODEL_NAME = os.environ.get('LLM_FALLBACK_MODEL_NAME', LLM_MODEL_NAME)
     # DeepSeek V4 兼容配置：
     # - auto: 对 deepseek-chat / deepseek-reasoner 使用兼容映射；
     #         对显式的 V4 模型名沿用官方默认行为

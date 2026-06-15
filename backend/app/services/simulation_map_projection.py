@@ -68,7 +68,11 @@ class SimulationMapProjectionBuilder:
             key_edges_only=key_edges_only,
         )
 
-        center = context.get("center") or self._average_center(projected_nodes) or {"lat": 20.0, "lon": 0.0}
+        center = (
+            context.get("center")
+            if context.get("center_source") != "default"
+            else self._average_center(projected_nodes)
+        ) or context.get("center") or {"lat": 20.0, "lon": 0.0}
         radius_m = int(context.get("radius_m") or 0)
 
         return {
@@ -97,22 +101,26 @@ class SimulationMapProjectionBuilder:
 
     def _build_context(self, *, map_layers_payload: Dict[str, Any]) -> Dict[str, Any]:
         center_payload = map_layers_payload.get("center") or {}
+        has_explicit_center = bool(center_payload)
         center = {
             "lat": self._to_float(center_payload.get("lat") or center_payload.get("latitude"), 20.0),
             "lon": self._to_float(center_payload.get("lon") or center_payload.get("lng") or center_payload.get("longitude"), 0.0),
         }
+        center_source = "explicit" if has_explicit_center else "default"
 
         anchor_points = self._collect_anchor_points(map_layers_payload)
         if anchor_points:
-            if not map_layers_payload.get("center"):
+            if not has_explicit_center:
                 lat_avg = sum(point["lat"] for point in anchor_points) / len(anchor_points)
                 lon_avg = sum(point["lon"] for point in anchor_points) / len(anchor_points)
                 center = {"lat": round(lat_avg, 6), "lon": round(lon_avg, 6)}
+                center_source = "anchors"
 
         water_geometries = self._collect_water_geometries(map_layers_payload)
         water_zones = self._collect_water_zones(anchor_points, water_geometries)
         return {
             "center": center,
+            "center_source": center_source,
             "radius_m": int(map_layers_payload.get("radius_m") or 0),
             "analysis_polygon": map_layers_payload.get("analysis_polygon"),
             "layers": list(map_layers_payload.get("layers") or []),
@@ -261,8 +269,8 @@ class SimulationMapProjectionBuilder:
         for index, node in enumerate(nodes):
             node_id = str(node.get("uuid") or node.get("id") or f"node_{index}")
             attributes = dict(node.get("attributes") or {})
-            lat = self._to_float(attributes.get("lat") or attributes.get("latitude") or attributes.get("y"))
-            lon = self._to_float(attributes.get("lon") or attributes.get("lng") or attributes.get("longitude") or attributes.get("x"))
+            lat = self._to_float(attributes.get("lat") or attributes.get("latitude"))
+            lon = self._to_float(attributes.get("lon") or attributes.get("lng") or attributes.get("longitude"))
             kind = self._node_kind(node_id=node_id, labels=node.get("labels"))
             normalized = {
                 "uuid": node_id,
@@ -478,10 +486,26 @@ class SimulationMapProjectionBuilder:
                 ]
             )
 
-        require_water = self._prefers_water(
-            anchor_token or str(home_region),
-            fallback_name=node.get("name"),
-        )
+        require_water = self._agent_prefers_water(node)
+        if not require_water:
+            dry_candidates = self._select_anchor_candidates(
+                context=context,
+                desired_tags=self._desired_tags_for_agent(node),
+                require_water=False,
+            )
+            if dry_candidates:
+                index = self._stable_hash_mod(f"agent-dry-anchor::{node['uuid']}", len(dry_candidates))
+                candidate = dry_candidates[index]
+                return self._resolve_conflict(
+                    lat=candidate["lat"],
+                    lon=candidate["lon"],
+                    used_points=used_points,
+                    min_distance_m=90.0,
+                    context=context,
+                    require_water=False,
+                    stable_key=f"agent-dry::{node['uuid']}",
+                )
+
         region_radius = max(float(context.get("radius_m") or 0), 3000.0)
         agent_radius = max(260.0, min(region_radius * 0.06, 1400.0))
         return self._radial_fallback(
@@ -493,6 +517,46 @@ class SimulationMapProjectionBuilder:
             require_water=require_water,
             radius_m=agent_radius,
         )
+
+    def _desired_tags_for_agent(self, node: Dict[str, Any]) -> List[str]:
+        attributes = node.get("attributes") or {}
+        text = " ".join(
+            [
+                str(node.get("name") or ""),
+                str(attributes.get("agent_type") or ""),
+                str(attributes.get("agent_subtype") or ""),
+                str(attributes.get("role_type") or ""),
+                str(attributes.get("node_family") or ""),
+            ]
+        ).lower()
+        if any(token in text for token in ["resident", "human", "vulnerable", "visitor", "居民", "人群", "游客", "访客", "脆弱"]):
+            return ["built", "social", "transport"]
+        if any(token in text for token in ["operator", "organization", "maintainer", "经营", "运营", "维护", "组织"]):
+            return ["built", "transport", "social", "eco"]
+        if any(token in text for token in ["government", "governance", "regulator", "监管", "治理", "政府"]):
+            return ["social", "built", "transport"]
+        return ["built", "social", "transport", "eco"]
+
+    def _agent_prefers_water(self, node: Dict[str, Any]) -> bool:
+        attributes = node.get("attributes") or {}
+        labels = {str(item or "").strip().lower() for item in list(node.get("labels") or [])}
+        text = " ".join(
+            [
+                str(node.get("name") or ""),
+                str(attributes.get("agent_type") or ""),
+                str(attributes.get("agent_subtype") or ""),
+                str(attributes.get("role_type") or ""),
+                str(attributes.get("node_family") or ""),
+            ]
+        ).lower()
+
+        # Human, organization, and governance actors may belong to coastal or
+        # water-facing regions, but their map anchor should stay on land or on a
+        # real facility unless they explicitly represent a marine carrier.
+        dry_actor_labels = {"humanactor", "governmentactor", "organizationactor"}
+        if labels.intersection(dry_actor_labels):
+            return any(token in text for token in ["marine_carrier", "water_carrier", "ship", "vessel", "船", "航运"])
+        return self._prefers_water(text, fallback_name=node.get("name"))
 
     def _place_generic_node(
         self,
@@ -664,15 +728,45 @@ class SimulationMapProjectionBuilder:
                 str(point.get("source_kind") or ""),
             ]
         ).lower()
-        if "worldcover_80" in text or "water" in text or "水" in text or "海" in text:
+        if (
+            "worldcover_80" in text
+            or "water" in text
+            or "水" in text
+            or "海" in text
+            or "湾" in text
+            or "河" in text
+            or "江" in text
+            or "湖" in text
+            or "港" in text
+            or "洋" in text
+            or "库" in text
+        ):
             tags.add("water")
         if "worldcover_10" in text or "forest" in text or "tree" in text or "林" in text:
             tags.add("forest")
         if "worldcover_40" in text or "farm" in text or "agri" in text or "农" in text:
             tags.add("farmland")
-        if "worldcover_50" in text or "built" in text or "urban" in text or "industry" in text or "建成" in text:
+        if (
+            "worldcover_50" in text
+            or "built" in text
+            or "urban" in text
+            or "industry" in text
+            or "residential" in text
+            or "commercial" in text
+            or "admin_district" in text
+            or "subdistrict" in text
+            or "science_city" in text
+            or "建成" in text
+            or "居住" in text
+            or "城区" in text
+            or "街道" in text
+            or "片区" in text
+            or "科学城" in text
+        ):
             tags.add("built")
-        if "human" in text or "resident" in text or "community" in text or "gov" in text or "social" in text or "人" in text:
+        if "road" in text or "rail" in text or "station" in text or "airport" in text or "交通" in text or "机场" in text or "车站" in text:
+            tags.add("transport")
+        if "human" in text or "resident" in text or "community" in text or "gov" in text or "social" in text or "人" in text or "居民" in text:
             tags.add("social")
         if not tags:
             tags.add("eco")

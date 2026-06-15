@@ -226,6 +226,27 @@ const formatConfidence = (value) => {
   return `${Math.round(num * 100)}%`
 }
 
+const distanceMeters = (lat1, lon1, lat2, lon2) => {
+  const radius = 6371000
+  const toRad = (value) => Number(value) * Math.PI / 180
+  const phi1 = toRad(lat1)
+  const phi2 = toRad(lat2)
+  const deltaPhi = toRad(Number(lat2) - Number(lat1))
+  const deltaLambda = toRad(Number(lon2) - Number(lon1))
+  const a = Math.sin(deltaPhi / 2) ** 2
+    + Math.cos(phi1) * Math.cos(phi2) * Math.sin(deltaLambda / 2) ** 2
+  return 2 * radius * Math.atan2(Math.sqrt(a), Math.sqrt(Math.max(1e-12, 1 - a)))
+}
+
+const isPointWithinSelectedRadius = (lat, lon) => {
+  if (!props.selectedPoint) return true
+  const centerLat = Number(props.selectedPoint.lat)
+  const centerLon = Number(props.selectedPoint.lon)
+  const radius = Math.max(Number(props.radiusMeters) || 0, 200)
+  if (!Number.isFinite(centerLat) || !Number.isFinite(centerLon)) return true
+  return distanceMeters(centerLat, centerLon, lat, lon) <= radius + Math.max(150, Math.min(500, radius * 0.03))
+}
+
 const buildPopupHtml = ({ title = '', subtitle = '', summary = '', fields = [] } = {}) => {
   const safeFields = Array.isArray(fields)
     ? fields.filter((item) => item && item.value !== undefined && item.value !== null && String(item.value).trim())
@@ -543,6 +564,7 @@ const renderLayers = (force = false) => {
         const lat = Number(point.lat ?? point.latitude ?? point.y)
         const lon = Number(point.lon ?? point.lng ?? point.longitude ?? point.x)
         if (!Number.isFinite(lat) || !Number.isFinite(lon)) return
+        if (!isPointWithinSelectedRadius(lat, lon)) return
 
         L.circleMarker([lat, lon], {
           radius: point.radius || 6,
@@ -656,7 +678,10 @@ watch(
 
 watch(
   () => props.selectedPoint,
-  () => renderSelection(true)
+  () => {
+    renderSelection(true)
+    renderLayers(true)
+  }
 )
 
 watch(
@@ -682,6 +707,7 @@ watch(
   () => props.radiusMeters,
   () => {
     renderSelection(false)
+    renderLayers(true)
     if (overlayGroup?.getLayers?.().length) {
       scheduleFitToContent()
     }

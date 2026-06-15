@@ -83,7 +83,6 @@
 import { ref } from 'vue'
 import { RouterLink, useRouter } from 'vue-router'
 import KaleidoNavBrand from '../components/KaleidoNavBrand.vue'
-import { restoreGoldenCase } from '../api/goldenCases'
 
 const router = useRouter()
 const restoringDemo = ref(false)
@@ -120,15 +119,7 @@ async function playWuhanDemo() {
   if (restoringDemo.value) return
   restoringDemo.value = true
   try {
-    const res = await restoreGoldenCase('wuhan_covid_v1')
-    const route = res.data?.route
-    if (route?.name) {
-      router.push({
-        name: route.name,
-        params: route.params || {},
-        query: { ...(route.query || {}), replay: '1', report_id: res.data?.report_id || '' }
-      })
-    }
+    await router.push({ name: 'WuhanDemo' })
   } finally {
     restoringDemo.value = false
   }

@@ -977,6 +977,7 @@ ENV_SECTION_SYSTEM_PROMPT_TEMPLATE = """\
 2. 必须围绕污染扩散、生态影响、人类反馈、治理响应、干预摩擦展开
 3. 需要明确说明不确定性和模型边界
 4. 可以引用工件、事件和采访，但不要编造工件里没有的信息
+5. 如果存在地图选点事实，必须优先使用真实地点、周边真实点位和地图基线，不要只写 Coastal Buffer Zone / Core Region 等抽象模板名称
 
 【章节职责】
 - 场景摘要与模型设定：说明基线、灾难变量、干预变量、区域范围、数据来源
@@ -985,6 +986,9 @@ ENV_SECTION_SYSTEM_PROMPT_TEMPLATE = """\
 - 脆弱区域与关键角色：说明哪些区域/角色最脆弱，为什么
 - 干预方案对比：比较不同政策或干预的执行摩擦、效果和副作用
 - 不确定性与模型边界：说明哪些结论是半定量推断，哪些需要进一步建模
+
+【地图选点事实】
+{map_grounding_summary}
 
 【工具使用建议】
 优先使用 EnvFish 工件工具：
@@ -1514,6 +1518,7 @@ class ReportAgent:
         """构建 EnvFish 固定章节大纲。"""
         envfish_data = context.get("envfish", {}) or {}
         envfish_summary = context.get("envfish_summary") or ""
+        map_grounding_summary = context.get("map_grounding_summary") or ""
         related_facts = context.get("envfish_fact_bullets") or context.get("related_facts", [])
 
         if progress_callback:
@@ -1536,6 +1541,9 @@ EnvFish上下文：
 
 EnvFish摘要：
 {envfish_summary}
+
+地图选点事实：
+{map_grounding_summary or "未关联地图选点事实。"}
 
 可引用事实：
 {json.dumps(related_facts[:12], ensure_ascii=False, indent=2)}
@@ -1696,7 +1704,8 @@ EnvFish摘要：
             章节内容（Markdown格式）
         """
         logger.info(f"ReACT生成章节: {section.title}")
-        envfish_mode = self._is_envfish_context()
+        context = self._get_simulation_context()
+        envfish_mode = self._is_envfish_context(context)
         
         # 记录章节开始日志
         if self.report_logger:
@@ -1708,6 +1717,7 @@ EnvFish摘要：
                 report_summary=outline.summary,
                 simulation_requirement=self.simulation_requirement,
                 section_title=section.title,
+                map_grounding_summary=context.get("map_grounding_summary") or "未关联地图选点事实；如需写地点，请明确说明只能引用模拟分区。",
                 tools_description=self._get_tools_description(include_envfish=True),
             )
             user_prompt_template = ENV_SECTION_USER_PROMPT_TEMPLATE

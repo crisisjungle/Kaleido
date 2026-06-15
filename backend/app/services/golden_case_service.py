@@ -5,6 +5,7 @@ Golden case registry, scaffold builder, and frozen artifact restore.
 from __future__ import annotations
 
 import csv
+import hashlib
 import json
 import math
 import os
@@ -25,6 +26,7 @@ WUHAN_CASE_ID = "wuhan_covid_v1"
 WUHAN_REFERENCE_TIME = "2019-12-22T00:00:00+08:00"
 WUHAN_TOTAL_ROUNDS = 36
 WUHAN_MINUTES_PER_ROUND = 4320
+WUHAN_ARTIFACT_CONTRACT_VERSION = "2026-05-23.organic-map-layout.v1"
 
 
 @dataclass(frozen=True)
@@ -151,6 +153,17 @@ class GoldenCaseService:
         return normalized
 
     @classmethod
+    def _artifact_contract_version(cls, definition: GoldenCaseDefinition) -> str:
+        if definition.case_id == WUHAN_CASE_ID:
+            return WUHAN_ARTIFACT_CONTRACT_VERSION
+        return "unversioned"
+
+    @classmethod
+    def _manifest_contract_is_current(cls, definition: GoldenCaseDefinition, manifest: Dict[str, Any]) -> bool:
+        expected = cls._artifact_contract_version(definition)
+        return str((manifest or {}).get("artifact_contract_version") or "") == expected
+
+    @classmethod
     def _manifest_is_healthy(cls, manifest: Dict[str, Any]) -> bool:
         required_paths = [
             ((manifest or {}).get("scene") or {}).get("scene_seed"),
@@ -171,7 +184,7 @@ class GoldenCaseService:
             with open(manifest_path, "r", encoding="utf-8") as handle:
                 manifest = json.load(handle)
             normalized = cls._normalize_manifest_paths(case_id, manifest)
-            if cls._manifest_is_healthy(normalized):
+            if cls._manifest_is_healthy(normalized) and cls._manifest_contract_is_current(definition, normalized):
                 if normalized != manifest:
                     cls._write_json(manifest_path, normalized)
                 return normalized
@@ -293,6 +306,11 @@ class GoldenCaseService:
             "total_rounds": definition.total_rounds,
             "target_node_count": definition.target_node_count,
             "target_agent_count": definition.target_agent_count,
+            "artifact_contract_version": cls._artifact_contract_version(definition),
+            "artifact_contract_note": (
+                "Frozen payload version for deterministic demo data. Bump this when the normal "
+                "simulation data contract changes; shared UI/style changes do not require a bump."
+            ),
             "scene": {
                 "dir": scene_dir,
                 "scene_seed": os.path.join(scene_dir, "scene_seed.json"),
@@ -317,9 +335,19 @@ class GoldenCaseService:
         return manifest
 
     @classmethod
-    def restore_case(cls, case_id: str) -> Dict[str, Any]:
+    def restore_case(cls, case_id: str, *, reuse: bool = True) -> Dict[str, Any]:
         definition = cls.get_case(case_id)
         manifest = cls.ensure_scaffold(case_id)
+        reusable = cls._find_reusable_restore(case_id, manifest)
+        if reuse and reusable:
+            return cls._build_restore_payload(
+                definition=definition,
+                case_id=case_id,
+                project_id=reusable["project_id"],
+                simulation_id=reusable["simulation_id"],
+                report_id=reusable["report_id"],
+                reused=True,
+            )
 
         project = ProjectManager.create_project(name=definition.title)
         project.status = ProjectStatus.GRAPH_COMPLETED
@@ -396,15 +424,37 @@ class GoldenCaseService:
         )
         ReportManager.save_report(report)
 
+        return cls._build_restore_payload(
+            definition=definition,
+            case_id=case_id,
+            project_id=project.project_id,
+            simulation_id=simulation_state.simulation_id,
+            report_id=report.report_id,
+            reused=False,
+        )
+
+    @classmethod
+    def _build_restore_payload(
+        cls,
+        *,
+        definition: GoldenCaseDefinition,
+        case_id: str,
+        project_id: str,
+        simulation_id: str,
+        report_id: str,
+        reused: bool,
+    ) -> Dict[str, Any]:
         return {
             "case_id": case_id,
-            "project_id": project.project_id,
-            "simulation_id": simulation_state.simulation_id,
-            "report_id": report.report_id,
-            "next_step": "simulation_run",
+            "project_id": project_id,
+            "simulation_id": simulation_id,
+            "report_id": report_id,
+            "reused": reused,
+            "demo_mode": "frozen_replay",
+            "next_step": "scenario_design",
             "route": {
-                "name": "SimulationRun",
-                "params": {"simulationId": simulation_state.simulation_id},
+                "name": "Simulation",
+                "params": {"simulationId": simulation_id},
                 "query": {
                     "scenario_mode": definition.scenario_mode,
                     "hazard_template_id": definition.hazard_template_id,
@@ -414,10 +464,57 @@ class GoldenCaseService:
                     "maxRounds": definition.total_rounds,
                     "golden_case_id": case_id,
                     "replay": "1",
-                    "report_id": report.report_id,
+                    "report_id": report_id,
+                    "demo_mode": "frozen_replay",
+                },
+            },
+            "playback_route": {
+                "name": "SimulationRun",
+                "params": {"simulationId": simulation_id},
+                "query": {
+                    "scenario_mode": definition.scenario_mode,
+                    "hazard_template_id": definition.hazard_template_id,
+                    "diffusion_template": definition.diffusion_template,
+                    "search_mode": definition.search_mode,
+                    "reference_time": definition.reference_time,
+                    "maxRounds": definition.total_rounds,
+                    "golden_case_id": case_id,
+                    "replay": "1",
+                    "report_id": report_id,
+                    "demo_mode": "frozen_replay",
                 },
             },
         }
+
+    @classmethod
+    def _find_reusable_restore(cls, case_id: str, manifest: Dict[str, Any]) -> Optional[Dict[str, str]]:
+        if not cls._manifest_is_healthy(manifest):
+            return None
+
+        manager = SimulationManager()
+        for state in manager.list_simulations():
+            if not state.is_replay_only or state.golden_case_id != case_id:
+                continue
+            if str(state.artifact_mode or "") != "frozen":
+                continue
+            if not os.path.exists(str(state.artifact_root or "")):
+                continue
+            project = ProjectManager.get_project(state.project_id)
+            if not project:
+                continue
+            report = ReportManager.get_report_by_simulation(state.simulation_id)
+            if not report or report.golden_case_id != case_id or not report.is_replay_only:
+                continue
+
+            state.status = SimulationStatus.COMPLETED
+            state.current_round = int(state.configured_total_rounds or WUHAN_TOTAL_ROUNDS)
+            manager._save_simulation_state(state)
+            return {
+                "project_id": state.project_id,
+                "simulation_id": state.simulation_id,
+                "report_id": report.report_id,
+            }
+        return None
 
     @classmethod
     def _build_regions(cls) -> List[Dict[str, Any]]:
@@ -475,12 +572,18 @@ class GoldenCaseService:
     def _build_subregions(cls, regions: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         rows: List[Dict[str, Any]] = []
         templates = [
-            ("market", "市场接触带", "commercial", "near", 0.010, 0.012),
-            ("medical", "医疗承压带", "civic", "mid", -0.012, 0.008),
-            ("community", "社区传播带", "residential", "far", 0.008, -0.015),
+            ("market", "市场接触带", "commercial", "near"),
+            ("medical", "医疗承压带", "civic", "mid"),
+            ("community", "社区传播带", "residential", "far"),
         ]
         for region in regions:
-            for idx, (suffix, label, land_use, distance_band, lat_delta, lon_delta) in enumerate(templates, start=1):
+            for idx, (suffix, label, land_use, distance_band) in enumerate(templates, start=1):
+                lat, lon = cls._natural_subregion_position(
+                    region=region,
+                    suffix=suffix,
+                    template_index=idx - 1,
+                    distance_band=distance_band,
+                )
                 rows.append(
                     {
                         "region_id": f"{region['region_id']}::{suffix}",
@@ -492,8 +595,8 @@ class GoldenCaseService:
                         "description": f"{region['name']}中的{label}，承接病例发现、就医、物流或社区接触链条。",
                         "layer": "subregion",
                         "tags": [land_use, distance_band, suffix],
-                        "lat": round(region["lat"] + lat_delta, 6),
-                        "lon": round(region["lon"] + lon_delta, 6),
+                        "lat": lat,
+                        "lon": lon,
                         "agent_ids": [],
                     }
                 )
@@ -532,6 +635,14 @@ class GoldenCaseService:
             region_subregions = subregions_by_parent.get(region["region_id"], [])
             for index, (role, family, agent_type, motif) in enumerate(role_templates):
                 subregion = region_subregions[index % len(region_subregions)]
+                lat, lon = cls._natural_agent_position(
+                    region=region,
+                    subregion=subregion,
+                    agent_id=agent_id,
+                    role=role,
+                    family=family,
+                    role_index=index,
+                )
                 profile = {
                     "agent_id": agent_id,
                     "name": f"{region['name']}-{role}-{(index % 4) + 1:02d}",
@@ -545,6 +656,8 @@ class GoldenCaseService:
                     "home_region_id": region["region_id"],
                     "home_subregion_id": subregion["region_id"],
                     "primary_region": region["region_id"],
+                    "lat": lat,
+                    "lon": lon,
                     "is_synthesized": True,
                     "source_entity_uuid": f"golden::{agent_id}",
                     "goals": [motif, "控制风险", "维持服务"],
@@ -1032,16 +1145,21 @@ class GoldenCaseService:
                 }
             )
         for profile in profiles:
-            anchor = next((item for item in subregion_graph if item["region_id"] == profile["home_subregion_id"]), None)
             layout_nodes.append(
                 {
                     "id": f"agent::{profile['agent_id']}",
                     "name": profile["name"],
                     "labels": ["Entity", profile["agent_type"]],
                     "kind": "agent",
-                    "lat": round((anchor or {"lat": 30.59})["lat"] + ((profile["agent_id"] % 5) - 2) * 0.0016, 6),
-                    "lon": round((anchor or {"lon": 114.30})["lon"] + ((profile["agent_id"] % 7) - 3) * 0.0013, 6),
-                    "attributes": {"agent_id": profile["agent_id"], "primary_region": profile["primary_region"]},
+                    "lat": profile.get("lat", 30.59),
+                    "lon": profile.get("lon", 114.30),
+                    "attributes": {
+                        "agent_id": profile["agent_id"],
+                        "primary_region": profile["primary_region"],
+                        "home_subregion_id": profile.get("home_subregion_id"),
+                        "node_family": profile.get("node_family"),
+                        "agent_subtype": profile.get("agent_subtype"),
+                    },
                 }
             )
 
@@ -1278,6 +1396,8 @@ class GoldenCaseService:
                     "agent_subtype": item["agent_subtype"],
                     "primary_region": item["primary_region"],
                     "home_subregion_id": item["home_subregion_id"],
+                    "lat": item.get("lat"),
+                    "lon": item.get("lon"),
                 }
                 for item in profiles
             ],
@@ -1313,6 +1433,7 @@ class GoldenCaseService:
             "data_grounding_summary": cls._build_grounding_summary(region_graph),
             "diffusion_context": cls._build_diffusion_context(definition),
             "golden_case_profile": definition.profile,
+            "artifact_contract_version": cls._artifact_contract_version(definition),
             "report_focus": ["risk object summary", "regional vulnerability progression", "agent relationship cascade"],
         }
 
@@ -1341,6 +1462,88 @@ class GoldenCaseService:
             "by_family": by_family,
             "generation_mode": "golden_case_scaffold",
         }
+
+    @classmethod
+    def _natural_subregion_position(
+        cls,
+        *,
+        region: Dict[str, Any],
+        suffix: str,
+        template_index: int,
+        distance_band: str,
+    ) -> tuple[float, float]:
+        band_radius_m = {
+            "near": 780.0,
+            "mid": 1280.0,
+            "far": 1850.0,
+        }.get(distance_band, 1100.0)
+        region_key = str(region.get("region_id") or region.get("name") or "")
+        base_turn = cls._stable_unit(f"subregion-turn::{region_key}")
+        local_turn = cls._stable_unit(f"subregion-local::{region_key}::{suffix}")
+        angle = (base_turn * 2 * math.pi) + (template_index * 1.92) + ((local_turn - 0.5) * 0.72)
+        radius = band_radius_m * (0.76 + cls._stable_unit(f"subregion-radius::{region_key}::{suffix}") * 0.52)
+        return cls._offset_lat_lon(
+            float(region["lat"]),
+            float(region["lon"]),
+            radius_m=radius,
+            angle_rad=angle,
+        )
+
+    @classmethod
+    def _natural_agent_position(
+        cls,
+        *,
+        region: Dict[str, Any],
+        subregion: Dict[str, Any],
+        agent_id: int,
+        role: str,
+        family: str,
+        role_index: int,
+    ) -> tuple[float, float]:
+        role_text = f"{role} {family}"
+        if any(token in role_text for token in ["司机", "物流", "交通", "仓储"]):
+            base_radius = 620.0
+        elif any(token in role_text for token in ["疾控", "街道", "热线", "联络"]):
+            base_radius = 460.0
+        elif any(token in role_text for token in ["护士", "检验", "实验", "医院"]):
+            base_radius = 360.0
+        elif any(token in role_text for token in ["居民", "社区", "物业", "志愿"]):
+            base_radius = 520.0
+        else:
+            base_radius = 440.0
+
+        key = f"agent-layout::{region.get('region_id')}::{subregion.get('region_id')}::{agent_id}::{role}"
+        turn = cls._stable_unit(f"{key}::turn")
+        spread = cls._stable_unit(f"{key}::spread")
+        lane = role_index % 5
+        angle = (turn * 2 * math.pi) + lane * 0.41
+        radius = base_radius * (0.35 + spread * 1.45)
+        lat, lon = cls._offset_lat_lon(
+            float(subregion["lat"]),
+            float(subregion["lon"]),
+            radius_m=radius,
+            angle_rad=angle,
+        )
+
+        if any(token in role_text for token in ["司机", "物流", "交通", "媒体", "热线"]):
+            blend = 0.18 + cls._stable_unit(f"{key}::blend") * 0.12
+            lat = round(lat * (1 - blend) + float(region["lat"]) * blend, 6)
+            lon = round(lon * (1 - blend) + float(region["lon"]) * blend, 6)
+
+        return lat, lon
+
+    @classmethod
+    def _offset_lat_lon(cls, lat: float, lon: float, *, radius_m: float, angle_rad: float) -> tuple[float, float]:
+        dx = radius_m * math.cos(angle_rad)
+        dy = radius_m * math.sin(angle_rad)
+        lat_offset = dy / 111320.0
+        lon_offset = dx / max(math.cos(math.radians(lat)) * 111320.0, 1e-6)
+        return round(lat + lat_offset, 6), round(lon + lon_offset, 6)
+
+    @classmethod
+    def _stable_unit(cls, key: str) -> float:
+        digest = hashlib.sha256(str(key).encode("utf-8")).hexdigest()
+        return int(digest[:12], 16) / float(16**12 - 1)
 
     @classmethod
     def _build_diffusion_context(cls, definition: GoldenCaseDefinition) -> Dict[str, Any]:
@@ -1496,6 +1699,7 @@ class GoldenCaseService:
             "artifact_root": os.path.join(cls.case_root(definition.case_id), "simulation"),
             "golden_case_id": definition.case_id,
             "golden_case_profile": definition.profile,
+            "artifact_contract_version": cls._artifact_contract_version(definition),
             "is_replay_only": True,
             "current_round": definition.total_rounds,
             "twitter_status": "not_started",

@@ -83,6 +83,7 @@ const viewMode = ref('split')
 
 // Data State
 const currentSimulationId = ref(route.params.simulationId)
+const currentSimulation = ref(null)
 const projectData = ref(null)
 const graphData = ref(null)
 const mapProjection = ref(null)
@@ -329,7 +330,12 @@ const inferKnownMapCenter = ({ graph, project }) => {
 const normalizeMapProjection = (projection, graph) => {
   if (!projection) return projection
   
-  let desiredCenter = resolveSceneSeedCenter() || inferKnownMapCenter({ graph, project: projectData.value })
+  let desiredCenter = resolveSceneSeedCenter()
+  let desiredCenterSource = desiredCenter ? 'scene_seed' : ''
+  if (!desiredCenter) {
+    desiredCenter = inferKnownMapCenter({ graph, project: projectData.value })
+    desiredCenterSource = desiredCenter ? 'known_location' : ''
+  }
   
   if (!desiredCenter && projection.nodes?.length > 0) {
     const geoNodes = projection.nodes.filter(n => Number.isFinite(toNumber(n?.attributes?.lat)) && Number.isFinite(toNumber(n?.attributes?.lon)))
@@ -338,17 +344,19 @@ const normalizeMapProjection = (projection, graph) => {
         lat: geoNodes.reduce((sum, n) => sum + toNumber(n.attributes.lat), 0) / geoNodes.length,
         lon: geoNodes.reduce((sum, n) => sum + toNumber(n.attributes.lon), 0) / geoNodes.length
       }
+      desiredCenterSource = 'node_average'
     }
   }
 
-  console.log('[DEBUG map projection] incoming projection:', projection)
-  console.log('[DEBUG map projection] desiredCenter:', desiredCenter)
-  console.log('[DEBUG map projection] sceneSeedContext:', sceneSeedContext.value)
   if (!desiredCenter) return projection
 
   const currentLat = toNumber(projection.center?.lat)
   const currentLon = toNumber(projection.center?.lon)
   if (!Number.isFinite(currentLat) || !Number.isFinite(currentLon)) {
+    return { ...projection, center: desiredCenter }
+  }
+
+  if (desiredCenterSource === 'node_average') {
     return { ...projection, center: desiredCenter }
   }
 
@@ -599,6 +607,7 @@ const loadSimulationData = async () => {
     const simRes = await getSimulation(currentSimulationId.value)
     if (simRes.success && simRes.data) {
       const simData = simRes.data
+      currentSimulation.value = simData
       let graphLoaded = false
 
       try {

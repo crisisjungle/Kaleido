@@ -67,8 +67,9 @@ function normalizeContext(value) {
   )
   const mapSeedId = String(value.mapSeedId || value.map_seed_id || '').trim()
   const areaLabel = String(value.areaLabel || value.area_label || value.location || '').trim()
+  const radiusMeters = Number(value.radiusMeters || value.radius_m || 0)
   if (initialVariables.length === 0 && selectedPoints.length === 0 && !mapSeedId && !areaLabel) return null
-  return { initialVariables, selectedPoints, mapSeedId, areaLabel }
+  return { initialVariables, selectedPoints, mapSeedId, areaLabel, radiusMeters: Number.isFinite(radiusMeters) ? radiusMeters : 0 }
 }
 
 function readState() {

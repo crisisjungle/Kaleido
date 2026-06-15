@@ -1,10 +1,11 @@
 import uuid
+from datetime import datetime
 
 from flask import jsonify, request
 
 from . import report_bp
 from ..models.task import TaskManager
-from ..services.report_agent import ReportAgent, ReportManager, ReportStatus
+from ..services.report_agent import Report, ReportAgent, ReportManager, ReportStatus
 from ..services.report_analysis import ReportAnalysisService
 from ..services.simulation_manager import SimulationManager
 from ..services.task_executor import TaskExecutor
@@ -81,6 +82,25 @@ def generate_report_async():
 
     report_id = data.get("report_id") or f"report_{uuid.uuid4().hex[:12]}"
     graph_id, simulation_requirement = _resolve_report_context(data)
+    existing = ReportManager.get_report(report_id)
+    if not existing:
+        placeholder = Report(
+            report_id=report_id,
+            simulation_id=simulation_id,
+            graph_id=graph_id,
+            simulation_requirement=simulation_requirement,
+            status=ReportStatus.PENDING,
+            created_at=datetime.now().isoformat(),
+        )
+        ReportManager.save_report(placeholder)
+        ReportManager.update_progress(
+            report_id,
+            "pending",
+            0,
+            "初始化报告...",
+            completed_sections=[],
+        )
+
     agent = ReportAgent(
         graph_id=graph_id,
         simulation_id=simulation_id,

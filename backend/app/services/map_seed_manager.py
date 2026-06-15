@@ -176,7 +176,7 @@ class MapSeedManager:
             payload = _safe_http_json(url, timeout=15.0)
         except Exception as exc:
             logger.warning(f"Forward geocode failed for '{text}': {exc}")
-            return []
+            payload = []
 
         candidates: List[Dict[str, Any]] = []
         for item in payload if isinstance(payload, list) else []:
@@ -191,40 +191,152 @@ class MapSeedManager:
                 lat=lat,
                 lon=lon,
             )
+            area_label = self.describe_area_label(lat=lat, lon=lon, radius_m=radius_m, admin_context=admin_context)
+            admin_context = dict(admin_context)
+            admin_context["area_label"] = area_label
             candidates.append(
                 {
                     "lat": lat,
                     "lon": lon,
                     "display_name": admin_context.get("display_name") or text,
-                    "area_label": self.describe_area_label(lat=lat, lon=lon, radius_m=radius_m, admin_context=admin_context),
+                    "area_label": area_label,
                     "admin_context": admin_context,
                 }
             )
-        return candidates
+        if candidates:
+            return candidates
+        return self._local_forward_geocode_candidates(text, limit=limit, radius_m=radius_m)
+
+    def _local_forward_geocode_candidates(self, query: str, *, limit: int = 5, radius_m: int = 3000) -> List[Dict[str, Any]]:
+        text = str(query or "").strip().lower().replace(" ", "")
+        if not text:
+            return []
+
+        local_index = [
+            {
+                "aliases": ["深圳", "深圳市", "shenzhen"],
+                "lat": 22.544574,
+                "lon": 114.054543,
+                "display_name": "深圳市, 广东省, 中国",
+                "admin_context": {
+                    "display_name": "深圳市, 广东省, 中国",
+                    "country": "中国",
+                    "state": "广东省",
+                    "city": "深圳市",
+                    "district": "",
+                },
+            },
+            {
+                "aliases": ["香港机场", "香港国际机场", "赤鱲角机场", "赤腊角机场", "hongkongairport", "hkg"],
+                "lat": 22.31899,
+                "lon": 113.91312,
+                "display_name": "香港国际机场及赤鱲角周边",
+                "admin_context": {
+                    "display_name": "香港国际机场及赤鱲角周边",
+                    "city": "香港",
+                    "district": "香港国际机场",
+                    "geographic_context": {
+                        "key": "hong_kong_airport",
+                        "macro_area": "香港",
+                        "local_area": "香港国际机场",
+                        "feature_name": "赤鱲角机场岛",
+                        "area_label": "香港国际机场周边",
+                        "display_name": "香港国际机场及赤鱲角周边",
+                        "area_kind": "airport",
+                    },
+                },
+            },
+            {
+                "aliases": ["大屿山", "lantau"],
+                "lat": 22.267,
+                "lon": 113.945,
+                "display_name": "香港大屿山及东涌、机场周边",
+                "admin_context": {
+                    "display_name": "香港大屿山及东涌、机场周边",
+                    "city": "香港",
+                    "district": "大屿山",
+                    "geographic_context": {
+                        "key": "hong_kong_lantau",
+                        "macro_area": "香港",
+                        "local_area": "大屿山",
+                        "feature_name": "大屿山西部与北部片区",
+                        "area_label": "香港大屿山周边",
+                        "display_name": "香港大屿山及东涌、机场周边",
+                        "area_kind": "district",
+                    },
+                },
+            },
+        ]
+
+        matches: List[Dict[str, Any]] = []
+        for item in local_index:
+            aliases = [str(alias or "").lower().replace(" ", "") for alias in item.get("aliases", [])]
+            if not any(alias and (alias in text or text in alias) for alias in aliases):
+                continue
+            lat = round(float(item["lat"]), 6)
+            lon = round(float(item["lon"]), 6)
+            admin_context = dict(item.get("admin_context") or {})
+            admin_context["lat"] = lat
+            admin_context["lon"] = lon
+            area_label = self.describe_area_label(lat=lat, lon=lon, radius_m=radius_m, admin_context=admin_context)
+            admin_context["area_label"] = area_label
+            matches.append(
+                {
+                    "lat": lat,
+                    "lon": lon,
+                    "display_name": admin_context.get("display_name") or item.get("display_name") or query,
+                    "area_label": area_label,
+                    "admin_context": admin_context,
+                    "source": "local_fallback",
+                }
+            )
+            if len(matches) >= max(1, int(limit or 5)):
+                break
+        return matches
 
     def resolve_area_context(self, lat: float, lon: float, radius_m: int) -> Dict[str, Any]:
         admin_context = self._reverse_geocode(lat, lon)
+        radius_m = max(500, int(radius_m or 3000))
+        area_label = self.describe_area_label(
+            lat=float(lat),
+            lon=float(lon),
+            radius_m=radius_m,
+            admin_context=admin_context,
+        )
+        admin_context = dict(admin_context)
+        admin_context["area_label"] = area_label
         return {
             "lat": round(float(lat), 6),
             "lon": round(float(lon), 6),
-            "radius_m": max(500, int(radius_m or 3000)),
+            "radius_m": radius_m,
             "admin_context": admin_context,
-            "area_label": self.describe_area_label(
-                lat=float(lat),
-                lon=float(lon),
-                radius_m=max(500, int(radius_m or 3000)),
-                admin_context=admin_context,
-            ),
+            "area_label": area_label,
         }
 
     def describe_area_label(self, lat: float, lon: float, radius_m: int, admin_context: Optional[Dict[str, Any]] = None) -> str:
         context = dict(admin_context or self._reverse_geocode(lat, lon) or {})
+        radius_m = max(500, int(radius_m or 3000))
+        geographic_context = context.get("geographic_context") if isinstance(context.get("geographic_context"), dict) else {}
+        original_geo_key = str(geographic_context.get("key") or "").strip()
+        geographic_context = self._select_geographic_context_for_label(context, lat, lon, radius_m)
+        if geographic_context:
+            selected_geo_key = str(geographic_context.get("key") or "").strip()
+            selected_kind = str(geographic_context.get("area_kind") or "").strip()
+            context = self._apply_local_geographic_context(
+                context,
+                geographic_context,
+                force=selected_geo_key != original_geo_key or selected_kind in {"airport", "transport", "landmark"},
+            )
         city = str(context.get("city") or "").strip()
         district = str(context.get("district") or "").strip()
         road = str(context.get("road") or "").strip()
         locality = self._select_locality_name(context, radius_m)
         display_name = str(context.get("display_name") or "").strip()
-        radius_m = max(500, int(radius_m or 3000))
+
+        local_area_label = self._radius_aware_local_area_label(context, geographic_context, radius_m)
+        if local_area_label:
+            return local_area_label
+
         base_label = self._join_place_tokens(city, district, locality)
         if base_label:
             if locality and road and locality == road:
@@ -244,6 +356,98 @@ class MapSeedManager:
         if primary:
             return primary
         return "选定区域"
+
+    def _radius_aware_local_area_label(
+        self,
+        context: Dict[str, Any],
+        geographic_context: Dict[str, Any],
+        radius_m: int,
+    ) -> str:
+        if not geographic_context:
+            return ""
+
+        key = str(geographic_context.get("key") or "").strip()
+        city = str(context.get("city") or geographic_context.get("macro_area") or "").strip()
+        district = str(context.get("district") or geographic_context.get("local_area") or "").strip()
+        feature_name = str(geographic_context.get("feature_name") or "").strip()
+        local_area = str(geographic_context.get("local_area") or "").strip()
+        default_label = str(geographic_context.get("area_label") or "").strip()
+
+        fine_locality = self._select_locality_name(context, min(radius_m, 1800))
+        if radius_m <= 1800:
+            label = self._join_place_tokens(city, district, fine_locality or feature_name or local_area)
+            return f"{label}周边" if label else default_label
+
+        if radius_m <= 6000:
+            label = self._join_place_tokens(city, district or local_area)
+            return f"{label}周边" if label else default_label
+
+        if radius_m <= 15000:
+            label = self._join_place_tokens(city, district or local_area)
+            return f"{label}片区" if label else default_label
+
+        if radius_m <= 30000:
+            medium_labels = {
+                "shenzhen_baoan": "深圳西部城市片区",
+                "shenzhen_nanshan": "深圳湾-前海城市片区",
+                "shenzhen_bay": "深圳湾-前海滨海片区",
+                "hong_kong_airport": "香港国际机场及大屿山周边",
+                "hong_kong_lantau": "香港大屿山片区",
+                "shenzhen_guangming": "深圳北部城市与产业片区",
+                "shenzhen_longhua": "深圳中北部城市片区",
+                "shenzhen_futian": "深圳中心城区片区",
+                "shenzhen_luohu": "深圳东部中心城区片区",
+                "shenzhen_longgang": "深圳东部城市片区",
+                "shenzhen_pingshan": "深圳东部产业与山地生态片区",
+                "lingdingyang": "珠江口伶仃洋水域",
+                "zhuhai_east_coast": "珠海东岸近岸片区",
+                "macao_western_waters": "澳门近岸与横琴片区",
+            }
+            if key in medium_labels:
+                return medium_labels[key]
+            label = self._join_place_tokens(city, district or local_area)
+            return f"{label}片区" if label else default_label
+
+        if radius_m <= 60000:
+            broad_labels = {
+                "shenzhen_baoan": "深圳西部-珠江口东岸区域",
+                "shenzhen_nanshan": "深圳湾-珠江口东岸区域",
+                "shenzhen_bay": "深圳湾-珠江口东岸区域",
+                "hong_kong_airport": "香港国际机场-大屿山与珠江口东缘区域",
+                "hong_kong_lantau": "香港大屿山与珠江口东缘区域",
+                "shenzhen_guangming": "深圳北部-珠江口东岸区域",
+                "shenzhen_longhua": "深圳中北部都会区域",
+                "shenzhen_futian": "深圳中心城区及周边区域",
+                "shenzhen_luohu": "深圳中东部都会区域",
+                "shenzhen_longgang": "深圳东部都会区域",
+                "shenzhen_pingshan": "深圳东部山地与产业区域",
+                "lingdingyang": "珠江口伶仃洋与粤港澳近岸区域",
+                "zhuhai_east_coast": "珠海东岸-珠江口西岸区域",
+                "macao_western_waters": "澳门近岸-横琴珠海区域",
+            }
+            if key in broad_labels:
+                return broad_labels[key]
+            if city:
+                return f"{city}及周边区域"
+            return default_label
+
+        if key.startswith("shenzhen_") or key in {"shenzhen_bay", "lingdingyang"}:
+            return "粤港澳大湾区珠江口区域"
+        if key.startswith("hong_kong_"):
+            return "香港西部与珠江口东缘区域"
+        if key.startswith("zhuhai_") or key.startswith("macao_"):
+            return "珠江口西岸与粤港澳近岸区域"
+        return default_label
+
+    def _context_place_label(self, admin_context: Dict[str, Any], fallback: str = "选定区域") -> str:
+        geographic_context = admin_context.get("geographic_context") if isinstance(admin_context.get("geographic_context"), dict) else {}
+        return (
+            str(admin_context.get("area_label") or "").strip()
+            or str(geographic_context.get("area_label") or "").strip()
+            or str(admin_context.get("city") or "").strip()
+            or str(admin_context.get("display_name") or "").strip()
+            or fallback
+        )
 
     @classmethod
     def _seed_dir(cls, seed_id: str) -> str:
@@ -384,6 +588,8 @@ class MapSeedManager:
 
         admin_context = self._reverse_geocode(lat, lon)
         aoi = self._build_area_of_interest(lat, lon, radius_m, admin_context)
+        admin_context = dict(admin_context)
+        admin_context["area_label"] = aoi.get("label") or self._context_place_label(admin_context)
 
         if progress_callback:
             progress_callback("collecting", 20, "采集周边空间要素和环境基线")
@@ -402,6 +608,7 @@ class MapSeedManager:
             components_per_class=profile_limits["worldcover_components_per_class"],
         )
         curated_features = self._wuhan_curated_features(lat, lon, radius_m) if profile_limits["profile"] == "wuhan_covid_v1" else []
+        curated_features.extend(self._local_curated_features(lat, lon, radius_m))
         environment_baseline = self._build_environment_baseline(lat, lon, admin_context)
         features = self._merge_context_features(
             features=self._merge_feature_lists(features, curated_features, remote_sensing_features),
@@ -410,6 +617,7 @@ class MapSeedManager:
             admin_context=admin_context,
             environment_baseline=environment_baseline,
         )
+        features = self._filter_features_to_aoi(features, radius_m)
 
         if progress_callback:
             progress_callback("classifying", 40, "判定场景类型并构建空间事实层")
@@ -568,12 +776,13 @@ class MapSeedManager:
             logger.warning(f"Reverse geocode failed, using coordinate fallback: {exc}")
             payload = {}
 
-        return self._normalize_admin_context(
+        context = self._normalize_admin_context(
             address=payload.get("address") or {},
             display_name=str(payload.get("display_name") or f"{lat:.4f}, {lon:.4f}"),
             lat=lat,
             lon=lon,
         )
+        return self._augment_local_geography(context, lat, lon)
 
     def _normalize_admin_context(
         self,
@@ -625,6 +834,253 @@ class MapSeedManager:
             "lat": lat,
             "lon": lon,
         }
+
+    def _augment_local_geography(self, context: Dict[str, Any], lat: float, lon: float) -> Dict[str, Any]:
+        local = self._local_geographic_context(lat, lon)
+        if not local:
+            return context
+
+        return self._apply_local_geographic_context(
+            context,
+            local,
+            force=str(local.get("area_kind") or "").strip() in {"airport", "transport", "landmark"},
+        )
+
+    def _apply_local_geographic_context(
+        self,
+        context: Dict[str, Any],
+        local: Dict[str, Any],
+        *,
+        force: bool = False,
+    ) -> Dict[str, Any]:
+        result = dict(context)
+        result["geographic_context"] = local
+        macro_area = str(local.get("macro_area") or "").strip()
+        local_area = str(local.get("local_area") or "").strip()
+        if force and macro_area:
+            result["city"] = macro_area
+        elif macro_area.endswith("市"):
+            result["city"] = macro_area
+        elif not str(result.get("city") or "").strip():
+            result["city"] = local.get("macro_area", "")
+
+        if force and local_area:
+            result["district"] = local_area
+        elif macro_area.endswith("市") and local_area:
+            result["district"] = local_area
+        elif not str(result.get("district") or "").strip():
+            result["district"] = local.get("local_area", "")
+        if force or not str(result.get("neighbourhood") or "").strip():
+            result["neighbourhood"] = local.get("feature_name", "")
+
+        display = str(result.get("display_name") or "").strip()
+        local_name = local.get("display_name") or local.get("area_label")
+        if not display or self._looks_like_coordinate_text(display):
+            result["display_name"] = local_name or display
+        elif local_name and local_name not in display:
+            result["display_name"] = f"{local_name}，{display}"
+        return result
+
+    def _select_geographic_context_for_label(
+        self,
+        context: Dict[str, Any],
+        lat: float,
+        lon: float,
+        radius_m: int,
+    ) -> Dict[str, Any]:
+        center_context = context.get("geographic_context") if isinstance(context.get("geographic_context"), dict) else {}
+        range_context = self._range_geographic_context(lat, lon, radius_m)
+        if not center_context:
+            return range_context
+        if not range_context or center_context.get("key") == range_context.get("key"):
+            return center_context
+
+        center_kind = str(center_context.get("area_kind") or "").strip()
+        range_kind = str(range_context.get("area_kind") or "").strip()
+        center_is_broad = center_kind in {"water", "regional"}
+        range_is_anchor = range_kind in {"airport", "transport", "district", "landmark"}
+        if center_is_broad and range_is_anchor:
+            return range_context
+        return center_context
+
+    def _range_geographic_context(self, lat: float, lon: float, radius_m: int) -> Dict[str, Any]:
+        bbox = _radius_to_bbox(lat, lon, max(500, int(radius_m or 3000)))
+        range_matches: List[Tuple[int, float, Dict[str, Any]]] = []
+        for item in self._local_geographic_candidates():
+            min_lat, max_lat, min_lon, max_lon = item["bounds"]
+            intersects = not (
+                max_lat < bbox["min_lat"]
+                or min_lat > bbox["max_lat"]
+                or max_lon < bbox["min_lon"]
+                or min_lon > bbox["max_lon"]
+            )
+            if not intersects:
+                continue
+            kind = str(item.get("area_kind") or "").strip()
+            priority = int(item.get("range_priority") or 10)
+            if kind in {"water", "regional"}:
+                priority += 50
+            center_lat = (min_lat + max_lat) / 2
+            center_lon = (min_lon + max_lon) / 2
+            distance = _haversine_m(lat, lon, center_lat, center_lon)
+            range_matches.append((priority, distance, item))
+        if not range_matches:
+            return {}
+        range_matches.sort(key=lambda entry: (entry[0], entry[1]))
+        return {key: value for key, value in range_matches[0][2].items() if key != "bounds"}
+
+    def _local_geographic_context(self, lat: float, lon: float) -> Dict[str, Any]:
+        for item in self._local_geographic_candidates():
+            min_lat, max_lat, min_lon, max_lon = item["bounds"]
+            if min_lat <= lat <= max_lat and min_lon <= lon <= max_lon:
+                return {key: value for key, value in item.items() if key != "bounds"}
+        return {}
+
+    def _local_geographic_candidates(self) -> List[Dict[str, Any]]:
+        return [
+            {
+                "key": "shenzhen_guangming",
+                "macro_area": "深圳市",
+                "local_area": "光明区",
+                "feature_name": "光明区城市生态与产业片区",
+                "area_label": "深圳市光明区周边",
+                "display_name": "深圳市光明区及凤凰城、公明周边",
+                "area_kind": "district",
+                "bounds": (22.64, 22.86, 113.82, 114.08),
+            },
+            {
+                "key": "shenzhen_longhua",
+                "macro_area": "深圳市",
+                "local_area": "龙华区",
+                "feature_name": "龙华区城市片区",
+                "area_label": "深圳市龙华区周边",
+                "display_name": "深圳市龙华区及深圳北站周边",
+                "area_kind": "district",
+                "bounds": (22.58, 22.78, 113.94, 114.13),
+            },
+            {
+                "key": "shenzhen_baoan",
+                "macro_area": "深圳市",
+                "local_area": "宝安区",
+                "feature_name": "宝安区西部城市与滨海片区",
+                "area_label": "深圳市宝安区周边",
+                "display_name": "深圳市宝安区及机场、茅洲河周边",
+                "area_kind": "district",
+                "bounds": (22.50, 22.86, 113.75, 114.02),
+            },
+            {
+                "key": "shenzhen_nanshan",
+                "macro_area": "深圳市",
+                "local_area": "南山区",
+                "feature_name": "南山区深圳湾与前海片区",
+                "area_label": "深圳市南山区周边",
+                "display_name": "深圳市南山区、前海及深圳湾周边",
+                "area_kind": "district",
+                "bounds": (22.45, 22.62, 113.85, 114.02),
+            },
+            {
+                "key": "shenzhen_futian",
+                "macro_area": "深圳市",
+                "local_area": "福田区",
+                "feature_name": "福田中心城区",
+                "area_label": "深圳市福田区周边",
+                "display_name": "深圳市福田区中心城区周边",
+                "area_kind": "district",
+                "bounds": (22.48, 22.62, 114.00, 114.12),
+            },
+            {
+                "key": "shenzhen_luohu",
+                "macro_area": "深圳市",
+                "local_area": "罗湖区",
+                "feature_name": "罗湖口岸与东部中心城区",
+                "area_label": "深圳市罗湖区周边",
+                "display_name": "深圳市罗湖区及东门、口岸周边",
+                "area_kind": "district",
+                "bounds": (22.50, 22.62, 114.08, 114.20),
+            },
+            {
+                "key": "shenzhen_longgang",
+                "macro_area": "深圳市",
+                "local_area": "龙岗区",
+                "feature_name": "龙岗区东部城市片区",
+                "area_label": "深圳市龙岗区周边",
+                "display_name": "深圳市龙岗区及东部城市组团周边",
+                "area_kind": "district",
+                "bounds": (22.55, 22.85, 114.10, 114.45),
+            },
+            {
+                "key": "shenzhen_pingshan",
+                "macro_area": "深圳市",
+                "local_area": "坪山区",
+                "feature_name": "坪山区产业与山地生态片区",
+                "area_label": "深圳市坪山区周边",
+                "display_name": "深圳市坪山区及东部山地生态周边",
+                "area_kind": "district",
+                "bounds": (22.60, 22.82, 114.25, 114.55),
+            },
+            {
+                "key": "hong_kong_airport",
+                "macro_area": "香港",
+                "local_area": "香港国际机场",
+                "feature_name": "赤鱲角机场岛",
+                "area_label": "香港国际机场周边",
+                "display_name": "香港国际机场及赤鱲角周边",
+                "area_kind": "airport",
+                "range_priority": 1,
+                "bounds": (22.285, 22.335, 113.875, 113.965),
+            },
+            {
+                "key": "hong_kong_lantau",
+                "macro_area": "香港",
+                "local_area": "大屿山",
+                "feature_name": "大屿山西部与北部片区",
+                "area_label": "香港大屿山周边",
+                "display_name": "香港大屿山及东涌、机场周边",
+                "area_kind": "district",
+                "range_priority": 4,
+                "bounds": (22.18, 22.36, 113.82, 114.05),
+            },
+            {
+                "key": "shenzhen_bay",
+                "macro_area": "珠江口",
+                "local_area": "深圳湾",
+                "feature_name": "深圳湾水域",
+                "area_label": "珠江口深圳湾周边",
+                "display_name": "珠江口深圳湾及后海湾周边",
+                "area_kind": "water",
+                "bounds": (22.38, 22.62, 113.86, 114.10),
+            },
+            {
+                "key": "zhuhai_east_coast",
+                "macro_area": "珠江口",
+                "local_area": "珠海东岸",
+                "feature_name": "珠海东部近岸带",
+                "area_label": "珠江口珠海东岸周边",
+                "display_name": "珠江口珠海东岸及近岸水域",
+                "area_kind": "regional",
+                "bounds": (21.95, 22.38, 113.45, 113.72),
+            },
+            {
+                "key": "lingdingyang",
+                "macro_area": "珠江口",
+                "local_area": "伶仃洋",
+                "feature_name": "伶仃洋水域",
+                "area_label": "珠江口伶仃洋水域",
+                "display_name": "珠江口伶仃洋及粤港澳近岸水域",
+                "area_kind": "water",
+                "bounds": (21.95, 22.72, 113.55, 114.05),
+            },
+            {
+                "key": "macao_western_waters",
+                "macro_area": "珠江口",
+                "local_area": "澳门近岸",
+                "feature_name": "澳门西侧近岸水域",
+                "area_label": "珠江口澳门近岸周边",
+                "display_name": "珠江口澳门近岸及珠海横琴周边",
+                "area_kind": "water",
+                "bounds": (21.98, 22.25, 113.45, 113.62),
+            },
+        ]
 
     def _select_locality_name(self, context: Dict[str, Any], radius_m: int) -> str:
         fine_grained = [
@@ -1158,6 +1614,24 @@ out center tags;
         merged.sort(key=lambda item: (-item["importance"], item["distance_m"], item["name"]))
         return merged
 
+    def _filter_features_to_aoi(self, features: List[Dict[str, Any]], radius_m: int) -> List[Dict[str, Any]]:
+        radius = max(500.0, float(radius_m or 3000))
+        tolerance_m = max(150.0, min(500.0, radius * 0.03))
+        limit_m = radius + tolerance_m
+        scoped: List[Dict[str, Any]] = []
+        for feature in features:
+            subtype = str(feature.get("subtype") or "")
+            if subtype == "weather_baseline":
+                scoped.append(feature)
+                continue
+            try:
+                distance_m = float(feature.get("distance_m"))
+            except (TypeError, ValueError):
+                continue
+            if distance_m <= limit_m:
+                scoped.append(feature)
+        return scoped
+
     def _wuhan_curated_features(self, lat: float, lon: float, radius_m: int) -> List[Dict[str, Any]]:
         del radius_m
         anchors = [
@@ -1211,6 +1685,63 @@ out center tags;
                     "summary": summary,
                     "tags": {"provider": "golden_case_curated", "golden_case_profile": "wuhan_covid_v1"},
                     "confidence": 0.92,
+                }
+            )
+        return features
+
+    def _local_curated_features(self, lat: float, lon: float, radius_m: int) -> List[Dict[str, Any]]:
+        local = self._local_geographic_context(lat, lon)
+        if not local:
+            return []
+
+        anchors = [
+            ("sz_guangming_district", "光明区", 22.748, 113.936, "region", "admin_district", "Region", 10, "深圳北部城市与产业片区，连接茅洲河流域、山地生态和高密度建设空间。"),
+            ("sz_fenghuang_subdistrict", "凤凰街道", 22.745, 113.976, "region", "subdistrict", "Region", 9, "光明区南部街道，靠近截图选点位置，是城市建设与社区承压分析的近场锚点。"),
+            ("sz_gongming_subdistrict", "公明街道", 22.792, 113.902, "region", "subdistrict", "Region", 9, "光明区西北部街道，承接产业、居住与水系廊道交互压力。"),
+            ("sz_guangming_science_city", "光明科学城", 22.750, 113.962, "facility", "science_city", "Infrastructure", 9, "光明区核心科创与公共服务集聚区，代表高强度城市活动和应急服务需求。"),
+            ("sz_maozhou_river", "茅洲河", 22.785, 113.830, "ecology", "river", "EnvironmentalCarrier", 8, "深圳西北部重要河流廊道，暴雨或台风情景下与地表径流、内涝扩散相关。"),
+            ("sz_shiyan_reservoir", "石岩水库", 22.668, 113.943, "ecology", "reservoir", "EnvironmentalCarrier", 8, "宝安与光明交界附近的重要水源与生态空间，对洪涝调蓄和生态稳态有约束意义。"),
+            ("sz_yangtaishan", "阳台山森林公园", 22.659, 114.004, "ecology", "forest_park", "EcologicalReceptor", 8, "深圳西部山地生态屏障，影响坡面径流、生态栖息地和城市边缘风险。"),
+            ("sz_north_station", "深圳北站", 22.611, 114.030, "facility", "rail_station", "Infrastructure", 7, "深圳北部综合交通枢纽，适合用于分析人流、疏散和跨区联动压力。"),
+            ("sz_baoan_airport", "深圳宝安国际机场", 22.637, 113.810, "facility", "airport", "Infrastructure", 7, "区域级交通基础设施，在台风、暴雨和应急物流场景中具有高敏感性。"),
+            ("prd_lingdingyang", "伶仃洋水域", 22.37, 113.76, "ecology", "water", "EnvironmentalCarrier", 10, "珠江口核心水域，是风暴潮、洪水下泄和近岸生态压力耦合的关键空间。"),
+            ("prd_pearl_river_estuary", "珠江口", 22.33, 113.70, "region", "coastline", "Region", 10, "粤港澳近岸水系与海湾交换的宏观地理锚点。"),
+            ("prd_shenzhen_bay", "深圳湾", 22.49, 113.99, "ecology", "wetland", "EnvironmentalCarrier", 9, "珠江口东侧的重要海湾与湿地生态空间。"),
+            ("prd_zhuhai_east_coast", "珠海东岸", 22.25, 113.60, "region", "coastline", "Region", 9, "珠江口西侧城市近岸带，连接港口、居住区和滨海生态空间。"),
+            ("prd_qianhai", "前海片区", 22.53, 113.89, "facility", "commercial", "Infrastructure", 8, "深圳湾北侧高强度城市开发与服务设施集聚片区。"),
+            ("prd_hongkong_wetland_park", "香港湿地公园周边", 22.47, 114.00, "ecology", "protected_area", "EcologicalReceptor", 8, "后海湾湿地生态与候鸟栖息相关的重要生态锚点。"),
+            ("prd_hongkong_zhuhai_macao_bridge", "港珠澳大桥通道", 22.28, 113.78, "facility", "road_corridor", "Infrastructure", 8, "跨珠江口的交通廊道，可能影响应急通达、物流和跨区联动。"),
+            ("prd_macao_nearshore", "澳门近岸水域", 22.17, 113.55, "ecology", "water", "EnvironmentalCarrier", 7, "珠江口西南侧高密度城市近岸水域。"),
+        ]
+
+        local_key = str(local.get("key") or "")
+        distance_limit = max(radius_m * 1.2, 8000)
+        if local_key.startswith("shenzhen_") and local_key != "shenzhen_bay":
+            distance_limit = max(radius_m * 1.35, 30000)
+
+        features: List[Dict[str, Any]] = []
+        for feature_id, name, feature_lat, feature_lon, category, subtype, node_family, importance, summary in anchors:
+            distance_m = _haversine_m(lat, lon, feature_lat, feature_lon)
+            if distance_m > distance_limit:
+                continue
+            features.append(
+                {
+                    "feature_id": f"local_{feature_id}",
+                    "name": name,
+                    "category": category,
+                    "subtype": subtype,
+                    "node_family": node_family,
+                    "source_kind": "observed",
+                    "lat": feature_lat,
+                    "lon": feature_lon,
+                    "distance_m": round(distance_m, 1),
+                    "importance": importance,
+                    "summary": summary,
+                    "tags": {
+                        "provider": "local_geographic_gazetteer",
+                        "local_context": local.get("key", ""),
+                    },
+                    "confidence": 0.74,
                 }
             )
         return features
@@ -1496,10 +2027,11 @@ out center tags;
         nodes: List[Dict[str, Any]] = []
         edges: List[Dict[str, Any]] = []
         center = aoi["center"]
-        region_id = f"region_{_slugify(admin_context.get('city') or admin_context.get('display_name') or seed['seed_id'])}"
+        place_label = self._context_place_label(admin_context, fallback=seed["seed_id"])
+        region_id = f"region_{_slugify(place_label)}"
         region_node = self._make_graph_node(
             node_id=region_id,
-            name=admin_context.get("city") or admin_context.get("display_name") or "Selected region",
+            name=place_label or "Selected region",
             label="Region",
             summary=(
                 f"中心点 ({center['lat']}, {center['lon']}) 周边 {aoi['radius_m']} 米分析范围，"
@@ -1944,7 +2476,7 @@ out center tags;
         scene_classification: Dict[str, Any],
         graph: Dict[str, Any],
     ) -> Dict[str, str]:
-        place = admin_context.get("city") or admin_context.get("display_name") or "选定区域"
+        place = self._context_place_label(admin_context)
         scene = scene_classification.get("primary_scene") or "mixed"
         stats = graph.get("stats") or {}
         title = f"{place} · {scene} map seed"

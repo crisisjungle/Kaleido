@@ -182,51 +182,209 @@ const buildStateMap = (items = []) => {
   return map
 }
 
+const readNodeId = (node) => String(node?.uuid || node?.id || '')
+
+const readEdgeId = (edge) => String(edge?.uuid || edge?.id || edge?.edge_id || '')
+
+const readEdgeSourceId = (edge) => String(edge?.source_node_uuid || edge?.source || edge?.from || '')
+
+const readEdgeTargetId = (edge) => String(edge?.target_node_uuid || edge?.target || edge?.to || '')
+
+const buildTimelineState = (state = {}, frame = {}, maxDelay = 0, focusIds = new Set()) => {
+  const rawStatus = String(state.status || 'steady').toLowerCase()
+  const id = String(state.id || '')
+  const isFocused = id && focusIds.has(id)
+  const participatesInPulse = focusIds.size > 0 ? isFocused : ['new', 'active'].includes(rawStatus)
+  const duration = Math.max(800, Number(frame.playback_duration_ms || 1600))
+  const elapsed = Math.max(0, Number(frame.playback_elapsed_ms || duration))
+  const rawDelay = Math.max(0, Number(state.delay_ms || 0))
+  const timelineDelay = maxDelay > 0
+    ? Math.round((rawDelay / maxDelay) * duration * 0.72)
+    : Math.min(rawDelay, duration * 0.72)
+  const revealWindow = Math.max(180, duration * 0.16)
+  const progress = rawStatus === 'hidden' || !participatesInPulse
+    ? 0
+    : Math.max(0, Math.min(1, (elapsed - timelineDelay) / revealWindow))
+  const isDue = progress > 0
+  let visualStatus = rawStatus
+  if (!isDue) {
+    visualStatus = 'hidden'
+  } else if (rawStatus === 'steady') {
+    visualStatus = 'faded'
+  }
+
+  return {
+    ...state,
+    raw_animation_status: rawStatus,
+    status: visualStatus,
+    delay_ms: timelineDelay,
+    timeline_delay_ms: timelineDelay,
+    animation_elapsed_ms: elapsed,
+    animation_progress: progress,
+    animation_due: isDue
+  }
+}
+
+const maxStateDelay = (items = []) => {
+  return Math.max(
+    0,
+    ...(Array.isArray(items) ? items : []).map((item) => Number(item?.delay_ms || 0)).filter(Number.isFinite)
+  )
+}
+
+const normalizeAnimationNode = (node = {}, index = 0) => {
+  const attrs = node.attributes || {}
+  const lat = toNumber(node.lat ?? attrs.lat)
+  const lon = toNumber(node.lon ?? attrs.lon)
+  return {
+    ...node,
+    uuid: readNodeId(node) || `animation_node_${index}`,
+    id: readNodeId(node) || `animation_node_${index}`,
+    name: node.name || `Node ${index + 1}`,
+    labels: Array.isArray(node.labels) ? node.labels : ['Entity'],
+    kind: node.kind || attrs.kind || nodeKindFromNode(node),
+    attributes: {
+      ...attrs,
+      ...(Number.isFinite(lat) ? { lat } : {}),
+      ...(Number.isFinite(lon) ? { lon } : {})
+    }
+  }
+}
+
+const normalizeAnimationEdge = (edge = {}, index = 0) => {
+  const sourceId = readEdgeSourceId(edge)
+  const targetId = readEdgeTargetId(edge)
+  const edgeId = readEdgeId(edge) || `${sourceId}->${targetId}:${edge.fact_type || edge.name || 'related'}:${index}`
+  return {
+    ...edge,
+    uuid: edgeId,
+    id: edgeId,
+    source_node_uuid: sourceId,
+    target_node_uuid: targetId,
+    name: edge.name || edge.fact_type || 'related_to',
+    fact_type: edge.fact_type || edge.name || 'related_to',
+    attributes: {
+      ...(edge.attributes || {})
+    }
+  }
+}
+
+const buildGraphFromAnimationLayout = (layout = {}) => {
+  const nodes = Array.isArray(layout.nodes) ? layout.nodes.map(normalizeAnimationNode) : []
+  const nodeIds = new Set(nodes.map((node) => readNodeId(node)).filter(Boolean))
+  const edges = (Array.isArray(layout.edges) ? layout.edges : [])
+    .map(normalizeAnimationEdge)
+    .filter((edge) => nodeIds.has(readEdgeSourceId(edge)) && nodeIds.has(readEdgeTargetId(edge)))
+  if (!nodes.length && !edges.length) return null
+  return {
+    nodes,
+    edges,
+    meta: {
+      source: 'animation_layout',
+      node_count: nodes.length,
+      edge_count: edges.length
+    }
+  }
+}
+
+const buildMapProjectionFromAnimationLayout = (layout = {}) => {
+  const graph = buildGraphFromAnimationLayout(layout)
+  if (!graph) return null
+  const nodes = graph.nodes
+    .filter((node) => Number.isFinite(toNumber(node.attributes?.lat)) && Number.isFinite(toNumber(node.attributes?.lon)))
+    .map((node) => ({
+      ...node,
+      attributes: {
+        ...(node.attributes || {}),
+        lat: toNumber(node.attributes?.lat),
+        lon: toNumber(node.attributes?.lon)
+      }
+    }))
+  const nodeById = new Map(nodes.map((node) => [readNodeId(node), node]))
+  const edges = graph.edges
+    .filter((edge) => nodeById.has(readEdgeSourceId(edge)) && nodeById.has(readEdgeTargetId(edge)))
+    .map((edge) => {
+      const sourceNode = nodeById.get(readEdgeSourceId(edge))
+      const targetNode = nodeById.get(readEdgeTargetId(edge))
+      return {
+        ...edge,
+        source_lat: sourceNode.attributes.lat,
+        source_lon: sourceNode.attributes.lon,
+        target_lat: targetNode.attributes.lat,
+        target_lon: targetNode.attributes.lon
+      }
+    })
+  return {
+    simulation_id: currentSimulationId.value,
+    source_mode: 'animation_layout',
+    map_seed_id: '',
+    center: layout.center || mapProjection.value?.center || { lat: 20, lon: 0 },
+    radius_m: Number(layout.radius_m || 0),
+    zoom_hint: Number(layout.zoom_hint || 0) || mapProjection.value?.zoom_hint || 9,
+    analysis_polygon: layout.analysis_polygon || null,
+    layers: Array.isArray(layout.base_layers) ? layout.base_layers : [],
+    nodes,
+    edges,
+    meta: {
+      source: 'animation_layout',
+      node_count: nodes.length,
+      edge_count: edges.length
+    }
+  }
+}
+
 const applyAnimationToGraph = (graph, frame) => {
   if (!graph || !frame) return graph
-  const nodeStates = buildStateMap(frame.node_states)
-  const edgeStates = buildStateMap(frame.edge_states)
+  const nodeMaxDelay = maxStateDelay(frame.node_states)
+  const edgeMaxDelay = maxStateDelay(frame.edge_states)
+  const focusNodeIds = new Set((frame.focus_ids?.node_ids || []).map((item) => String(item || '')).filter(Boolean))
+  const focusEdgeIds = new Set((frame.focus_ids?.edge_ids || []).map((item) => String(item || '')).filter(Boolean))
+  const nodeStates = buildStateMap((frame.node_states || []).map((state) => buildTimelineState(state, frame, nodeMaxDelay, focusNodeIds)))
+  const edgeStates = buildStateMap((frame.edge_states || []).map((state) => buildTimelineState(state, frame, edgeMaxDelay, focusEdgeIds)))
   if (!nodeStates.size) return graph
   const nodes = (Array.isArray(graph.nodes) ? graph.nodes : [])
-    .filter((node) => {
-      const nodeId = String(node?.uuid || node?.id || '')
-      const state = nodeStates.get(nodeId)
-      return !state || state.status !== 'hidden'
-    })
     .map((node) => {
-      const nodeId = String(node?.uuid || node?.id || '')
-      const state = nodeStates.get(nodeId) || {}
+      const nodeId = readNodeId(node)
+      const state = nodeStates.get(nodeId) || { status: 'hidden', raw_animation_status: 'hidden', animation_progress: 0 }
       return {
         ...node,
         attributes: {
           ...(node?.attributes || {}),
           animation_status: state.status || 'steady',
+          raw_animation_status: state.raw_animation_status,
           first_seen_round: state.first_seen_round,
           last_active_round: state.last_active_round,
-          delay_ms: state.delay_ms
+          delay_ms: state.delay_ms,
+          timeline_delay_ms: state.timeline_delay_ms,
+          animation_elapsed_ms: state.animation_elapsed_ms,
+          animation_progress: state.animation_progress,
+          animation_due: state.animation_due
         }
       }
     })
-  const visibleNodeIds = new Set(nodes.map((node) => String(node?.uuid || node?.id || '')))
+  const visibleNodeIds = new Set(nodes.map((node) => readNodeId(node)))
   const edges = (Array.isArray(graph.edges) ? graph.edges : [])
     .filter((edge) => {
-      const edgeId = String(edge?.uuid || edge?.id || '')
-      const sourceId = String(edge?.source_node_uuid || edge?.source || '')
-      const targetId = String(edge?.target_node_uuid || edge?.target || '')
-      const state = edgeStates.get(edgeId)
-      return visibleNodeIds.has(sourceId) && visibleNodeIds.has(targetId) && (!state || state.status !== 'hidden')
+      const sourceId = readEdgeSourceId(edge)
+      const targetId = readEdgeTargetId(edge)
+      return visibleNodeIds.has(sourceId) && visibleNodeIds.has(targetId)
     })
     .map((edge) => {
-      const edgeId = String(edge?.uuid || edge?.id || '')
-      const state = edgeStates.get(edgeId) || {}
+      const edgeId = readEdgeId(edge)
+      const state = edgeStates.get(edgeId) || { status: 'hidden', raw_animation_status: 'hidden', animation_progress: 0 }
       return {
         ...edge,
         attributes: {
           ...(edge?.attributes || {}),
           animation_status: state.status || 'steady',
+          raw_animation_status: state.raw_animation_status,
           first_seen_round: state.first_seen_round,
           last_active_round: state.last_active_round,
-          delay_ms: state.delay_ms
+          delay_ms: state.delay_ms,
+          timeline_delay_ms: state.timeline_delay_ms,
+          animation_elapsed_ms: state.animation_elapsed_ms,
+          animation_progress: state.animation_progress,
+          animation_due: state.animation_due
         }
       }
     })
@@ -245,20 +403,54 @@ const applyAnimationToGraph = (graph, frame) => {
 
 const applyAnimationToMapProjection = (projection, frame) => {
   if (!projection || !frame) return projection
-  const nodeStates = buildStateMap(frame.node_states)
-  const edgeStates = buildStateMap(frame.edge_states)
+  const nodeMaxDelay = maxStateDelay(frame.node_states)
+  const edgeMaxDelay = maxStateDelay(frame.edge_states)
+  const focusNodeIds = new Set((frame.focus_ids?.node_ids || []).map((item) => String(item || '')).filter(Boolean))
+  const focusEdgeIds = new Set((frame.focus_ids?.edge_ids || []).map((item) => String(item || '')).filter(Boolean))
+  const nodeStates = buildStateMap((frame.node_states || []).map((state) => buildTimelineState(state, frame, nodeMaxDelay, focusNodeIds)))
+  const edgeStates = buildStateMap((frame.edge_states || []).map((state) => buildTimelineState(state, frame, edgeMaxDelay, focusEdgeIds)))
   if (!nodeStates.size) return projection
-  const nodes = (Array.isArray(projection.nodes) ? projection.nodes : []).filter((node) => {
-    const state = nodeStates.get(String(node?.uuid || node?.id || ''))
-    return !state || state.status !== 'hidden'
+  const nodes = (Array.isArray(projection.nodes) ? projection.nodes : []).map((node) => {
+    const state = nodeStates.get(readNodeId(node)) || { status: 'hidden', raw_animation_status: 'hidden', animation_progress: 0 }
+    return {
+      ...node,
+      attributes: {
+        ...(node?.attributes || {}),
+        animation_status: state.status || 'steady',
+        raw_animation_status: state.raw_animation_status,
+        first_seen_round: state.first_seen_round,
+        last_active_round: state.last_active_round,
+        delay_ms: state.delay_ms,
+        timeline_delay_ms: state.timeline_delay_ms,
+        animation_elapsed_ms: state.animation_elapsed_ms,
+        animation_progress: state.animation_progress,
+        animation_due: state.animation_due
+      }
+    }
   })
-  const visibleNodeIds = new Set(nodes.map((node) => String(node?.uuid || node?.id || '')))
+  const visibleNodeIds = new Set(nodes.map((node) => readNodeId(node)))
   const edges = (Array.isArray(projection.edges) ? projection.edges : []).filter((edge) => {
-    const edgeId = String(edge?.uuid || edge?.id || '')
-    const sourceId = String(edge?.source_node_uuid || edge?.source || '')
-    const targetId = String(edge?.target_node_uuid || edge?.target || '')
-    const state = edgeStates.get(edgeId)
-    return visibleNodeIds.has(sourceId) && visibleNodeIds.has(targetId) && (!state || state.status !== 'hidden')
+    const sourceId = readEdgeSourceId(edge)
+    const targetId = readEdgeTargetId(edge)
+    return visibleNodeIds.has(sourceId) && visibleNodeIds.has(targetId)
+  }).map((edge) => {
+    const edgeId = readEdgeId(edge)
+    const state = edgeStates.get(edgeId) || { status: 'hidden', raw_animation_status: 'hidden', animation_progress: 0 }
+    return {
+      ...edge,
+      attributes: {
+        ...(edge?.attributes || {}),
+        animation_status: state.status || 'steady',
+        raw_animation_status: state.raw_animation_status,
+        first_seen_round: state.first_seen_round,
+        last_active_round: state.last_active_round,
+        delay_ms: state.delay_ms,
+        timeline_delay_ms: state.timeline_delay_ms,
+        animation_elapsed_ms: state.animation_elapsed_ms,
+        animation_progress: state.animation_progress,
+        animation_due: state.animation_due
+      }
+    }
   })
   return {
     ...projection,
@@ -699,6 +891,14 @@ const loadAnimationData = async () => {
     const res = await getSimulationAnimation(currentSimulationId.value)
     if (res.success && res.data) {
       animationData.value = res.data
+      const animationGraph = buildGraphFromAnimationLayout(res.data.layout || {})
+      if (animationGraph) {
+        applyGraphData(animationGraph, { compact: false })
+        const animationProjection = buildMapProjectionFromAnimationLayout(res.data.layout || {})
+        if (animationProjection) {
+          applyMapProjection(animationProjection)
+        }
+      }
       const firstFrame = Array.isArray(res.data.frames) ? res.data.frames[0] : null
       handleAnimationFrameChange(firstFrame)
       addLog(`动画数据加载成功：${res.data.frames?.length || 0} 帧`)

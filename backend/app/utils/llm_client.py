@@ -36,20 +36,65 @@ class LLMClient:
             api_key=self.api_key,
             base_url=self.base_url
         )
+        self.fallback_api_key = Config.LLM_FALLBACK_API_KEY
+        self.fallback_base_url = Config.LLM_FALLBACK_BASE_URL
+        self.fallback_model = Config.LLM_FALLBACK_MODEL_NAME
 
-    def _is_deepseek(self) -> bool:
+    def _has_fallback(self) -> bool:
+        return bool(self.fallback_api_key)
+
+    def _build_client(self, api_key: str, base_url: str) -> OpenAI:
+        return OpenAI(api_key=api_key, base_url=base_url)
+
+    def _create_completion(
+        self,
+        kwargs: Dict[str, Any],
+        *,
+        messages: List[Dict[str, str]],
+        temperature: float,
+        max_tokens: int,
+        response_format: Optional[Dict],
+        force_non_thinking: bool,
+    ) -> Any:
+        try:
+            return self.client.chat.completions.create(**kwargs)
+        except Exception as exc:
+            if not self._has_fallback():
+                raise
+
+            fallback_client = self._build_client(
+                self.fallback_api_key,
+                self.fallback_base_url or self.base_url,
+            )
+            fallback_kwargs = self._prepare_completion_kwargs(
+                base_url=self.fallback_base_url or self.base_url,
+                model=self.fallback_model or kwargs.get("model"),
+                messages=messages,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                response_format=response_format,
+                force_non_thinking=force_non_thinking,
+            )
+            try:
+                return fallback_client.chat.completions.create(**fallback_kwargs)
+            except Exception:
+                raise exc
+
+    def _is_deepseek_target(self, base_url: Optional[str], model: Optional[str]) -> bool:
         return (
-            "deepseek" in (self.base_url or "").lower()
-            or "deepseek" in (self.model or "").lower()
+            "deepseek" in (base_url or "").lower()
+            or "deepseek" in (model or "").lower()
         )
 
     def _resolve_deepseek_request(
         self,
+        base_url: Optional[str],
+        model: Optional[str],
         force_non_thinking: bool = False
     ) -> tuple[str, Optional[str], Optional[str]]:
         """解析 DeepSeek V4 兼容模型名与思考模式。"""
-        model = self.model or ""
-        if not self._is_deepseek():
+        model = model or ""
+        if not self._is_deepseek_target(base_url, model):
             return model, None, None
 
         normalized_model = model.strip().lower()
@@ -76,7 +121,41 @@ class LLMClient:
                 reasoning_effort = "high"
 
         return resolved_model, thinking_mode, reasoning_effort
-    
+
+    def _prepare_completion_kwargs(
+        self,
+        *,
+        base_url: Optional[str],
+        model: Optional[str],
+        messages: List[Dict[str, str]],
+        temperature: float,
+        max_tokens: int,
+        response_format: Optional[Dict],
+        force_non_thinking: bool,
+    ) -> Dict[str, Any]:
+        resolved_model, thinking_mode, reasoning_effort = self._resolve_deepseek_request(
+            base_url=base_url,
+            model=model,
+            force_non_thinking=force_non_thinking,
+        )
+
+        kwargs = {
+            "model": resolved_model,
+            "messages": messages,
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+        }
+
+        if response_format:
+            kwargs["response_format"] = response_format
+
+        if thinking_mode in {"enabled", "disabled"}:
+            kwargs["extra_body"] = {"thinking": {"type": thinking_mode}}
+        if thinking_mode == "enabled" and reasoning_effort:
+            kwargs["reasoning_effort"] = reasoning_effort
+
+        return kwargs
+
     def chat(
         self,
         messages: List[Dict[str, str]],
@@ -97,26 +176,24 @@ class LLMClient:
         Returns:
             模型响应文本
         """
-        resolved_model, thinking_mode, reasoning_effort = self._resolve_deepseek_request(
-            force_non_thinking=force_non_thinking
+        kwargs = self._prepare_completion_kwargs(
+            base_url=self.base_url,
+            model=self.model,
+            messages=messages,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            response_format=response_format,
+            force_non_thinking=force_non_thinking,
         )
-
-        kwargs = {
-            "model": resolved_model,
-            "messages": messages,
-            "temperature": temperature,
-            "max_tokens": max_tokens,
-        }
         
-        if response_format:
-            kwargs["response_format"] = response_format
-
-        if thinking_mode in {"enabled", "disabled"}:
-            kwargs["extra_body"] = {"thinking": {"type": thinking_mode}}
-        if thinking_mode == "enabled" and reasoning_effort:
-            kwargs["reasoning_effort"] = reasoning_effort
-        
-        response = self.client.chat.completions.create(**kwargs)
+        response = self._create_completion(
+            kwargs,
+            messages=messages,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            response_format=response_format,
+            force_non_thinking=force_non_thinking,
+        )
         content = response.choices[0].message.content
         # 部分模型（如MiniMax M2.5）会在content中包含<think>思考内容，需要移除
         content = re.sub(r'<think>[\s\S]*?</think>', '', content).strip()
@@ -141,14 +218,14 @@ class LLMClient:
         """
         # DeepSeek 在 JSON 输出场景偶发空内容；这里统一走非思考模式，并在本地解析 JSON，
         # 保持与旧版 deepseek-chat / deepseek-reasoner 行为一致。
-        use_response_format = not self._is_deepseek()
+        use_response_format = not self._is_deepseek_target(self.base_url, self.model)
 
         response = self.chat(
             messages=messages,
             temperature=temperature,
             max_tokens=max_tokens,
             response_format={"type": "json_object"} if use_response_format else None,
-            force_non_thinking=self._is_deepseek()
+            force_non_thinking=self._is_deepseek_target(self.base_url, self.model)
         )
         # 清理markdown代码块标记
         cleaned_response = response.strip()

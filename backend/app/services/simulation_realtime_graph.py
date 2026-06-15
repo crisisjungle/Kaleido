@@ -62,6 +62,8 @@ class SimulationRealtimeGraphBuilder:
                         "region_type": region.get("region_type"),
                         "layer": region.get("layer") or "macro",
                         "neighbors": list(region.get("neighbors") or []),
+                        "lat": region.get("lat"),
+                        "lon": region.get("lon"),
                     },
                 }
             )
@@ -84,6 +86,8 @@ class SimulationRealtimeGraphBuilder:
                         "land_use_class": subregion.get("land_use_class"),
                         "distance_band": subregion.get("distance_band"),
                         "layer": subregion.get("layer") or "subregion",
+                        "lat": subregion.get("lat"),
+                        "lon": subregion.get("lon"),
                     },
                 }
             )
@@ -116,6 +120,8 @@ class SimulationRealtimeGraphBuilder:
                         "primary_region": profile.get("primary_region"),
                         "is_synthesized": bool(profile.get("is_synthesized")),
                         "source_entity_uuid": profile.get("source_entity_uuid"),
+                        "lat": profile.get("lat"),
+                        "lon": profile.get("lon"),
                     },
                 }
             )
@@ -366,6 +372,8 @@ class SimulationRealtimeGraphBuilder:
                     "home_region_id": item.get("home_region_id"),
                     "home_subregion_id": item.get("home_subregion_id"),
                     "influenced_regions": list(item.get("influenced_regions") or []),
+                    "lat": item.get("lat"),
+                    "lon": item.get("lon"),
                     "bio": item.get("bio") or "",
                     "persona": item.get("persona") or "",
                     "is_synthesized": bool(item.get("is_synthesized")),

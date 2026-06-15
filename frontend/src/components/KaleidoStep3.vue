@@ -203,8 +203,14 @@
 
               <div class="selector playback-buttons">
                 <span>动画</span>
+                <button class="mini-btn ghost" type="button" :disabled="playbackFrames.length <= 1 || roundIndex <= 0" @click="stepAnimationFrame(-1)">
+                  上一轮
+                </button>
                 <button class="mini-btn" type="button" :disabled="playbackFrames.length <= 1" @click="toggleAnimationPlayback">
                   {{ isPlayingAnimation ? '暂停' : '播放' }}
+                </button>
+                <button class="mini-btn ghost" type="button" :disabled="playbackFrames.length <= 1 || roundIndex >= playbackFrames.length - 1" @click="stepAnimationFrame(1)">
+                  下一轮
                 </button>
                 <select v-model.number="playbackSpeedMs">
                   <option v-for="speed in playbackSpeedOptions" :key="speed" :value="speed">{{ speed }}ms</option>
@@ -226,6 +232,37 @@
               </div>
               <div class="progress-track">
                 <div class="progress-fill" :style="{ width: `${progressPercent}%` }"></div>
+              </div>
+            </div>
+
+            <div class="pulse-delta-grid">
+              <article class="pulse-delta-card">
+                <span>本轮新增连接</span>
+                <strong class="mono">{{ playbackPulseStats.newEdges }}</strong>
+              </article>
+              <article class="pulse-delta-card">
+                <span>本轮活跃连接</span>
+                <strong class="mono">{{ playbackPulseStats.activeEdges }}</strong>
+              </article>
+              <article class="pulse-delta-card">
+                <span>相关节点</span>
+                <strong class="mono">{{ playbackPulseStats.focusNodes }}</strong>
+              </article>
+            </div>
+
+            <div class="pulse-relation-list">
+              <article
+                v-for="relation in playbackPulseRelations"
+                :key="relation.id"
+                class="pulse-relation-card"
+                :class="`is-${relation.status}`"
+              >
+                <span>{{ relation.statusLabel }}</span>
+                <strong>{{ relation.sourceName }} → {{ relation.targetName }}</strong>
+                <p>{{ relation.typeLabel }}</p>
+              </article>
+              <div v-if="playbackPulseRelations.length === 0" class="empty-state compact">
+                当前轮次没有新的显式连接，图谱保持稳定底图，只更新区域状态。
               </div>
             </div>
 
@@ -861,7 +898,7 @@
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { getRunStatus, getRunStatusDetail, getSimulation, getSimulationConfig, injectSimulationVariable, startSimulation, stopSimulation } from '../api/simulation'
-import { generateReport } from '../api/report'
+import { generateReportAsync } from '../api/report'
 import { formatDistanceLabelZh, formatLandUseLabelZh, formatTokenLabelZh, translateDisplayToken } from '../utils/displayText'
 
 const props = defineProps({
@@ -907,12 +944,14 @@ const lastRunMessage = ref('')
 const isPlayingAnimation = ref(false)
 const playbackSpeedMs = ref(1400)
 const hasAutoStartedReplay = ref(false)
+const playbackElapsedMs = ref(0)
 
 const policyModes = ['restrict', 'relocate', 'subsidize', 'monitor', 'disclose', 'repair', 'ban', 'reopen']
 
 let statusTimer = null
 let detailTimer = null
 let animationTimer = null
+let frameAnimationRaf = null
 let statusRefreshInFlight = false
 let detailRefreshInFlight = false
 
@@ -942,12 +981,25 @@ const playbackSpeedOptions = computed(() => {
 const selectedAnimationFrame = computed(() => {
   if (playbackFrames.value.length === 0) return null
   const safeIndex = Math.min(Math.max(roundIndex.value, 0), playbackFrames.value.length - 1)
-  return playbackFrames.value[safeIndex] || null
+  const frame = playbackFrames.value[safeIndex] || null
+  if (!frame || !props.animationData?.frames?.length) return frame
+  return {
+    ...frame,
+    playback_elapsed_ms: playbackElapsedMs.value,
+    playback_duration_ms: resolvePlaybackDelayMs(frame),
+  }
 })
 
 const isReplayPlayback = computed(() => Boolean(props.isReplayOnly || simulationSnapshot.value?.is_replay_only || props.animationData?.meta?.artifact_mode === 'frozen'))
 
 const progressPercent = computed(() => {
+  if (selectedAnimationFrame.value && props.animationData?.frames?.length) {
+    const total = Number(props.animationData?.meta?.total_rounds || playbackFrames.value.length - 1 || 0)
+    const current = Number(selectedAnimationFrame.value.round ?? 0)
+    if (total > 0 && Number.isFinite(current)) {
+      return Math.max(0, Math.min(100, Math.round((current / total) * 100)))
+    }
+  }
   const explicitProgress = Number(runStatus.value.progress_percent ?? runDetail.value.progress_percent)
   if (Number.isFinite(explicitProgress) && explicitProgress > 0) {
     return Math.max(0, Math.min(100, Math.round(explicitProgress)))
@@ -1014,8 +1066,7 @@ const selectedRoundSnapshot = computed(() => {
 const currentRoundNumber = computed(() => {
   if (selectedAnimationFrame.value && props.animationData?.frames?.length) {
     const frameRound = Number(selectedAnimationFrame.value.round || 0)
-    const statusRound = Number(runStatus.value.current_round || runStatus.value.current_round_num || runDetail.value.current_round || 0)
-    return frameRound > 0 ? frameRound : statusRound
+    return Number.isFinite(frameRound) ? frameRound : 0
   }
   if (selectedRoundSnapshot.value) return extractRoundNumber(selectedRoundSnapshot.value, roundIndex.value)
   return runStatus.value.current_round || runStatus.value.current_round_num || 0
@@ -1268,6 +1319,74 @@ const graphNodeMap = computed(() => {
     }
   })
   return map
+})
+
+const graphEdgeMap = computed(() => {
+  const map = new Map()
+  const edges = [
+    ...(Array.isArray(props.graphData?.edges) ? props.graphData.edges : []),
+    ...(Array.isArray(props.animationData?.layout?.edges) ? props.animationData.layout.edges : [])
+  ]
+  edges.forEach((edge, index) => {
+    const id = edge?.uuid || edge?.id || edge?.edge_id || `${edge?.source_node_uuid || edge?.source || 'source'}-${edge?.target_node_uuid || edge?.target || 'target'}-${index}`
+    if (id) {
+      map.set(String(id), edge)
+    }
+  })
+  return map
+})
+
+const playbackNodeMap = computed(() => {
+  const map = new Map(graphNodeMap.value)
+  const nodes = Array.isArray(props.animationData?.layout?.nodes) ? props.animationData.layout.nodes : []
+  nodes.forEach((node) => {
+    const id = node?.uuid || node?.id
+    if (id && !map.has(String(id))) {
+      map.set(String(id), node)
+    }
+  })
+  return map
+})
+
+const playbackPulseStats = computed(() => {
+  const frame = selectedAnimationFrame.value || {}
+  const edgeStates = Array.isArray(frame.edge_states) ? frame.edge_states : []
+  const nodeIds = Array.isArray(frame.focus_ids?.node_ids) ? frame.focus_ids.node_ids : []
+  return {
+    newEdges: edgeStates.filter(item => String(item?.status || '') === 'new').length,
+    activeEdges: edgeStates.filter(item => String(item?.status || '') === 'active').length,
+    focusNodes: nodeIds.length
+  }
+})
+
+const playbackPulseRelations = computed(() => {
+  const frame = selectedAnimationFrame.value || {}
+  const edgeStates = Array.isArray(frame.edge_states) ? frame.edge_states : []
+  const focusEdgeIds = new Set((frame.focus_ids?.edge_ids || []).map(item => String(item || '')).filter(Boolean))
+  return edgeStates
+    .filter(item => ['new', 'active'].includes(String(item?.status || '')) || focusEdgeIds.has(String(item?.id || '')))
+    .sort((a, b) => {
+      const statusDelta = relationStatusPriority(b.status) - relationStatusPriority(a.status)
+      if (statusDelta !== 0) return statusDelta
+      return Number(a.delay_ms || 0) - Number(b.delay_ms || 0)
+    })
+    .slice(0, 6)
+    .map((state, index) => {
+      const edge = graphEdgeMap.value.get(String(state.id || '')) || {}
+      const sourceId = String(edge.source_node_uuid || edge.source || '')
+      const targetId = String(edge.target_node_uuid || edge.target || '')
+      const sourceNode = playbackNodeMap.value.get(sourceId)
+      const targetNode = playbackNodeMap.value.get(targetId)
+      const status = String(state.status || 'steady')
+      return {
+        id: `${state.id || index}-${status}`,
+        status,
+        statusLabel: status === 'new' ? '新增' : status === 'active' ? '活跃' : '相关',
+        sourceName: sourceNode?.name || edge.source_name || sourceId || '来源节点',
+        targetName: targetNode?.name || edge.target_name || targetId || '目标节点',
+        typeLabel: translateDisplayToken(edge.fact_type || edge.name || 'related_to', edge.fact_type || edge.name || '关系')
+      }
+    })
 })
 
 const graphNodesByName = computed(() => {
@@ -1800,6 +1919,13 @@ function sortByRoundDesc(a, b) {
   return String(b.id || '').localeCompare(String(a.id || ''))
 }
 
+function relationStatusPriority(status) {
+  if (status === 'active') return 3
+  if (status === 'new') return 2
+  if (status === 'steady') return 1
+  return 0
+}
+
 function sortInterventionRows(a, b) {
   const roundDelta = Number(b.round || b.startRound || 0) - Number(a.round || a.startRound || 0)
   if (roundDelta !== 0) return roundDelta
@@ -2059,7 +2185,7 @@ async function handleNextStep() {
       route.query.simulation_requirement ||
       ''
 
-    const res = await generateReport({
+    const res = await generateReportAsync({
       simulation_id: props.simulationId,
       graph_id: graphId,
       simulation_requirement: simulationRequirement,
@@ -2199,6 +2325,10 @@ function stopAnimationPlayback() {
     clearTimeout(animationTimer)
     animationTimer = null
   }
+  if (frameAnimationRaf) {
+    cancelAnimationFrame(frameAnimationRaf)
+    frameAnimationRaf = null
+  }
   isPlayingAnimation.value = false
 }
 
@@ -2213,12 +2343,46 @@ function resolvePlaybackDelayMs(frame = null) {
 function queueNextAnimationTick() {
   if (!isPlayingAnimation.value || playbackFrames.value.length <= 1) return
   const frame = selectedAnimationFrame.value
-  const waitMs = resolvePlaybackDelayMs(frame)
-  animationTimer = window.setTimeout(() => {
+  const durationMs = resolvePlaybackDelayMs(frame)
+  runFramePulse(durationMs, () => {
     const maxIndex = Math.max(playbackFrames.value.length - 1, 0)
-    roundIndex.value = roundIndex.value >= maxIndex ? 0 : roundIndex.value + 1
+    if (roundIndex.value >= maxIndex) {
+      stopAnimationPlayback()
+      return
+    }
+    roundIndex.value += 1
     queueNextAnimationTick()
-  }, waitMs)
+  })
+}
+
+function runFramePulse(durationMs, onComplete = null) {
+  if (frameAnimationRaf) {
+    cancelAnimationFrame(frameAnimationRaf)
+    frameAnimationRaf = null
+  }
+  playbackElapsedMs.value = 0
+  const startAt = performance.now()
+  const tick = (now) => {
+    const elapsed = Math.min(durationMs, Math.max(0, now - startAt))
+    playbackElapsedMs.value = elapsed
+    if (elapsed >= durationMs) {
+      frameAnimationRaf = null
+      if (typeof onComplete === 'function') onComplete()
+      return
+    }
+    frameAnimationRaf = requestAnimationFrame(tick)
+  }
+  frameAnimationRaf = requestAnimationFrame(tick)
+}
+
+function stepAnimationFrame(delta) {
+  if (playbackFrames.value.length <= 1) return
+  stopAnimationPlayback()
+  const maxIndex = Math.max(playbackFrames.value.length - 1, 0)
+  roundIndex.value = Math.min(maxIndex, Math.max(0, roundIndex.value + delta))
+  window.setTimeout(() => {
+    runFramePulse(resolvePlaybackDelayMs(selectedAnimationFrame.value))
+  }, 0)
 }
 
 function toggleAnimationPlayback() {
@@ -2227,6 +2391,9 @@ function toggleAnimationPlayback() {
     return
   }
   if (playbackFrames.value.length <= 1) return
+  if (roundIndex.value >= playbackFrames.value.length - 1) {
+    roundIndex.value = 0
+  }
   isPlayingAnimation.value = true
   queueNextAnimationTick()
 }
@@ -2306,6 +2473,14 @@ watch(
   },
   { immediate: true }
 )
+
+watch(roundIndex, () => {
+  if (!props.animationData?.frames?.length || isPlayingAnimation.value) return
+  window.setTimeout(() => {
+    if (isPlayingAnimation.value) return
+    runFramePulse(resolvePlaybackDelayMs(selectedAnimationFrame.value))
+  }, 0)
+})
 
 watch(playbackSpeedMs, () => {
   if (isPlayingAnimation.value) {
@@ -2730,6 +2905,72 @@ onUnmounted(() => {
   background: linear-gradient(90deg, #f08a24, #113d7a);
 }
 
+.pulse-delta-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.pulse-delta-card {
+  border-radius: 16px;
+  padding: 12px;
+  background: rgba(248, 251, 255, 0.92);
+  border: 1px solid rgba(29, 39, 58, 0.08);
+}
+
+.pulse-delta-card span,
+.pulse-relation-card span {
+  display: block;
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: #7d8393;
+}
+
+.pulse-delta-card strong {
+  display: block;
+  margin-top: 8px;
+  color: #173056;
+  font-size: 18px;
+}
+
+.pulse-relation-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.pulse-relation-card {
+  border-radius: 16px;
+  padding: 12px;
+  border: 1px solid rgba(29, 39, 58, 0.08);
+  background: #fff;
+}
+
+.pulse-relation-card.is-new {
+  border-color: rgba(240, 138, 36, 0.28);
+  background: rgba(255, 248, 235, 0.72);
+}
+
+.pulse-relation-card.is-active {
+  border-color: rgba(191, 66, 48, 0.26);
+  background: rgba(255, 244, 240, 0.76);
+}
+
+.pulse-relation-card strong {
+  display: block;
+  margin-top: 6px;
+  color: #173056;
+  font-size: 13px;
+  line-height: 1.35;
+}
+
+.pulse-relation-card p {
+  margin: 4px 0 0;
+  color: #677084;
+  font-size: 12px;
+}
+
 .spotlight-list {
   display: flex;
   flex-direction: column;
@@ -2868,6 +3109,7 @@ onUnmounted(() => {
 .playback-buttons {
   flex-direction: row;
   align-items: end;
+  flex-wrap: wrap;
 }
 
 .mini-btn {
@@ -2879,6 +3121,11 @@ onUnmounted(() => {
   font: inherit;
   font-weight: 800;
   cursor: pointer;
+}
+
+.mini-btn.ghost {
+  background: #fff;
+  color: #27344a;
 }
 
 .mini-btn:disabled {
@@ -3474,6 +3721,11 @@ onUnmounted(() => {
   background: rgba(29, 39, 58, 0.04);
   color: #6f7588;
   font-size: 13px;
+}
+
+.empty-state.compact {
+  padding: 12px;
+  font-size: 12px;
 }
 
 @media (max-width: 1280px) {

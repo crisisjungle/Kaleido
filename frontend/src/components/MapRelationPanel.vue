@@ -175,8 +175,9 @@ const nodeLayers = computed(() => {
     const kind = String(node?.kind || node?.attributes?.map_kind || 'entity').toLowerCase()
     const isHighlighted = isNodeHighlighted(node)
     const visual = nodeVisualState(node, kind, isHighlighted)
-    const key = `${visual.status}:${kind}`
-    if (!grouped.has(key)) grouped.set(key, { kind, status: visual.status, points: [] })
+    if (visual.status === 'hidden' && !isHighlighted) continue
+    const key = `${visual.status}:${kind}:${visual.group}`
+    if (!grouped.has(key)) grouped.set(key, { kind, status: visual.status, group: visual.group, points: [] })
     grouped.get(key).points.push({
       lat,
       lon,
@@ -201,7 +202,7 @@ const nodeLayers = computed(() => {
       id: `nodes-${entry.status}-${entry.kind}`,
       name: `${entry.kind} ${entry.status} nodes`,
       type: 'points',
-      color: nodeColor(entry.kind),
+      color: nodeColor(null, entry.kind, entry.group),
       visible: true,
       note: `Projected ${entry.kind} nodes`,
       data: entry.points,
@@ -222,10 +223,7 @@ const edgeLayer = computed(() => {
       type: 'Feature',
       geometry: {
         type: 'LineString',
-        coordinates: [
-          [source.lon, source.lat],
-          [target.lon, target.lat]
-        ]
+        coordinates: curvedEdgeCoordinates(source, target, edge)
       },
       properties: {
         name: edge?.name || edge?.fact_type || 'relation',
@@ -262,9 +260,10 @@ const nodeHaloLayers = computed(() => {
     const kind = String(node?.kind || node?.attributes?.map_kind || 'entity').toLowerCase()
     const isHighlighted = isNodeHighlighted(node)
     const visual = nodeVisualState(node, kind, isHighlighted)
+    if (visual.status === 'hidden' && !isHighlighted) continue
     if (!['new', 'active'].includes(visual.status) && !isHighlighted) continue
-    const key = `${visual.status}:${kind}`
-    if (!grouped.has(key)) grouped.set(key, { kind, status: visual.status, points: [] })
+    const key = `${visual.status}:${kind}:${visual.group}`
+    if (!grouped.has(key)) grouped.set(key, { kind, status: visual.status, group: visual.group, points: [] })
     grouped.get(key).points.push({
       lat,
       lon,
@@ -283,7 +282,7 @@ const nodeHaloLayers = computed(() => {
     id: `halo-${entry.status}-${entry.kind}`,
     name: `${entry.kind} ${entry.status} halo`,
     type: 'points',
-    color: nodeColor(entry.kind),
+  color: nodeColor(null, entry.kind, entry.group),
     visible: true,
     note: `Projected ${entry.kind} halo`,
     data: entry.points,
@@ -307,8 +306,10 @@ const highlightModeLabel = computed(() => {
   return props.highlightLabel ? '聚焦' : '无'
 })
 
-const HUB_EDGE_CAP = 24
-const HUB_PRIORITY_KEEP = 8
+const HUB_EDGE_CAP = 16
+const HUB_PRIORITY_KEEP = 5
+const RELATION_GROUP_CAP = 42
+const RELATION_GROUP_PRIORITY_KEEP = 10
 
 const shownEdgeCount = computed(() => compactedEdgeResult.value.edges.length)
 const suppressedEdgeCount = computed(() => compactedEdgeResult.value.suppressedCount)
@@ -324,12 +325,20 @@ const compactedEdgeResult = computed(() => {
     if (!source || !target) continue
 
     const highlighted = isEdgeHighlighted(edge)
+    if (entityAnimationStatus(edge) === 'hidden' && !highlighted) continue
     if (highlighted) {
       alwaysVisible.push(edge)
       continue
     }
 
     const hubNodeId = resolveHubNodeId(edge, source.node, target.node)
+    const relationGroupKey = resolveRelationGroupKey(edge, source.node, target.node)
+    if (!hubNodeId && relationGroupKey) {
+      if (!hubGroups.has(relationGroupKey)) hubGroups.set(relationGroupKey, [])
+      hubGroups.get(relationGroupKey).push(edge)
+      continue
+    }
+
     if (!hubNodeId) {
       directEdges.push(edge)
       continue
@@ -342,11 +351,14 @@ const compactedEdgeResult = computed(() => {
   const hubVisible = []
   let suppressedCount = 0
   hubGroups.forEach((edges, hubNodeId) => {
-    if (edges.length <= HUB_EDGE_CAP) {
+    const isRelationGroup = String(hubNodeId).startsWith('relgroup::')
+    const cap = isRelationGroup ? RELATION_GROUP_CAP : HUB_EDGE_CAP
+    const priorityKeep = isRelationGroup ? RELATION_GROUP_PRIORITY_KEEP : HUB_PRIORITY_KEEP
+    if (edges.length <= cap) {
       hubVisible.push(...edges)
       return
     }
-    const kept = pickHubEdges(edges, hubNodeId, HUB_EDGE_CAP, HUB_PRIORITY_KEEP)
+    const kept = pickHubEdges(edges, hubNodeId, cap, priorityKeep)
     suppressedCount += Math.max(0, edges.length - kept.length)
     hubVisible.push(...kept)
   })
@@ -380,6 +392,16 @@ function resolveHubNodeId(edge, sourceNode, targetNode) {
   if (isHubKind(sourceKind) && targetKind === 'agent') return String(sourceNode?.uuid || '')
   if (isHubKind(targetKind) && sourceKind === 'agent') return String(targetNode?.uuid || '')
   return ''
+}
+
+function resolveRelationGroupKey(edge, sourceNode, targetNode) {
+  const type = String(edge?.fact_type || edge?.name || '').toLowerCase()
+  if (['region_neighbor', 'region_hierarchy', 'transport_edge', 'agent_anchor', 'located_in'].includes(type)) return ''
+  const sourceRegion = String(edge?.attributes?.source_region_id || sourceNode?.attributes?.home_region_id || sourceNode?.attributes?.primary_region || '').trim()
+  const targetRegion = String(edge?.attributes?.target_region_id || targetNode?.attributes?.home_region_id || targetNode?.attributes?.primary_region || '').trim()
+  const channel = String(edge?.attributes?.interaction_channel || edge?.attributes?.channel_type || type || 'relation').trim()
+  if (!sourceRegion && !targetRegion) return ''
+  return `relgroup::${sourceRegion || 'unknown'}::${targetRegion || 'unknown'}::${channel}`
 }
 
 function pickHubEdges(edges, hubNodeId, cap, mustKeepCount) {
@@ -481,17 +503,39 @@ function showNodeLabel(node, highlighted, status = 'steady') {
   return kind === 'region' || kind === 'subregion'
 }
 
-function nodeRadius(kind) {
-  if (kind === 'region') return 8
-  if (kind === 'subregion') return 6
-  if (kind === 'agent') return 5
+function nodeRadius(kind, group = '') {
+  if (kind === 'region') return 9
+  if (kind === 'subregion') return 6.2
+  if (kind === 'agent') {
+    if (group === 'governance') return 6.4
+    if (group === 'organization') return 5.5
+    if (group === 'human') return 4.3
+    return 4.8
+  }
   return 4
 }
 
-function nodeColor(kind) {
+function nodeGroup(node, kind) {
+  if (kind !== 'agent') return kind
+  const attrs = node?.attributes || {}
+  const labels = Array.isArray(node?.labels) ? node.labels.join(' ') : ''
+  const text = `${attrs.node_family || ''} ${attrs.agent_type || ''} ${attrs.agent_subtype || ''} ${labels}`.toLowerCase()
+  if (text.includes('governance') || text.includes('government') || text.includes('治理') || text.includes('政府')) return 'governance'
+  if (text.includes('organization') || text.includes('组织') || text.includes('机构')) return 'organization'
+  if (text.includes('human') || text.includes('居民') || text.includes('社区') || text.includes('人')) return 'human'
+  return 'agent'
+}
+
+function nodeColor(node, kind, fallbackGroup = '') {
+  const group = fallbackGroup || nodeGroup(node, kind)
   if (kind === 'region') return '#ea580c'
-  if (kind === 'subregion') return '#f97316'
-  if (kind === 'agent') return '#1d4ed8'
+  if (kind === 'subregion') return '#f59e0b'
+  if (kind === 'agent') {
+    if (group === 'governance') return '#0f766e'
+    if (group === 'organization') return '#7c3aed'
+    if (group === 'human') return '#2563eb'
+    return '#334155'
+  }
   return '#0f766e'
 }
 
@@ -525,13 +569,25 @@ function nodeKindPriority(kind) {
 }
 
 function entityAnimationStatus(entity) {
-  return normalizeAnimationStatus(entity?.attributes?.animation_status)
+  const status = normalizeAnimationStatus(entity?.attributes?.animation_status)
+  if (props.highlightMode === 'animation' && !['new', 'active'].includes(status)) {
+    return 'hidden'
+  }
+  return status
+}
+
+function entityAnimationProgress(entity) {
+  const value = Number(entity?.attributes?.animation_progress ?? 1)
+  if (!Number.isFinite(value)) return 1
+  return Math.max(0, Math.min(1, value))
 }
 
 function nodeVisualState(node, kind, highlighted) {
   const status = entityAnimationStatus(node)
-  const baseRadius = nodeRadius(kind)
-  const baseColor = nodeColor(kind)
+  const progress = entityAnimationProgress(node)
+  const group = nodeGroup(node, kind)
+  const baseRadius = nodeRadius(kind, group)
+  const baseColor = nodeColor(node, kind, group)
   let radius = baseRadius
   let color = baseColor
   let fillColor = baseColor
@@ -560,6 +616,20 @@ function nodeVisualState(node, kind, highlighted) {
     weight = 1
     opacity = 0.18
     fillOpacity = 0.2
+  } else if (status === 'hidden') {
+    radius = Math.max(1, radius - 2)
+    color = '#cbd5e1'
+    fillColor = '#cbd5e1'
+    weight = 0
+    opacity = 0
+    fillOpacity = 0
+  }
+
+  if (status !== 'hidden') {
+    const revealScale = 0.62 + progress * 0.38
+    radius *= revealScale
+    opacity *= 0.18 + progress * 0.82
+    fillOpacity *= 0.18 + progress * 0.82
   }
 
   if (highlighted) {
@@ -578,12 +648,14 @@ function nodeVisualState(node, kind, highlighted) {
     fillColor,
     weight,
     opacity,
-    fillOpacity
+    fillOpacity,
+    group
   }
 }
 
 function edgeVisualState(edge, highlighted) {
   const status = entityAnimationStatus(edge)
+  const progress = entityAnimationProgress(edge)
   let color = edgeColor(edge, false)
   let weight = 1.35
   let opacity = 0.38
@@ -603,6 +675,16 @@ function edgeVisualState(edge, highlighted) {
     weight = 0.9
     opacity = 0.16
     dashArray = '3 7'
+  } else if (status === 'hidden') {
+    color = '#cbd5e1'
+    weight = 0
+    opacity = 0
+    dashArray = undefined
+  }
+
+  if (status !== 'hidden') {
+    weight *= 0.55 + progress * 0.45
+    opacity *= 0.08 + progress * 0.92
   }
 
   if (highlighted) {
@@ -613,6 +695,36 @@ function edgeVisualState(edge, highlighted) {
   }
 
   return { color, weight, opacity, dashArray }
+}
+
+function curvedEdgeCoordinates(source, target, edge) {
+  const start = [source.lon, source.lat]
+  const end = [target.lon, target.lat]
+  const dx = end[0] - start[0]
+  const dy = end[1] - start[1]
+  const length = Math.sqrt(dx * dx + dy * dy)
+  if (!Number.isFinite(length) || length < 0.0008) return [start, end]
+
+  const seed = stableUnit(edge?.uuid || `${edge?.source_node_uuid}-${edge?.target_node_uuid}`)
+  const direction = seed > 0.5 ? 1 : -1
+  const type = String(edge?.fact_type || edge?.name || '').toLowerCase()
+  const baseBend = type === 'dynamic_edge' ? 0.22 : type === 'transport_edge' ? 0.1 : 0.15
+  const bend = direction * baseBend * (0.55 + Math.abs(seed - 0.5))
+  const mid = [
+    (start[0] + end[0]) / 2 + (-dy / length) * length * bend,
+    (start[1] + end[1]) / 2 + (dx / length) * length * bend
+  ]
+  return [start, mid, end]
+}
+
+function stableUnit(value) {
+  const text = String(value || '')
+  let hash = 2166136261
+  for (let index = 0; index < text.length; index += 1) {
+    hash ^= text.charCodeAt(index)
+    hash = Math.imul(hash, 16777619)
+  }
+  return (hash >>> 0) / 4294967295
 }
 </script>
 

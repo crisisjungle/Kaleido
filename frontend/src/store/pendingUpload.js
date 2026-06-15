@@ -11,6 +11,7 @@ const state = reactive({
   selectedPoints: [],
   mapSeedId: '',
   areaLabel: '',
+  radiusMeters: 0,
   isPending: false
 })
 
@@ -21,6 +22,7 @@ export function setPendingUpload(files, requirement, options = {}) {
   state.selectedPoints = Array.isArray(options.selectedPoints) ? options.selectedPoints : []
   state.mapSeedId = String(options.mapSeedId || '').trim()
   state.areaLabel = String(options.areaLabel || '').trim()
+  state.radiusMeters = Number(options.radiusMeters || options.radius_m || 0)
   state.isPending = true
 }
 
@@ -32,6 +34,7 @@ export function getPendingUpload() {
     selectedPoints: state.selectedPoints,
     mapSeedId: state.mapSeedId,
     areaLabel: state.areaLabel,
+    radiusMeters: state.radiusMeters,
     isPending: state.isPending
   }
 }
@@ -43,6 +46,7 @@ export function clearPendingUpload() {
   state.selectedPoints = []
   state.mapSeedId = ''
   state.areaLabel = ''
+  state.radiusMeters = 0
   state.isPending = false
 }
 

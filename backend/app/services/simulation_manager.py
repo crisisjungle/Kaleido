@@ -555,11 +555,17 @@ class SimulationManager:
                 document_text=document_text,
                 entities=filtered.entities,
                 regions=result.regions,
+                subregions=result.subregions,
                 profiles=result.profiles,
                 injected_variables=variables,
                 scenario_mode=state.scenario_mode,
                 diffusion_template=state.diffusion_template,
                 hazard_template_id=state.hazard_template_id,
+                temporal_profile={
+                    "preset": state.temporal_preset,
+                    "total_rounds": state.configured_total_rounds,
+                    "minutes_per_round": state.configured_minutes_per_round,
+                },
             )
             runtime_tracker = RiskRuntimeTracker()
             latest_risk_runtime_state = runtime_tracker.build_initial_bundle(

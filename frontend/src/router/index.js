@@ -2,6 +2,7 @@ import { createRouter, createWebHistory } from 'vue-router'
 
 const routes = [
   { path: '/', name: 'Home', component: () => import('../views/HomeView.vue') },
+  { path: '/demo/wuhan', name: 'WuhanDemo', component: () => import('../views/WuhanDemoView.vue') },
   { path: '/history', name: 'History', component: () => import('../views/HistoryView.vue') },
   { path: '/scene-composer', name: 'SceneComposer', component: () => import('../views/SceneComposerView.vue') },
   { path: '/process/:projectId?', name: 'Process', component: () => import('../views/MainView.vue') },

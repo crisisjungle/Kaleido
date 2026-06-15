@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import traceback
 
-from flask import jsonify
+from flask import jsonify, request
 
 from . import golden_cases_bp
 from ..services.golden_case_service import GoldenCaseService
@@ -34,7 +34,10 @@ def restore_golden_case(case_id: str):
     handles that point to the immutable golden artifact directory.
     """
     try:
-        payload = GoldenCaseService.restore_case(case_id)
+        data = request.get_json(silent=True) or {}
+        fresh = str(request.args.get("fresh") or data.get("fresh") or "").lower() in {"1", "true", "yes", "on"}
+        reuse = not fresh and str(data.get("reuse", "true")).lower() not in {"0", "false", "no", "off"}
+        payload = GoldenCaseService.restore_case(case_id, reuse=reuse)
         return jsonify({"success": True, "data": payload})
     except ValueError as exc:
         return jsonify({"success": False, "error": str(exc)}), 404

@@ -20,7 +20,11 @@ BACKEND_DIR = os.path.dirname(CURRENT_DIR)
 if BACKEND_DIR not in sys.path:
     sys.path.insert(0, BACKEND_DIR)
 
-from app.services.golden_case_service import GoldenCaseService, WUHAN_CASE_ID  # noqa: E402
+from app.services.golden_case_service import (  # noqa: E402
+    GoldenCaseService,
+    WUHAN_ARTIFACT_CONTRACT_VERSION,
+    WUHAN_CASE_ID,
+)
 
 
 def _read_json(path: str, default: Any) -> Any:
@@ -96,6 +100,16 @@ def validate() -> Dict[str, Any]:
     _require(config.get("hazard_template_id") == "pest_disease_ecology", "hazard template mismatch", errors)
     _require(config.get("diffusion_template") == "bio_ecological_transmission", "diffusion template mismatch", errors)
     _require(config.get("search_mode") == "deep_search", "search_mode must be deep_search", errors)
+    _require(
+        manifest.get("artifact_contract_version") == WUHAN_ARTIFACT_CONTRACT_VERSION,
+        "artifact contract version mismatch",
+        errors,
+    )
+    _require(
+        config.get("artifact_contract_version") == WUHAN_ARTIFACT_CONTRACT_VERSION,
+        "simulation config artifact contract version mismatch",
+        errors,
+    )
     _require(config.get("reference_time") == "2019-12-22T00:00:00+08:00", "reference_time mismatch", errors)
     _require((config.get("time_config") or {}).get("total_rounds") == 36, "total_rounds must be 36", errors)
     _require((config.get("time_config") or {}).get("minutes_per_round") == 4320, "minutes_per_round must be 4320", errors)

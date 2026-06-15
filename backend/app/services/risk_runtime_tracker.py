@@ -14,6 +14,7 @@ class RiskRuntimeTracker:
                     "risk_id": item.get("risk_id") or item.get("risk_object_id"),
                     "status": item.get("status") or "watch",
                     "severity_score": item.get("severity_score") or 0.5,
+                    "confidence_score": item.get("confidence_score") or 0.5,
                 }
                 for item in definitions
                 if isinstance(item, dict)

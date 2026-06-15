@@ -29,27 +29,18 @@
         class="panel workspace-panel parameters"
       >
         <div class="panel-title-row">
-          <h3>推演模式</h3>
-          <span class="hint">基线 / 灾难态</span>
+          <h3>推演参数</h3>
+          <span class="hint">{{ parameterStatusLabel }}</span>
         </div>
-        <div class="mode-grid">
-          <button
-            v-for="mode in scenarioModes"
-            :key="mode.value"
-            class="mode-card"
-            :class="{ active: scenarioMode === mode.value }"
-            @click="scenarioMode = mode.value"
-          >
-            <span class="mode-tag">{{ mode.tag }}</span>
-            <span class="mode-name">{{ mode.label }}</span>
-            <p>{{ mode.description }}</p>
-          </button>
+
+        <div class="grounding-box parameter-lock-note">
+          <p>{{ parameterIntroCopy }}</p>
         </div>
 
         <div class="catalog">
           <div class="panel-title-row">
             <h3>时间计划</h3>
-            <span class="hint">{{ timePlanMode === 'manual' ? '手动覆盖' : '自动推荐' }}</span>
+            <span class="hint">{{ timePlanMode === 'manual' ? '已微调' : '自动推荐' }}</span>
           </div>
           <div class="summary-grid">
             <div class="summary-card">
@@ -66,13 +57,13 @@
             </div>
             <div class="summary-card">
               <span>参考时间</span>
-              <strong>{{ referenceTimeLocal ? '已指定' : '实时场景' }}</strong>
+              <strong>当前时间</strong>
             </div>
           </div>
           <div class="field-row">
             <label>
               步长单位
-              <select v-model="timeStepUnit" @change="timePlanMode = 'manual'">
+              <select v-model="timeStepUnit" :disabled="!canEditParameters" @change="markTimePlanManual">
                 <option v-for="option in timePlanUnitOptions" :key="option.value" :value="option.value">
                   {{ option.label }}
                 </option>
@@ -80,49 +71,36 @@
             </label>
             <label>
               每轮步长
-              <input v-model.number="timeStepSize" type="number" min="1" @input="timePlanMode = 'manual'" />
+              <input v-model.number="timeStepSize" type="number" min="1" :disabled="!canEditParameters" @input="markTimePlanManual" />
             </label>
             <label>
               推演轮次
-              <input v-model.number="maxRounds" type="number" min="4" @input="timePlanMode = 'manual'" />
+              <input v-model.number="maxRounds" type="number" min="4" :disabled="!canEditParameters" @input="markTimePlanManual" />
             </label>
           </div>
-          <label>
-            参考时间
-            <input v-model="referenceTimeLocal" type="datetime-local" @change="timePlanMode = 'manual'" />
-          </label>
           <div class="grounding-box">
-            <p>{{ timePlanReasoning || '系统会在你补全稳态、变量和地图信息后自动推荐时间尺度与轮次。' }}</p>
+            <p>{{ timePlanReasoning || '现阶段默认使用当下地图与当前环境基线，避免历史/未来时间与真实地图数据源不一致。系统仍会根据场景类型自动推荐步长和推演轮次。' }}</p>
           </div>
         </div>
 
-        <div class="panel-title-row">
-          <h3>危机模板</h3>
-          <span class="hint">{{ hazardTemplateMode === 'manual' ? '手动覆盖' : '自动推荐' }} · 主传播族 {{ diffusionTemplateLabel }}</span>
-        </div>
-        <div class="template-grid">
-          <button
-            v-for="template in hazardTemplates"
-            :key="template.value"
-            class="template-card"
-            :class="{ active: hazardTemplateId === template.value }"
-            @click="applyHazardTemplate({ hazard_template_id: template.value, primary_family: template.family, reasoning_summary: template.description }, 'manual')"
-          >
+        <div class="catalog">
+          <div class="panel-title-row">
+            <h3>微调模板</h3>
+            <span class="hint">自动匹配 · 主传播族 {{ diffusionTemplateLabel }}</span>
+          </div>
+          <article class="auto-template-card">
             <div class="template-head">
-              <span class="template-name">{{ template.label }}</span>
-              <span class="template-badge">{{ template.badge }}</span>
+              <span class="template-name">{{ hazardTemplateMeta.label }}</span>
+              <span class="template-badge">{{ hazardTemplateMeta.badge }}</span>
             </div>
-            <p>{{ template.description }}</p>
-            <small>{{ template.impactChain }}</small>
-          </button>
-        </div>
-        <div class="grounding-box">
-          <p>{{ hazardTemplateReasoning || hazardTemplateMeta.description }}</p>
+            <p>{{ hazardTemplateReasoning || hazardTemplateMeta.description }}</p>
+            <small>{{ hazardTemplateMeta.impactChain }}</small>
+          </article>
         </div>
 
         <div class="panel-title-row">
           <h3>关系搜索模式</h3>
-          <span class="hint">快速搜索更省预算，深度搜索更容易发现跨区关系</span>
+          <span class="hint">{{ searchMode === 'deep_search' ? 'LLM 机制链路' : '模板化链路' }}</span>
         </div>
         <div class="template-grid">
           <button
@@ -130,7 +108,8 @@
             :key="mode.value"
             class="template-card"
             :class="{ active: searchMode === mode.value }"
-            @click="searchMode = mode.value"
+            :disabled="!canEditParameters"
+            @click="setSearchMode(mode.value)"
           >
             <div class="template-head">
               <span class="template-name">{{ mode.label }}</span>
@@ -139,49 +118,16 @@
             <p>{{ mode.description }}</p>
           </button>
         </div>
-
-        <div class="catalog mechanism-toggle-box">
+        <div v-if="searchMode === 'deep_search'" class="catalog">
           <div class="panel-title-row">
-            <h3>机制推演测试</h3>
-            <span class="hint">{{ isMechanismArchitecture ? '已启用' : '默认关闭' }}</span>
+            <h3>深度搜索样本</h3>
+            <span class="hint">LLM 机制发现 · 可微调</span>
           </div>
-          <button
-            type="button"
-            class="template-card mechanism-toggle-card"
-            :class="{ active: isMechanismArchitecture }"
-            @click="toggleMechanismArchitecture"
-          >
-            <div class="template-head">
-              <span class="template-name">LLM 机制发现链路</span>
-              <span class="template-badge">{{ isMechanismArchitecture ? 'llm_mechanism_v1' : 'legacy_envfish_v1' }}</span>
-            </div>
-            <p>
-              开启后会让模型先生成场景机制、机制图、开放关系和推理账本；默认用 32 个 Agent、4 轮进行小型 live 测试。
-            </p>
-          </button>
-          <div class="grounding-box">
-            <p>
-              {{ isMechanismArchitecture
-                ? `当前会走 llm_mechanism_v1：${mechanismTargetAgentCount} 个目标 Agent / ${maxRounds} 轮 / ${searchMode}。`
-                : '关闭时保持原来的 EnvFish 模板主流程，不生成机制工件。' }}
-            </p>
-          </div>
-        </div>
-
-        <div class="catalog baseline-panel">
-          <div class="panel-title-row">
-            <h3>环境基线</h3>
-            <span class="hint">{{ environmentBaselineSourceLabel }}</span>
-          </div>
-          <div v-if="environmentBaselineRows.length" class="baseline-grid">
-            <div v-for="item in environmentBaselineRows" :key="item.key" class="baseline-metric">
-              <span>{{ item.label }}</span>
-              <strong>{{ item.value }}</strong>
-              <small>{{ item.note }}</small>
-            </div>
-          </div>
-          <div v-else class="grounding-box">
-            <p>当前图谱里还没有可展示的天气基线。完成地图种子分析后，温度、湿度、降水和风速会在这里展示，不进入变量注入列表。</p>
+          <div class="field-row">
+            <label>
+              机制样本数
+              <input v-model.number="mechanismTargetAgentCount" type="number" min="8" max="80" :disabled="!canEditParameters" />
+            </label>
           </div>
         </div>
 
@@ -189,8 +135,8 @@
           <div class="panel-title-row">
             <h3>变量注入</h3>
             <div class="action-row compact">
-              <button class="ghost-btn" @click="addVariable('disaster')">+ 灾难变量</button>
-              <button class="ghost-btn" @click="addVariable('policy')">+ 政策变量</button>
+              <button class="ghost-btn" :disabled="!canEditParameters" @click="addVariable('disaster')">+ 灾难变量</button>
+              <button class="ghost-btn" :disabled="!canEditParameters" @click="addVariable('policy')">+ 政策变量</button>
             </div>
           </div>
 
@@ -208,7 +154,7 @@
                     </span>
                   </div>
                 </div>
-                <button class="remove-btn" @click="removeVariable(variable.id)">删除</button>
+                <button class="remove-btn" :disabled="!canEditParameters" @click="removeVariable(variable.id)">删除</button>
               </div>
 
               <div v-if="variable.sourceOrigin === 'seed'" class="variable-draft-note">
@@ -219,26 +165,26 @@
               <div class="field-row">
                 <label>
                   类型
-                  <select v-model="variable.type">
+                  <select v-model="variable.type" :disabled="!canEditParameters">
                     <option value="disaster">污染变量</option>
                     <option value="policy">政策变量</option>
                   </select>
                 </label>
                 <label>
                   变量名
-                  <input v-model="variable.name" type="text" placeholder="核废水排放 / 强制撤离" />
+                  <input v-model="variable.name" type="text" placeholder="核废水排放 / 强制撤离" :disabled="!canEditParameters" />
                 </label>
               </div>
 
               <label>
                 描述
-                <textarea v-model="variable.description" rows="3" placeholder="一句话描述变量如何改变生态或社会状态"></textarea>
+                <textarea v-model="variable.description" rows="3" placeholder="一句话描述变量如何改变生态或社会状态" :disabled="!canEditParameters"></textarea>
               </label>
 
               <div class="field-row">
                 <label>
                   目标区域
-                  <select v-model="variable.targetRegionId">
+                  <select v-model="variable.targetRegionId" :disabled="!canEditParameters">
                     <option value="">{{ variableRegionOptions.length ? '请选择目标区域' : '暂无可选区域' }}</option>
                     <option v-for="option in variableRegionOptions" :key="option.value" :value="option.value">
                       {{ option.label }}
@@ -247,7 +193,7 @@
                 </label>
                 <label>
                   目标节点
-                  <select v-model="variable.targetNodeId">
+                  <select v-model="variable.targetNodeId" :disabled="!canEditParameters">
                     <option value="">{{ variableNodeOptions.length ? '请选择目标节点' : '暂无可选节点' }}</option>
                     <option v-for="option in variableNodeOptions" :key="option.value" :value="option.value">
                       {{ option.label }}
@@ -259,22 +205,22 @@
               <div class="field-row">
                 <label>
                   起始轮次
-                  <input v-model.number="variable.startRound" type="number" min="0" />
+                  <input v-model.number="variable.startRound" type="number" min="0" :disabled="!canEditParameters" />
                 </label>
                 <label>
                   持续轮次
-                  <input v-model.number="variable.durationRounds" type="number" min="1" />
+                  <input v-model.number="variable.durationRounds" type="number" min="1" :disabled="!canEditParameters" />
                 </label>
                 <label>
                   强度
-                  <input v-model.number="variable.intensity" type="range" min="0" max="100" />
+                  <input v-model.number="variable.intensity" type="range" min="0" max="100" :disabled="!canEditParameters" />
                 </label>
               </div>
 
               <div v-if="variable.type === 'policy'" class="policy-row">
                 <label>
                   干预模式
-                  <select v-model="variable.policyMode">
+                  <select v-model="variable.policyMode" :disabled="!canEditParameters">
                     <option v-for="mode in policyModes" :key="mode.value" :value="mode.value">
                       {{ mode.label }}
                     </option>
@@ -312,8 +258,8 @@
             <strong>{{ agentCategorySummary.ecology + agentCategorySummary.governance }}</strong>
           </div>
           <div class="summary-card">
-            <span>降级模式</span>
-            <strong>{{ agentSourceMode === 'graph' ? '开启' : '关闭' }}</strong>
+            <span>配置状态</span>
+            <strong>{{ agentConfigStatusLabel }}</strong>
           </div>
         </div>
 
@@ -337,14 +283,14 @@
             />
           </div>
           <div v-else class="empty-state">
-            当前配置里还没有可展示的 agent，系统会在后续用图谱节点自动降级生成。
+            当前配置里还没有可展示的代理体，系统会在后续用图谱节点生成临时预览。
           </div>
         </div>
 
         <div class="catalog" v-if="agentSourceMode === 'graph'">
-          <div class="catalog-title">降级说明</div>
+          <div class="catalog-title">临时预览说明</div>
           <div class="grounding-box">
-            <p>这里展示的是图谱预览，不是最终代理体档案。系统会自动生成正式代理体配置，完成后这里会切换成每个代理体的主区域、影响范围、初始状态、倾向、动机和敏感项。</p>
+            <p>这里不是失败降级，而是正式配置还没生成前的图谱预览：系统先把图谱里的个体、组织、生态和治理节点临时当作代理体展示。正式代理体配置生成后，会切换成完整代理体档案，包含主区域、影响范围、初始状态、倾向、动机和敏感项。</p>
           </div>
         </div>
       </section>
@@ -418,8 +364,8 @@
 
         <div class="catalog">
           <div class="panel-title-row">
-            <h3>区域与 Agent 归属</h3>
-            <span class="hint">按主区域汇总正式代理体；未生成前仅显示区域骨架</span>
+            <h3>区域与代理体归属</h3>
+            <span class="hint">按主区域和影响范围汇总；未生成前仅显示区域骨架</span>
           </div>
           <div v-if="regionAnchorMatrix.length > 0" class="relation-grid">
             <article v-for="region in regionAnchorMatrix" :key="region.regionKey" class="relation-card">
@@ -468,13 +414,30 @@
           <span class="hint">{{ regionSourceLabel }}</span>
         </div>
 
+        <div class="catalog baseline-panel">
+          <div class="panel-title-row">
+            <h3>环境基线</h3>
+            <span class="hint">{{ environmentBaselineSourceLabel }}</span>
+          </div>
+          <div v-if="environmentBaselineRows.length" class="baseline-grid">
+            <div v-for="item in environmentBaselineRows" :key="item.key" class="baseline-metric">
+              <span>{{ item.label }}</span>
+              <strong>{{ item.value }}</strong>
+              <small>{{ item.note }}</small>
+            </div>
+          </div>
+          <div v-else class="grounding-box">
+            <p>当前图谱里还没有可展示的天气基线。完成地图种子分析后，温度、湿度、降水和风速会在这里展示，不进入变量注入列表。</p>
+          </div>
+        </div>
+
         <div class="summary-grid">
           <div class="summary-card">
             <span>区域层级</span>
             <strong>{{ regionRecords.length }}</strong>
           </div>
           <div class="summary-card">
-            <span>代理锚点</span>
+            <span>代理体覆盖</span>
             <strong>{{ regionAnchorTotal }}</strong>
           </div>
           <div class="summary-card">
@@ -485,6 +448,10 @@
             <span>覆盖率</span>
             <strong>{{ regionCoverageLabel }}</strong>
           </div>
+        </div>
+
+        <div class="grounding-box region-explain-box">
+          <p>{{ regionAnchorExplanation }}</p>
         </div>
 
         <div v-if="regionAnchorMatrix.length > 0" class="region-grid">
@@ -503,14 +470,26 @@
               <span>{{ region.neighborCount }} 个相邻区域</span>
               <span>{{ region.agentCount }} 个代理体</span>
             </div>
-            <div class="chip-wrap">
-              <span v-for="tag in region.tags.slice(0, 4)" :key="tag" class="chip">{{ displayToken(tag) }}</span>
-              <span v-for="neighbor in region.neighbors.slice(0, 2)" :key="neighbor" class="chip chip-soft">{{ neighbor }}</span>
+            <div class="region-detail-grid">
+              <div v-for="group in region.tagGroups" :key="group.key" class="region-tag-group">
+                <span class="region-tag-title">{{ group.label }}</span>
+                <div class="chip-wrap">
+                  <span v-for="tag in group.items" :key="tag" class="chip">{{ tag }}</span>
+                  <span v-if="group.items.length === 0" class="empty-chip">{{ group.emptyLabel }}</span>
+                </div>
+              </div>
+              <div class="region-tag-group">
+                <span class="region-tag-title">相邻区域</span>
+                <div class="chip-wrap">
+                  <span v-for="neighbor in region.neighbors.slice(0, 3)" :key="neighbor" class="chip chip-soft">{{ neighbor }}</span>
+                  <span v-if="region.neighbors.length === 0" class="empty-chip">暂无相邻区域</span>
+                </div>
+              </div>
             </div>
           </article>
         </div>
         <div v-else class="empty-state">
-          当前没有可用的区域配置，系统会使用图谱节点作为降级区域骨架。
+          当前没有可用的区域配置，系统会使用图谱节点作为区域预览骨架。
         </div>
       </section>
 
@@ -712,21 +691,6 @@ const props = defineProps({
 
 const emit = defineEmits(['go-back', 'next-step', 'add-log', 'update-status', 'risk-object-focus'])
 
-const scenarioModes = [
-  {
-    value: 'baseline_mode',
-    tag: '基线态',
-    label: '常态 + 灾难变量注入',
-    description: '从平稳生态和社会网络出发，观察变量首次跨界触发后的破窗效应。'
-  },
-  {
-    value: 'crisis_mode',
-    tag: '灾难态',
-    label: '灾难态 + 干预变量注入',
-    description: '从破碎结构出发，评估政策执行摩擦、信任崩塌与次生灾害。'
-  }
-]
-
 const hazardTemplates = [
   { value: 'coastal_radioactive_release', label: '核废水/近海放射性释放', family: 'marine_current', badge: '海流', description: '海流输运、沉积物滞留、食物网累积与岸线暴露。', impactChain: '海流输运 · 沉积物滞留 · 食物网累积' },
   { value: 'radioactive_fallout', label: '放射性沉降', family: 'atmospheric_plume', badge: '大气', description: '核爆或核事故后的羽流、沉降、径流和土壤累积。', impactChain: '大气羽流 · 干湿沉降 · 土壤累积' },
@@ -765,14 +729,14 @@ const searchModes = [
   {
     value: 'fast',
     label: '快速搜索',
-    badge: '默认',
-    description: '更少跨区候选和新边，优先稳定、快速和解释性。'
+    badge: '模板',
+    description: '使用模板化关系扩展，优先稳定、快速和低成本。'
   },
   {
     value: 'deep_search',
     label: '深度搜索',
-    badge: '探索',
-    description: '更高跨区候选预算和更长 TTL，更容易发现隐藏桥接关系。'
+    badge: 'LLM',
+    description: '使用 LLM 机制发现链路生成机制图、开放关系和推理账本。'
   }
 ]
 
@@ -823,9 +787,31 @@ const isPreparing = ref(false)
 const configSnapshot = ref(null)
 const configRealtime = ref(null)
 const simulationSnapshot = ref(null)
-const autoPrepareAttempted = ref(false)
+const hasSubmittedParameters = ref(false)
+const userAdjustedTimePlan = ref(false)
 
-const isMechanismArchitecture = computed(() => simulationArchitecture.value === 'llm_mechanism_v1')
+const resolvedSimulationArchitecture = computed(() => {
+  return searchMode.value === 'deep_search' ? 'llm_mechanism_v1' : 'legacy_envfish_v1'
+})
+
+const isMechanismArchitecture = computed(() => resolvedSimulationArchitecture.value === 'llm_mechanism_v1')
+const isParameterLocked = computed(() => hasSubmittedParameters.value || phase.value === 'preparing' || isReady.value)
+const canEditParameters = computed(() => !isParameterLocked.value && !isPreparing.value)
+const shouldShowDisplayTabs = computed(() => isParameterLocked.value)
+
+const parameterStatusLabel = computed(() => {
+  if (isReady.value) return '已确认 · 已生成'
+  if (phase.value === 'preparing') return '已确认 · 生成中'
+  if (hasSubmittedParameters.value) return '已确认 · 等待生成'
+  return '待填写'
+})
+
+const parameterIntroCopy = computed(() => {
+  if (isParameterLocked.value) {
+    return '参数已经确认，后续内容只作为生成结果展示；如需改变场景，请回到上一阶段重新生成图谱入口。'
+  }
+  return '先补充变量、时间计划和搜索模式；确认后系统会生成风险对象、区域划分、代理体配置和关系骨架。'
+})
 
 let progressTimer = null
 let configTimer = null
@@ -932,24 +918,31 @@ const regionSourceLabel = computed(() => {
     return `${resolvedConfig.value.region_graph.length} 个配置区域`
   }
   if (regionRecords.value.length > 0) {
-    return '图谱降级区域'
+    return '图谱预览区域'
   }
   return '暂无区域来源'
 })
 
 const agentSourceLabel = computed(() => {
   if (agentSourceMode.value === 'agent_configs') {
-    return 'agent_configs / 配置'
+    return '正式代理体配置'
   }
   if (agentSourceMode.value === 'actor_profiles') {
-    return 'actor_profiles / 配置'
+    return '角色画像配置'
   }
   if (agentSourceMode.value === 'graph') {
     if (phase.value === 'preparing') return '自动生成正式配置中 · 当前为图谱预览'
-    if (phase.value === 'idle') return '图谱预览 · 尚未生成正式 Agent 配置'
+    if (phase.value === 'idle') return '图谱预览 · 尚未生成正式代理体配置'
     return '图谱预览'
   }
-  return '暂无 agent 来源'
+  return '暂无代理体来源'
+})
+
+const agentConfigStatusLabel = computed(() => {
+  if (agentSourceMode.value === 'agent_configs') return '正式配置'
+  if (agentSourceMode.value === 'actor_profiles') return '角色配置'
+  if (agentSourceMode.value === 'graph') return '图谱预览'
+  return '待生成'
 })
 
 const relationGraphEdges = computed(() => {
@@ -1004,6 +997,13 @@ const regionCoverageLabel = computed(() => {
   const activeRegions = regionAnchorMatrix.value.filter((region) => region.agentCount > 0).length
   const percentage = Math.round((activeRegions / Math.max(regionAnchorMatrix.value.length, 1)) * 100)
   return `${percentage}%`
+})
+
+const regionAnchorExplanation = computed(() => {
+  if (agentCards.value.length === 0) {
+    return '代理体覆盖表示区域与代理体的归属或影响范围关系。当前还没有可展示的代理体配置，所以这里只显示区域骨架。'
+  }
+  return `代理体覆盖不是代理体总数：右侧代理体配置里有 ${agentCards.value.length} 个代理体；这里的 ${regionAnchorTotal.value} 是按区域累计的覆盖计数，一个代理体如果绑定主区域并影响多个相邻区域，会在多个区域卡片里各计一次。`
 })
 
 const regionAnchorMatrix = computed(() => {
@@ -1085,12 +1085,18 @@ function syncVariableSelections() {
 }
 
 const workspaceTabs = computed(() => {
+  const inputTab = {
+    value: 'parameters',
+    label: '推演参数',
+    meta: isParameterLocked.value
+      ? `${hazardTemplateMeta.value.badge} · ${temporalProfileLabel.value} · 已锁定`
+      : `${hazardTemplateMeta.value.badge} · ${temporalProfileLabel.value} · ${injectedVariables.value.length} 项变量`
+  }
+  if (!shouldShowDisplayTabs.value) {
+    return [inputTab]
+  }
   return [
-    {
-      value: 'parameters',
-      label: '推演参数',
-      meta: `${hazardTemplateMeta.value.badge} · ${temporalProfileLabel.value} · ${injectedVariables.value.length} 项变量`
-    },
+    inputTab,
     {
       value: 'risk',
       label: '风险对象预览',
@@ -1103,7 +1109,7 @@ const workspaceTabs = computed(() => {
     },
     {
       value: 'agents',
-      label: 'Agent配置',
+      label: '代理体配置',
       meta: `${agentCards.value.length} 个 · ${agentSourceLabel.value}`
     },
     {
@@ -1574,13 +1580,17 @@ const riskObjectHighlightPayload = computed(() => {
 
 const isReady = computed(() => phase.value === 'ready' || Boolean(configSnapshot.value))
 
-const canPrepare = computed(() => Boolean(props.simulationId) && !isPreparing.value)
+const canPrepare = computed(() => {
+  return Boolean(props.simulationId) && !isPreparing.value && (!isParameterLocked.value || phase.value === 'error')
+})
 
 const prepareActionLabel = computed(() => {
   if (!props.simulationId) return '等待图谱完成'
   if (isPreparing.value) return '生成中...'
-  if (phase.value === 'ready') return '重算场景配置'
-  return '生成场景配置'
+  if (phase.value === 'ready') return '配置已确认'
+  if (phase.value === 'error') return '重试生成'
+  if (phase.value === 'preparing' || hasSubmittedParameters.value) return '参数已锁定'
+  return '确认并生成配置'
 })
 
 const prepareActionHint = computed(() => {
@@ -1588,15 +1598,15 @@ const prepareActionHint = computed(() => {
     return '需要先完成左侧图谱并创建模拟入口；入口就绪后这里会变为可点击。'
   }
   if (isPreparing.value || phase.value === 'preparing') {
-    return '正在生成正式 Agent、区域、关系和风险配置。'
+    return '正在生成正式代理体、区域、关系和风险配置。'
   }
   if (phase.value === 'ready') {
-    return '配置已生成，可以进入推演；也可以重算配置。'
+    return '配置已生成，可以进入推演；参数区已锁定。'
   }
   if (phase.value === 'error') {
-    return '上次生成失败，可以直接重试。'
+    return '上次生成失败，可以按已锁定参数重试。'
   }
-  return '可直接生成。变量注入、目标区域、目标节点和参考时间都不是必填项。'
+  return '确认后会锁定当前参数，并开始生成后续展示内容。'
 })
 
 const prepareStageLabel = computed(() => {
@@ -1611,7 +1621,7 @@ const payloadPreview = computed(() => {
   return JSON.stringify({
     simulation_id: props.simulationId,
     engine_mode: 'envfish',
-    simulation_architecture: simulationArchitecture.value,
+    simulation_architecture: resolvedSimulationArchitecture.value,
     scenario_mode: scenarioMode.value,
     hazard_template_id: hazardTemplateId.value,
     hazard_template_mode: hazardTemplateMode.value,
@@ -1622,7 +1632,7 @@ const payloadPreview = computed(() => {
       step_unit: timeStepUnit.value,
       step_size: timeStepSize.value,
       total_rounds: maxRounds.value,
-      reference_time: toIsoFromLocal(referenceTimeLocal.value),
+      reference_time: '',
       reasoning_summary: timePlanReasoning.value
     },
     temporal_profile: {
@@ -1630,7 +1640,7 @@ const payloadPreview = computed(() => {
       total_rounds: maxRounds.value,
       minutes_per_round: configuredMinutesPerRound.value
     },
-    reference_time: toIsoFromLocal(referenceTimeLocal.value),
+    reference_time: '',
     diffusion_provider: 'auto',
     max_rounds: maxRounds.value,
     target_agent_count: isMechanismArchitecture.value ? mechanismTargetAgentCount.value : undefined,
@@ -1651,6 +1661,106 @@ function minutesForTimePlan(unit, stepSize = 1) {
   return Math.max(10, (matched?.minutes || 60) * Math.max(1, Number(stepSize) || 1))
 }
 
+function inferScenarioModeFromVariables(variables = []) {
+  const hasActiveVariable = variables.some((variable) => {
+    return [
+      variable?.name,
+      variable?.description,
+      variable?.targetRegionId,
+      variable?.targetNodeId
+    ].some((item) => String(item || '').trim())
+  })
+  return hasActiveVariable ? 'crisis_mode' : 'baseline_mode'
+}
+
+function inferHazardTemplateFromVariables(variables = []) {
+  const corpus = variables
+    .flatMap((variable) => [variable?.name, variable?.description])
+    .filter(Boolean)
+    .join(' ')
+    .toLowerCase()
+
+  const rules = [
+    { id: 'coastal_radioactive_release', tokens: ['核废水', '放射性水', '近海', '海流', 'marine', 'radioactive water'] },
+    { id: 'radioactive_fallout', tokens: ['放射性沉降', '核爆', '核事故', '沉降', 'fallout'] },
+    { id: 'industrial_toxic_release', tokens: ['化工', '有毒', '危险品', '工厂', '工业', 'toxic', 'chemical'] },
+    { id: 'inland_water_contamination', tokens: ['河流', '湖库', '水体', '污水', '尾矿', '流域'] },
+    { id: 'marine_pollution_bloom', tokens: ['赤潮', '富营养化', '海洋污染', '近海污染', '低氧'] },
+    { id: 'wildfire_smoke_ash', tokens: ['山火', '野火', '烟尘', '灰烬', 'wildfire', 'smoke'] },
+    { id: 'volcanic_eruption', tokens: ['火山', '火山灰', '泥流', 'eruption'] },
+    { id: 'earthquake_secondary_cascade', tokens: ['地震', '液化', '滑坡', '断裂', 'earthquake'] },
+    { id: 'tsunami_inundation', tokens: ['海啸', 'tsunami'] },
+    { id: 'flood_storm_surge', tokens: ['洪水', '风暴潮', '内涝', '暴雨', '淹没', 'flood'] },
+    { id: 'drought_ecosystem_stress', tokens: ['干旱', '热浪', '缺水', 'drought'] },
+    { id: 'invasive_species_spread', tokens: ['外来物种', '入侵物种', '扩散走廊', 'invasive'] },
+    { id: 'pest_disease_ecology', tokens: ['虫害', '病害', '疫病', '病媒', 'pest', 'disease'] },
+    { id: 'asteroid_impact_cascade', tokens: ['小行星', '陨石', '撞击', 'asteroid'] }
+  ]
+
+  const matchedRule = rules.find((rule) => rule.tokens.some((token) => corpus.includes(token)))
+  const template = hazardTemplates.find((item) => item.value === matchedRule?.id) || hazardTemplates[hazardTemplates.length - 1]
+  const hasInput = Boolean(corpus.trim())
+  return {
+    template,
+    reasoning: hasInput
+      ? `已根据变量描述自动匹配 ${template.label}。`
+      : '尚未识别到明确扰动，暂用通用生态危机模板。'
+  }
+}
+
+function deriveAutomaticTimePlan(templateId, variables = []) {
+  const fastTemplates = ['radioactive_fallout', 'tsunami_inundation', 'earthquake_secondary_cascade', 'flood_storm_surge', 'industrial_toxic_release', 'asteroid_impact_cascade']
+  const slowTemplates = ['coastal_radioactive_release', 'drought_ecosystem_stress', 'invasive_species_spread', 'pest_disease_ecology']
+  const scenario = inferScenarioModeFromVariables(variables)
+  if (fastTemplates.includes(templateId)) {
+    return {
+      step_unit: 'hour',
+      step_size: 6,
+      total_rounds: scenario === 'crisis_mode' ? 16 : 12,
+      reasoning_summary: '快过程风险自动使用小时级步长，便于观察级联响应。'
+    }
+  }
+  if (slowTemplates.includes(templateId)) {
+    return {
+      step_unit: 'week',
+      step_size: 1,
+      total_rounds: variables.length > 0 ? 16 : 12,
+      reasoning_summary: '慢过程风险自动使用周级步长，覆盖累积、迁移和长期反馈。'
+    }
+  }
+  return {
+    step_unit: 'day',
+    step_size: 1,
+    total_rounds: scenario === 'crisis_mode' ? 14 : 10,
+    reasoning_summary: '中过程风险自动使用天级步长，平衡扩散、响应和恢复过程。'
+  }
+}
+
+function applyAutoScenarioRecommendations() {
+  if (isParameterLocked.value) return
+  const recommendation = inferHazardTemplateFromVariables(injectedVariables.value)
+  scenarioMode.value = inferScenarioModeFromVariables(injectedVariables.value)
+  hazardTemplateId.value = recommendation.template.value
+  hazardTemplateMode.value = 'auto'
+  hazardTemplateReasoning.value = recommendation.reasoning
+  diffusionTemplate.value = recommendation.template.family
+  simulationArchitecture.value = resolvedSimulationArchitecture.value
+  if (!userAdjustedTimePlan.value) {
+    assignTimePlan(deriveAutomaticTimePlan(recommendation.template.value, injectedVariables.value), 'auto')
+  }
+}
+
+function markTimePlanManual() {
+  userAdjustedTimePlan.value = true
+  timePlanMode.value = 'manual'
+}
+
+function setSearchMode(value) {
+  if (!canEditParameters.value) return
+  searchMode.value = value === 'deep_search' ? 'deep_search' : 'fast'
+  simulationArchitecture.value = resolvedSimulationArchitecture.value
+}
+
 function assignTimePlan(payload = {}, mode = 'auto') {
   const unit = payload.step_unit || payload.stepUnit || timeStepUnit.value
   const size = Math.max(1, Number(payload.step_size ?? payload.stepSize ?? timeStepSize.value) || 1)
@@ -1667,20 +1777,6 @@ function assignTimePlan(payload = {}, mode = 'auto') {
   }
   timePlanReasoning.value = payload.reasoning_summary || payload.reasoningSummary || timePlanReasoning.value
   timePlanMode.value = mode || payload.source || timePlanMode.value
-}
-
-function toggleMechanismArchitecture() {
-  if (isMechanismArchitecture.value) {
-    simulationArchitecture.value = 'legacy_envfish_v1'
-    addLog('已关闭机制推演测试链路，准备请求将回到原 EnvFish 主流程')
-    return
-  }
-  simulationArchitecture.value = 'llm_mechanism_v1'
-  searchMode.value = 'deep_search'
-  maxRounds.value = 4
-  timePlanMode.value = 'manual'
-  timePlanReasoning.value = '机制推演测试使用小型 live 参数，降低 token 和等待成本。'
-  addLog(`已启用机制推演测试链路: llm_mechanism_v1 / ${mechanismTargetAgentCount.value} agents / ${maxRounds.value} rounds`)
 }
 
 function applyHazardTemplate(payload = {}, mode = 'auto') {
@@ -1720,6 +1816,7 @@ function syncPhaseFromSnapshots() {
   phase.value = resolvePhaseFromSnapshots()
 
   if (phase.value === 'ready') {
+    hasSubmittedParameters.value = true
     prepareProgress.value = 100
     if (!prepareMessage.value) {
       prepareMessage.value = '已存在可复用的场景配置'
@@ -1728,6 +1825,7 @@ function syncPhaseFromSnapshots() {
   }
 
   if (phase.value === 'error') {
+    hasSubmittedParameters.value = true
     prepareProgress.value = clamp(Number(prepareProgress.value) || 0, 0, 100)
     if (!prepareMessage.value) {
       prepareMessage.value = simulationSnapshot.value?.error || '场景配置生成失败'
@@ -1736,6 +1834,7 @@ function syncPhaseFromSnapshots() {
   }
 
   if (phase.value === 'preparing') {
+    hasSubmittedParameters.value = true
     prepareProgress.value = clamp(Number(prepareProgress.value) || 0, 0, 100)
     if (!prepareMessage.value) {
       prepareMessage.value = '正在准备场景配置'
@@ -2254,6 +2353,49 @@ function displayToken(value, fallback = '') {
   return translateDisplayToken(value, fallback || toDisplayString(value, fallback))
 }
 
+function formatLayerLabel(value) {
+  const raw = toDisplayString(value, 'macro')
+  const normalized = normalizeKey(raw)
+  if (!normalized) return '宏观层'
+  if (/^\d+$/.test(raw)) return `第 ${raw} 层`
+  const map = {
+    macro: '宏观层',
+    meso: '中观层',
+    micro: '微观层',
+    region: '区域层',
+    subregion: '细分区域层'
+  }
+  return map[normalized] || `${displayToken(raw)}层`
+}
+
+function categorizeRegionTags(tags = []) {
+  const groups = [
+    { key: 'spatial', label: '区域属性', emptyLabel: '暂无区域属性', items: [] },
+    { key: 'risk', label: '风险与约束', emptyLabel: '暂无风险标签', items: [] },
+    { key: 'function', label: '功能场景', emptyLabel: '暂无功能标签', items: [] }
+  ]
+  const seen = new Set()
+  ;(tags || []).forEach((tag) => {
+    const label = displayToken(tag)
+    const normalized = normalizeKey(tag)
+    if (!label || seen.has(label)) return
+    seen.add(label)
+    if (normalized.includes('risk') || normalized.includes('风险') || normalized.includes('flood') || normalized.includes('洪涝') || normalized.includes('landslide') || normalized.includes('滑坡') || normalized.includes('protected') || normalized.includes('保护') || normalized.includes('crossborder') || normalized.includes('跨边界')) {
+      groups[1].items.push(label)
+      return
+    }
+    if (normalized.includes('commercial') || normalized.includes('商业') || normalized.includes('urban') || normalized.includes('城市') || normalized.includes('infrastructure') || normalized.includes('基础设施') || normalized.includes('science') || normalized.includes('科学') || normalized.includes('watersource') || normalized.includes('水源') || normalized.includes('reservoir') || normalized.includes('水库')) {
+      groups[2].items.push(label)
+      return
+    }
+    groups[0].items.push(label)
+  })
+  return groups.map((group) => ({
+    ...group,
+    items: group.items.slice(0, 4)
+  }))
+}
+
 function relationDisplayMeta(label) {
   const normalized = normalizeKey(label)
   const relationMap = {
@@ -2413,20 +2555,24 @@ function normalizeRegionRecords(rawRegions) {
 
   const baseRecords = source.map((region, index) => {
     const regionKey = normalizeKey(region?.region_id || region?.regionId || region?.id || region?.name || `region-${index}`)
+    const rawTags = uniqueList([
+      region?.region_type,
+      region?.subregion_type,
+      region?.land_use_class,
+      region?.distance_band,
+      ...(region?.tags || [])
+    ])
     return {
       regionKey,
       region_id: toDisplayString(region?.region_id || region?.regionId || region?.id || regionKey, regionKey),
       displayName: toDisplayString(region?.name || region?.label || region?.title || regionKey, `区域 ${index + 1}`),
       name: toDisplayString(region?.name || region?.label || region?.title || regionKey, `区域 ${index + 1}`),
       regionTypeLabel: humanizeSnakeCase(region?.region_type || region?.subregion_type || region?.layer || 'region', '区域'),
-      layerLabel: region?.layer ? `第 ${region.layer} 层` : '第 1 层',
+      layerLabel: formatLayerLabel(region?.layer),
       subregionLabel: humanizeSnakeCase(region?.subregion_type || region?.land_use_class || region?.distance_band || region?.region_type || 'general', '综合'),
       summary: toDisplayString(region?.description || region?.summary || region?.notes || region?.tags?.[0], '暂无区域描述'),
-      tags: uniqueList([
-        ...(region?.tags || []),
-        region?.land_use_class,
-        region?.distance_band
-      ]).map((item) => displayToken(item)),
+      tags: rawTags.map((item) => displayToken(item)),
+      tagGroups: categorizeRegionTags(rawTags),
       carriers: uniqueList(region?.carriers || []),
       neighbors: uniqueList(region?.neighbors || []),
       stateVector: region?.state_vector || {},
@@ -2453,16 +2599,23 @@ function normalizeRegionRecordsFromGraph(nodes) {
 
   return regionNodes.map((node, index) => {
     const regionKey = normalizeKey(node?.uuid || node?.id || node?.name || node?.label || `graph-region-${index}`)
+    const rawTags = uniqueList([
+      node?.type,
+      node?.entity_type,
+      node?.category,
+      ...(node?.tags || [])
+    ])
     return {
       regionKey,
       region_id: regionKey,
       displayName: toDisplayString(node?.label || node?.name || `区域 ${index + 1}`, `区域 ${index + 1}`),
       name: toDisplayString(node?.label || node?.name || `区域 ${index + 1}`, `区域 ${index + 1}`),
       regionTypeLabel: humanizeSnakeCase(node?.type || node?.entity_type || node?.category || 'region', '区域'),
-      layerLabel: '第 1 层',
+      layerLabel: '图谱区域层',
       subregionLabel: '图谱节点',
       summary: toDisplayString(node?.description || node?.summary || node?.label, '来自图谱的区域骨架'),
-      tags: uniqueList(node?.tags || []).map((item) => displayToken(item)),
+      tags: rawTags.map((item) => displayToken(item)),
+      tagGroups: categorizeRegionTags(rawTags),
       carriers: uniqueList(node?.carriers || []),
       neighbors: [],
       stateVector: node?.state_vector || {},
@@ -2524,7 +2677,7 @@ function normalizeAgentRecords(config, regions) {
     )
     const goals = uniqueList(agent?.goals || [])
     const sensitivities = uniqueList(agent?.sensitivities || [])
-    const displayName = toDisplayString(agent?.name || agent?.username || agent?.agent_name || agent?.entity_name || `Agent ${index + 1}`, `Agent ${index + 1}`)
+    const displayName = toDisplayString(agent?.name || agent?.username || agent?.agent_name || agent?.entity_name || `代理体 ${index + 1}`, `代理体 ${index + 1}`)
     const agentKey = normalizeKey(agent?.agent_id || agent?.user_id || agent?.uuid || agent?.source_entity_uuid || agent?.username || displayName || `agent-${index}`)
     return {
       agentKey: agentKey || `agent-${index}`,
@@ -2588,7 +2741,7 @@ function normalizeAgentRecordsFromGraph(nodes, regions) {
         familyLabel: familyLabel(key),
         familyClass: key,
         roleTypeLabel: displayToken(node?.type || node?.entity_type || key, familyLabel(key)),
-        sourceLabel: '图谱降级',
+        sourceLabel: '图谱预览',
         summary: toDisplayString(node?.description || node?.summary || node?.label, `${displayName} 由图谱骨架推断生成`),
         bio: toDisplayString(node?.description || node?.summary || '', ''),
         persona: '',
@@ -2665,6 +2818,7 @@ function buildRegionAgentMap(regions, agents) {
       layerLabel: region.layerLabel,
       subregionLabel: region.subregionLabel,
       tags: region.tags,
+      tagGroups: region.tagGroups || categorizeRegionTags(region.tags),
       carriers: region.carriers,
       stateVector: region.stateVector,
       primaryRegionLabel: resolveRegionLabel(region.regionKey, regionLookup)
@@ -2907,21 +3061,26 @@ async function handlePrepare(options = {}) {
   }
 
   const autoTriggered = Boolean(options.auto)
+  if (!isParameterLocked.value) {
+    applyAutoScenarioRecommendations()
+  }
+  hasSubmittedParameters.value = true
+  activeWorkspaceTab.value = 'risk'
 
   isPreparing.value = true
   phase.value = 'preparing'
   prepareProgress.value = 0
-  prepareMessage.value = autoTriggered ? '正在自动生成正式 Agent 配置' : '正在提交 Kaleido 场景配置'
+  prepareMessage.value = autoTriggered ? '正在自动生成正式代理体配置' : '正在提交 Kaleido 场景配置'
   emit('update-status', 'processing')
   addLog(
-    `${autoTriggered ? '自动' : '手动'}提交 Kaleido 场景配置: ${scenarioMode.value} / ${hazardTemplateMeta.value.label} / ${searchMode.value} / ${temporalProfileLabel.value} / ${simulationArchitecture.value}`
+    `${autoTriggered ? '自动' : '手动'}提交 Kaleido 场景配置: ${scenarioMode.value} / ${hazardTemplateMeta.value.label} / ${searchMode.value} / ${temporalProfileLabel.value} / ${resolvedSimulationArchitecture.value}`
   )
 
   try {
     const res = await prepareSimulation({
       simulation_id: props.simulationId,
       engine_mode: 'envfish',
-      simulation_architecture: simulationArchitecture.value,
+      simulation_architecture: resolvedSimulationArchitecture.value,
       scenario_mode: scenarioMode.value,
       hazard_template_id: hazardTemplateId.value,
       hazard_template_mode: hazardTemplateMode.value,
@@ -2933,7 +3092,7 @@ async function handlePrepare(options = {}) {
         step_unit: timeStepUnit.value,
         step_size: timeStepSize.value,
         total_rounds: maxRounds.value,
-        reference_time: toIsoFromLocal(referenceTimeLocal.value),
+        reference_time: '',
         reasoning_summary: timePlanReasoning.value
       },
       temporal_profile: {
@@ -2941,7 +3100,7 @@ async function handlePrepare(options = {}) {
         total_rounds: maxRounds.value,
         minutes_per_round: configuredMinutesPerRound.value
       },
-      reference_time: toIsoFromLocal(referenceTimeLocal.value),
+      reference_time: '',
       diffusion_provider: 'auto',
       minutes_per_round: configuredMinutesPerRound.value,
       max_rounds: maxRounds.value,
@@ -3084,7 +3243,7 @@ async function fetchConfigRealtime() {
 function handleNextStep() {
   emit('next-step', {
     scenarioMode: scenarioMode.value,
-    simulationArchitecture: simulationArchitecture.value,
+    simulationArchitecture: resolvedSimulationArchitecture.value,
     hazardTemplateId: hazardTemplateId.value,
     diffusionTemplate: diffusionTemplate.value,
     searchMode: searchMode.value,
@@ -3164,6 +3323,32 @@ watch(
 )
 
 watch(
+  injectedVariables,
+  () => {
+    applyAutoScenarioRecommendations()
+  },
+  { deep: true, immediate: true }
+)
+
+watch(
+  shouldShowDisplayTabs,
+  (visible) => {
+    if (!visible && activeWorkspaceTab.value !== 'parameters') {
+      activeWorkspaceTab.value = 'parameters'
+    }
+  },
+  { immediate: true }
+)
+
+watch(
+  searchMode,
+  () => {
+    simulationArchitecture.value = resolvedSimulationArchitecture.value
+  },
+  { immediate: true }
+)
+
+watch(
   [timeStepUnit, timeStepSize],
   ([unit, stepSize]) => {
     const nextMinutes = minutesForTimePlan(unit, stepSize)
@@ -3212,10 +3397,6 @@ onMounted(async () => {
   addLog('Kaleido Step2 初始化')
   await bootstrapSimulation()
   if (props.simulationId) emitPhaseStatus()
-  if (props.simulationId && phase.value === 'idle' && !autoPrepareAttempted.value) {
-    autoPrepareAttempted.value = true
-    handlePrepare({ auto: true })
-  }
 })
 
 onUnmounted(() => {
@@ -3456,7 +3637,10 @@ onUnmounted(() => {
 }
 
 .secondary-btn:disabled,
-.primary-btn:disabled {
+.primary-btn:disabled,
+.ghost-btn:disabled,
+.remove-btn:disabled,
+.template-card:disabled {
   cursor: not-allowed;
   opacity: 0.58;
   transform: none;
@@ -3467,6 +3651,13 @@ onUnmounted(() => {
 .template-card.active {
   border-color: rgba(47, 110, 255, 0.55);
   background: linear-gradient(180deg, rgba(240, 245, 255, 1), rgba(227, 237, 255, 0.95));
+}
+
+.auto-template-card {
+  border-radius: 18px;
+  border: 1px solid rgba(47, 110, 255, 0.22);
+  background: linear-gradient(180deg, rgba(248, 251, 255, 1), rgba(236, 244, 255, 0.94));
+  padding: 14px;
 }
 
 .mode-tag,
@@ -3551,6 +3742,14 @@ textarea {
   color: #132033;
   padding: 10px 12px;
   font: inherit;
+}
+
+input:disabled,
+select:disabled,
+textarea:disabled {
+  background: rgba(240, 244, 252, 0.76);
+  color: #7b849e;
+  cursor: not-allowed;
 }
 
 textarea {
@@ -3748,7 +3947,7 @@ textarea {
 
 .region-grid,
 .relation-grid {
-  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
 }
 
 .agent-grid {
@@ -3758,10 +3957,14 @@ textarea {
 .region-card,
 .relation-card {
   border-radius: 18px;
-  padding: 14px;
+  padding: 16px;
   background: rgba(255, 255, 255, 0.88);
   border: 1px solid rgba(20, 33, 61, 0.08);
   box-shadow: 0 8px 20px rgba(17, 31, 59, 0.04);
+}
+
+.region-explain-box {
+  margin-bottom: 14px;
 }
 
 .region-card p,
@@ -3823,6 +4026,29 @@ textarea {
   color: #3357a8;
   font-size: 11px;
   font-weight: 700;
+}
+
+.region-detail-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  margin-top: 12px;
+}
+
+.region-tag-group {
+  min-width: 0;
+  padding: 10px;
+  border-radius: 14px;
+  background: rgba(247, 250, 255, 0.74);
+  border: 1px solid rgba(20, 33, 61, 0.06);
+}
+
+.region-tag-title {
+  display: block;
+  margin-bottom: 8px;
+  color: #60708f;
+  font-size: 11px;
+  font-weight: 800;
 }
 
 .chip-soft {
