@@ -269,11 +269,31 @@ class GraphBuilderService:
             if attr_name.lower() in RESERVED_NAMES:
                 return f"entity_{attr_name}"
             return attr_name
-        
+
+        def _zep_tokens(value) -> list:
+            out, cur = [], []
+            for ch in str(value or ""):
+                if ch.isascii() and ch.isalnum():
+                    cur.append(ch)
+                elif cur:
+                    out.append("".join(cur)); cur = []
+            if cur:
+                out.append("".join(cur))
+            return out
+
+        def zep_entity_name(value) -> str:
+            # Zep 要求实体类型名为 ASCII PascalCase；防弹：无论上游给什么都清洗
+            return "".join(t[:1].upper() + t[1:] for t in _zep_tokens(value))
+
+        def zep_edge_name(value) -> str:
+            return "_".join(t.upper() for t in _zep_tokens(value))
+
         # 动态创建实体类型
         entity_types = {}
         for entity_def in ontology.get("entity_types", []):
-            name = entity_def["name"]
+            name = zep_entity_name(entity_def.get("name", ""))
+            if not name:
+                continue  # 名字无法转成 ASCII（如纯中文）→ 跳过，避免 Zep 400
             description = entity_def.get("description", f"A {name} entity.")
             
             # 创建属性字典和类型注解（Pydantic v2 需要）
@@ -297,7 +317,9 @@ class GraphBuilderService:
         # 动态创建边类型
         edge_definitions = {}
         for edge_def in ontology.get("edge_types", []):
-            name = edge_def["name"]
+            name = zep_edge_name(edge_def.get("name", ""))
+            if not name:
+                continue
             description = edge_def.get("description", f"A {name} relationship.")
             
             # 创建属性字典和类型注解
@@ -314,17 +336,17 @@ class GraphBuilderService:
             attrs["__annotations__"] = annotations
             
             # 动态创建类
-            class_name = ''.join(word.capitalize() for word in name.split('_'))
+            class_name = ''.join(word.capitalize() for word in name.split('_')) or "Relation"
             edge_class = type(class_name, (EdgeModel,), attrs)
             edge_class.__doc__ = description
-            
-            # 构建source_targets
+
+            # 构建source_targets（source/target 也清洗成合法实体名）
             source_targets = []
             for st in edge_def.get("source_targets", []):
                 source_targets.append(
                     EntityEdgeSourceTarget(
-                        source=st.get("source", "Entity"),
-                        target=st.get("target", "Entity")
+                        source=zep_entity_name(st.get("source", "")) or "Entity",
+                        target=zep_entity_name(st.get("target", "")) or "Entity"
                     )
                 )
             
