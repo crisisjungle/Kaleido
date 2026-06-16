@@ -457,7 +457,15 @@
                 <article v-for="agent in agentRows.slice(0, 12)" :key="agent.id" class="agent-rank-card">
                   <div class="agent-rank-head">
                     <div class="agent-rank-name">
-                      <strong>{{ agent.name }}</strong>
+                      <strong>
+                        <span
+                          v-if="provenanceMeta(agent.provenance)"
+                          class="provenance-dot"
+                          :class="`is-${provenanceMeta(agent.provenance).cls}`"
+                          :title="`来源：${provenanceMeta(agent.provenance).label}${agent.groundingReason ? ' · ' + agent.groundingReason : ''}`"
+                        ></span>
+                        {{ agent.name }}
+                      </strong>
                       <span>{{ agent.familyLabel }} · {{ agent.subtypeLabel }}</span>
                     </div>
                     <span class="agent-rank-score mono">{{ agent.vulnerability_score }}</span>
@@ -586,8 +594,15 @@
                 </div>
 
                 <div class="risk-metrics">
+                  <div
+                    v-if="selectedRiskObject.has_runtime_signal && normalizeTension(selectedRiskObject.runtime_tension) !== null"
+                    class="mini-pill runtime-pill"
+                  >
+                    <span>运行张力</span>
+                    <strong>{{ normalizeTension(selectedRiskObject.runtime_tension) }}</strong>
+                  </div>
                   <div class="mini-pill">
-                    <span>严重性</span>
+                    <span>严重性{{ selectedRiskObject.has_runtime_signal ? '(静态)' : '' }}</span>
                     <strong>{{ normalizeScore(selectedRiskObject.severity_score) }}</strong>
                   </div>
                   <div class="mini-pill">
@@ -598,6 +613,60 @@
                     <span>置信度</span>
                     <strong>{{ formatPercent(selectedRiskObject.confidence_score) }}</strong>
                   </div>
+                </div>
+              </div>
+
+              <div
+                v-if="selectedRiskObject.has_runtime_signal || (selectedRiskObject.tension_trace || []).length || selectedRiskObject.uncertainty_band"
+                class="risk-runtime-box"
+              >
+                <div class="risk-runtime-head">
+                  <span>运行态张力</span>
+                  <span class="runtime-hint">{{ selectedRiskObject.has_runtime_signal ? '随推演演化，替代静态严重性判读' : '尚无运行信号 · 暂用静态严重性' }}</span>
+                </div>
+                <div class="risk-runtime-row">
+                  <span
+                    v-if="runtimeStatusMeta(selectedRiskObject.runtime_status)"
+                    class="runtime-status-tag"
+                    :class="`is-${runtimeStatusMeta(selectedRiskObject.runtime_status).cls}`"
+                  >
+                    {{ runtimeStatusMeta(selectedRiskObject.runtime_status).label }}
+                  </span>
+                  <span v-if="selectedRiskObject.turning_point" class="runtime-turning-tag">⚑ 转折点</span>
+                  <svg
+                    v-if="buildTensionSparkline(selectedRiskObject.tension_trace)"
+                    class="tension-sparkline"
+                    :viewBox="`0 0 ${buildTensionSparkline(selectedRiskObject.tension_trace).width} ${buildTensionSparkline(selectedRiskObject.tension_trace).height}`"
+                    :width="buildTensionSparkline(selectedRiskObject.tension_trace).width"
+                    :height="buildTensionSparkline(selectedRiskObject.tension_trace).height"
+                    preserveAspectRatio="none"
+                    role="img"
+                    aria-label="张力轨迹"
+                  >
+                    <polyline
+                      :points="buildTensionSparkline(selectedRiskObject.tension_trace).polyline"
+                      fill="none"
+                      stroke="currentColor"
+                      stroke-width="1.6"
+                      stroke-linejoin="round"
+                      stroke-linecap="round"
+                    />
+                    <circle
+                      :cx="buildTensionSparkline(selectedRiskObject.tension_trace).lastX"
+                      :cy="buildTensionSparkline(selectedRiskObject.tension_trace).lastY"
+                      r="2.4"
+                      fill="currentColor"
+                    />
+                  </svg>
+                </div>
+                <div v-if="formatUncertaintyBand(selectedRiskObject.uncertainty_band)" class="risk-uncertainty-band">
+                  <span class="band-label">{{ formatUncertaintyBand(selectedRiskObject.uncertainty_band).label }}</span>
+                  <strong>
+                    {{ formatUncertaintyBand(selectedRiskObject.uncertainty_band).center }}
+                    <small v-if="formatUncertaintyBand(selectedRiskObject.uncertainty_band).range">
+                      ({{ formatUncertaintyBand(selectedRiskObject.uncertainty_band).range }})
+                    </small>
+                  </strong>
                 </div>
               </div>
 
@@ -837,7 +906,10 @@
               <div v-if="interventionRows.length > 0" class="history-list">
                 <article v-for="item in interventionRows.slice(0, 10)" :key="item.id" class="history-card">
                   <div class="event-head">
-                    <strong>{{ item.name }}</strong>
+                    <strong>
+                      <span class="variable-kind-tag" :class="item.kindClass">{{ item.kindLabel }}</span>
+                      {{ item.name }}
+                    </strong>
                     <span class="pill">{{ item.statusLabel }}</span>
                   </div>
                   <p>{{ item.summary }}</p>
@@ -1594,6 +1666,87 @@ function normalizeLabels(labels) {
   return uniqueList(Array.isArray(labels) ? labels : []).slice(0, 3)
 }
 
+const RUNTIME_STATUS_META = {
+  rising: { label: '上升', cls: 'rising' },
+  falling: { label: '回落', cls: 'falling' },
+  critical: { label: '临界', cls: 'critical' },
+  elevated: { label: '偏高', cls: 'elevated' },
+  steady: { label: '平稳', cls: 'steady' }
+}
+
+function runtimeStatusMeta(value) {
+  const key = String(value || '').trim().toLowerCase()
+  return RUNTIME_STATUS_META[key] || { label: translateDisplayToken(value, '平稳'), cls: 'steady' }
+}
+
+const PROVENANCE_META = {
+  observed: { label: '观察', cls: 'observed' },
+  inferred: { label: '推断', cls: 'inferred' },
+  assumed: { label: '假设', cls: 'assumed' }
+}
+
+function provenanceMeta(value) {
+  const key = String(value || '').trim().toLowerCase()
+  return PROVENANCE_META[key] || null
+}
+
+function normalizeTension(value) {
+  const number = Number(value)
+  if (!Number.isFinite(number)) return null
+  return number <= 1 ? Math.round(number * 100) : Math.round(number)
+}
+
+function tensionTraceValues(trace) {
+  if (!Array.isArray(trace)) return []
+  return trace
+    .map((point) => {
+      if (point && typeof point === 'object') {
+        return Number(point.value ?? point.tension ?? point.runtime_tension ?? point.center)
+      }
+      return Number(point)
+    })
+    .filter((value) => Number.isFinite(value))
+}
+
+function buildTensionSparkline(trace, width = 110, height = 28) {
+  const values = tensionTraceValues(trace)
+  if (values.length < 2) return null
+  const min = Math.min(...values)
+  const max = Math.max(...values)
+  const span = max - min || 1
+  const stepX = width / (values.length - 1)
+  const points = values.map((value, index) => {
+    const x = index * stepX
+    const y = height - ((value - min) / span) * (height - 2) - 1
+    return `${x.toFixed(1)},${y.toFixed(1)}`
+  })
+  const lastValue = values[values.length - 1]
+  const lastX = (values.length - 1) * stepX
+  const lastY = height - ((lastValue - min) / span) * (height - 2) - 1
+  return {
+    width,
+    height,
+    polyline: points.join(' '),
+    lastX: lastX.toFixed(1),
+    lastY: lastY.toFixed(1)
+  }
+}
+
+function formatUncertaintyBand(band) {
+  if (!band || typeof band !== 'object') return null
+  const center = normalizeTension(band.center)
+  if (center === null) return null
+  const lower = normalizeTension(band.lower)
+  const upper = normalizeTension(band.upper)
+  const range = (lower !== null && upper !== null) ? `${lower} – ${upper}` : null
+  return {
+    center,
+    range,
+    label: String(band.label || '推断区间(非测量)'),
+    derived: band.derived !== false
+  }
+}
+
 function collectGraphNodes(data) {
   if (Array.isArray(data?.nodes)) return data.nodes
   if (Array.isArray(data?.graph?.nodes)) return data.graph.nodes
@@ -1796,6 +1949,8 @@ function normalizeAgentRows(source, scoreKey = 'vulnerability_score') {
       id: item.agent_id ?? item.user_id ?? idx,
       name: displayName,
       summary: item.bio || item.persona || `${displayName} 正在根据环境暴露和周边主体行动调整策略。`,
+      provenance: item.provenance || item.profile_provenance || '',
+      groundingReason: item.grounding_reason || '',
       family: agentType,
       familyLabel: formatAgentTypeLabel(agentType),
       subtypeLabel: formatTokenLabel(roleType || 'agent', '代理体'),
@@ -1890,6 +2045,10 @@ function normalizeInterventionRows(raw, defaultStatus = 'configured') {
       ...(Array.isArray(entry.target_regions) ? entry.target_regions : [])
     ])
     const status = String(entry.status || variable.status || defaultStatus)
+    const sourceOrigin = String(
+      variable.source_origin || variable.sourceOrigin || entry.source_origin || entry.sourceOrigin || ''
+    ).toLowerCase()
+    const isStableContext = sourceOrigin === 'stable_context' || variable.is_stable_context === true || entry.is_stable_context === true
     const summary =
       variable.description ||
       entry.message ||
@@ -1903,6 +2062,9 @@ function normalizeInterventionRows(raw, defaultStatus = 'configured') {
       mode,
       status,
       statusLabel: formatStatusLabel(status),
+      sourceOrigin,
+      kindLabel: isStableContext ? '稳态' : '扰动',
+      kindClass: isStableContext ? 'stable' : 'perturbation',
       round: Number(entry.round || startRound || 0),
       startRound,
       duration,
@@ -3414,6 +3576,133 @@ onUnmounted(() => {
   display: flex;
   gap: 10px;
   flex-wrap: wrap;
+}
+
+.mini-pill.runtime-pill {
+  border-color: rgba(28, 196, 135, 0.4);
+  background: rgba(28, 196, 135, 0.1);
+}
+
+.mini-pill.runtime-pill strong {
+  color: #0d7a52;
+}
+
+/* runtime tension / uncertainty band (additive) */
+.risk-runtime-box {
+  border-radius: 18px;
+  padding: 14px;
+  background: linear-gradient(180deg, #fff, #f6f9ff);
+  border: 1px solid rgba(29, 39, 58, 0.08);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.risk-runtime-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 12px;
+  letter-spacing: 0.04em;
+  color: #4f5d78;
+}
+
+.risk-runtime-head .runtime-hint {
+  font-size: 11px;
+  color: #8a96b0;
+}
+
+.risk-runtime-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.runtime-status-tag {
+  font-size: 11px;
+  padding: 3px 9px;
+  border-radius: 999px;
+  border: 1px solid currentColor;
+}
+
+.runtime-status-tag.is-rising,
+.runtime-status-tag.is-elevated { color: #c2641a; }
+.runtime-status-tag.is-critical { color: #c0392b; background: rgba(192, 57, 43, 0.08); }
+.runtime-status-tag.is-falling { color: #0d7a52; }
+.runtime-status-tag.is-steady { color: #5a6b8c; }
+
+.runtime-turning-tag {
+  font-size: 11px;
+  padding: 3px 9px;
+  border-radius: 999px;
+  color: #8a4bcf;
+  background: rgba(138, 75, 207, 0.1);
+}
+
+.tension-sparkline {
+  color: #2f6fed;
+  margin-left: auto;
+}
+
+.risk-uncertainty-band {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding-top: 4px;
+  border-top: 1px dashed rgba(29, 39, 58, 0.16);
+}
+
+.risk-uncertainty-band .band-label {
+  font-size: 11px;
+  color: #8a96b0;
+}
+
+.risk-uncertainty-band strong {
+  color: #1d273a;
+  font-variant-numeric: tabular-nums;
+}
+
+.risk-uncertainty-band small {
+  color: #8a96b0;
+  font-weight: 500;
+}
+
+/* provenance tri-color dot (additive) */
+.provenance-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  margin-right: 5px;
+  vertical-align: middle;
+}
+
+.provenance-dot.is-observed { background: #1cc487; }
+.provenance-dot.is-inferred {
+  background: transparent;
+  border: 1.5px dashed #e0a020;
+}
+.provenance-dot.is-assumed { background: #9aa6bd; }
+
+/* perturbation vs stable-context (additive) */
+.variable-kind-tag {
+  margin-right: 6px;
+  font-size: 10px;
+  padding: 2px 7px;
+  border-radius: 999px;
+  vertical-align: middle;
+}
+
+.variable-kind-tag.perturbation {
+  background: rgba(231, 111, 81, 0.14);
+  color: #c2491f;
+}
+
+.variable-kind-tag.stable {
+  background: rgba(90, 107, 140, 0.12);
+  color: #4a5a7c;
 }
 
 .risk-highlight-row,

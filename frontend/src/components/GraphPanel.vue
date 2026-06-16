@@ -239,6 +239,25 @@
                 <span class="detail-label">类型：</span>
                 <span class="detail-value">{{ displayToken(selectedItem.data.fact_type || 'Unknown') }}</span>
               </div>
+              <!-- M10 honesty badges: edge layer / epistemic / channel -->
+              <div class="detail-row" v-if="edgeHonesty(selectedItem.data)">
+                <span class="detail-label">关系性质：</span>
+                <span class="detail-value edge-honesty-badges">
+                  <span
+                    v-if="edgeHonesty(selectedItem.data).layerLabel"
+                    class="edge-badge"
+                    :class="edgeHonesty(selectedItem.data).layer === 'spatial_fact' ? 'edge-badge-spatial' : 'edge-badge-causal'"
+                  >{{ edgeHonesty(selectedItem.data).layerLabel }}</span>
+                  <span
+                    v-if="edgeHonesty(selectedItem.data).epistemicLabel"
+                    class="edge-badge edge-badge-epistemic"
+                  >{{ edgeHonesty(selectedItem.data).epistemicLabel }}</span>
+                  <span
+                    v-if="edgeHonesty(selectedItem.data).channelLabel"
+                    class="edge-badge edge-badge-channel"
+                  >{{ edgeHonesty(selectedItem.data).channelLabel }}</span>
+                </span>
+              </div>
               <div class="detail-row" v-if="selectedItem.data.fact">
                 <span class="detail-label">事实：</span>
                 <span class="detail-value fact-text">{{ selectedItem.data.fact }}</span>
@@ -315,6 +334,17 @@
           <span class="legend-dot" :style="{ background: type.color }"></span>
           <span class="legend-label">{{ type.name }}</span>
         </div>
+      </div>
+      <!-- M10 edge-layer legend: spatial skeleton vs causal coupling -->
+      <div v-if="edgeLayerSummary" class="legend-edge-layers">
+        <span class="legend-edge-item">
+          <span class="legend-edge-line legend-edge-spatial"></span>
+          <span class="legend-label">空间骨架 {{ edgeLayerSummary.spatial }}</span>
+        </span>
+        <span class="legend-edge-item">
+          <span class="legend-edge-line legend-edge-causal"></span>
+          <span class="legend-label">因果连线 {{ edgeLayerSummary.causal }}</span>
+        </span>
       </div>
     </div>
     
@@ -496,6 +526,25 @@ const hasGraphContent = computed(() => {
   const nodes = props.graphData?.nodes || []
   const edges = props.graphData?.edges || []
   return nodes.length > 0 || edges.length > 0
+})
+
+// M10: summarize spatial_fact vs causal edge counts (prefer backend meta, but
+// recount from edges so it survives the animation-filtered graph too).
+const edgeLayerSummary = computed(() => {
+  const meta = props.graphData?.meta || {}
+  let spatial = Number(meta.spatial_fact_edge_count)
+  let causal = Number(meta.causal_edge_count)
+  if (!Number.isFinite(spatial) || !Number.isFinite(causal)) {
+    spatial = 0
+    causal = 0
+    for (const edge of (props.graphData?.edges || [])) {
+      const layer = String(edge?.edge_layer || edge?.attributes?.edge_layer || '').toLowerCase()
+      if (layer === 'spatial_fact') spatial += 1
+      else if (layer === 'causal') causal += 1
+    }
+  }
+  if (spatial <= 0 && causal <= 0) return null
+  return { spatial, causal }
 })
 
 const show3DOverlay = computed(() => {
@@ -929,6 +978,149 @@ const getLinkBaseColorByType = (type) => {
   return '#64748b'
 }
 
+// --- M10 honesty helpers: split spatial skeleton vs causal coupling -------
+// Read the Phase A backend keys directly off each edge (additive, guarded).
+const readEdgeRaw = (edge) => edge?.rawData || edge || {}
+
+const getEdgeLayer = (edge) => {
+  const raw = readEdgeRaw(edge)
+  const layer = String(raw.edge_layer || raw.attributes?.edge_layer || '').trim().toLowerCase()
+  if (layer === 'spatial_fact' || layer === 'causal') return layer
+  return ''
+}
+
+const isSpatialFactEdge = (edge) => getEdgeLayer(edge) === 'spatial_fact'
+
+const getEdgeEpistemic = (edge) => {
+  const raw = readEdgeRaw(edge)
+  return String(
+    raw.epistemic || raw.provenance || raw.attributes?.epistemic_status || raw.attributes?.validation_status || ''
+  ).trim().toLowerCase()
+}
+
+// Style edges by epistemic/provenance honesty:
+//   observed/structural -> solid, inferred -> dashed, speculative/assumed -> dotted.
+const getEpistemicDashArray = (edge, is3D = false) => {
+  const token = getEdgeEpistemic(edge)
+  if (!token) return undefined
+  if (token.includes('observ') || token.includes('structural') || token.includes('confirm') || token.includes('fact')) {
+    return undefined
+  }
+  if (token.includes('specul') || token.includes('assum') || token.includes('hypo')) {
+    return is3D ? undefined : '1.5 5'
+  }
+  if (token.includes('infer') || token.includes('estimat') || token.includes('derive')) {
+    return is3D ? undefined : '7 5'
+  }
+  return undefined
+}
+
+// Channel-driven color for causal edges so structure reads by interaction type.
+const getEdgeChannel = (edge) => {
+  const raw = readEdgeRaw(edge)
+  return String(
+    raw.channel || raw.attributes?.interaction_channel || raw.attributes?.channel_type || raw.attributes?.channel || ''
+  ).trim().toLowerCase()
+}
+
+const CHANNEL_COLORS = {
+  physical: '#0891b2',
+  transport: '#0d9488',
+  mobility: '#0d9488',
+  information: '#7c3aed',
+  social: '#7c3aed',
+  economic: '#b45309',
+  supply: '#b45309',
+  governance: '#0f766e',
+  policy: '#0f766e',
+  health: '#dc2626',
+  ecological: '#16a34a',
+  environment: '#16a34a',
+}
+
+const getCausalChannelColor = (edge, fallback) => {
+  const channel = getEdgeChannel(edge)
+  if (!channel) return fallback
+  for (const [token, color] of Object.entries(CHANNEL_COLORS)) {
+    if (channel.includes(token)) return color
+  }
+  return fallback
+}
+
+// De-emphasize intra-cluster spatial edges when a community/cluster id is present.
+const getNodeClusterId = (edge, endpoint) => {
+  const raw = readEdgeRaw(edge)
+  const attrs = raw.attributes || {}
+  if (endpoint === 'source') {
+    return String(attrs.source_region_id || attrs.source_cluster_id || attrs.source_community_id || '').trim()
+  }
+  return String(attrs.target_region_id || attrs.target_cluster_id || attrs.target_community_id || '').trim()
+}
+
+const isIntraClusterSpatialEdge = (edge) => {
+  if (!isSpatialFactEdge(edge)) return false
+  const source = getNodeClusterId(edge, 'source')
+  const target = getNodeClusterId(edge, 'target')
+  return Boolean(source) && Boolean(target) && source === target
+}
+
+// --- M10 node playback: bind radius/color to the frame's real value/delta ----
+const readNodeStateStatus = (node) => {
+  const attrs = node?.rawData?.attributes ?? node?.attributes ?? {}
+  return String(attrs.state_status || '').trim().toLowerCase()
+}
+
+const readNodeDelta = (node) => {
+  const attrs = node?.rawData?.attributes ?? node?.attributes ?? {}
+  const value = Number(attrs.delta)
+  return Number.isFinite(value) ? value : null
+}
+
+// Returns a value-driven tint/scale overlay only when the frame carries real
+// state. Falls back to {} (no override) so reveal animation stays intact.
+const getNodeStateOverlay = (node) => {
+  const status = readNodeStateStatus(node)
+  const delta = readNodeDelta(node)
+  if (!status && delta === null) return null
+  const magnitude = delta === null ? 0 : clamp(Math.abs(delta) / 0.25, 0, 1)
+  let tint = null
+  let scale = 1
+  if (status === 'critical') {
+    tint = '#dc2626'; scale = 1.28
+  } else if (status === 'rising' || status === 'elevated' || (delta !== null && delta > 0.0001)) {
+    tint = '#f97316'; scale = 1 + 0.18 * magnitude
+  } else if (status === 'falling' || (delta !== null && delta < -0.0001)) {
+    tint = '#0ea5e9'; scale = Math.max(0.82, 1 - 0.16 * magnitude)
+  } else {
+    return null
+  }
+  return { status, delta, tint, scale, blend: status === 'critical' ? 0.55 : 0.38 + 0.32 * magnitude }
+}
+
+// Template-facing: build human-readable honesty badges for the edge detail card.
+const edgeHonesty = (edgeData) => {
+  if (!edgeData) return null
+  const layer = getEdgeLayer(edgeData)
+  const epistemic = getEdgeEpistemic(edgeData)
+  const channel = getEdgeChannel(edgeData)
+  if (!layer && !epistemic && !channel) return null
+  const layerLabel = layer === 'spatial_fact' ? '空间事实' : layer === 'causal' ? '因果关系' : ''
+  let epistemicLabel = ''
+  if (epistemic) {
+    if (epistemic.includes('observ') || epistemic.includes('structural') || epistemic.includes('fact')) {
+      epistemicLabel = '观察'
+    } else if (epistemic.includes('specul') || epistemic.includes('assum') || epistemic.includes('hypo')) {
+      epistemicLabel = '推测'
+    } else if (epistemic.includes('infer') || epistemic.includes('estimat') || epistemic.includes('derive')) {
+      epistemicLabel = '推断'
+    } else {
+      epistemicLabel = displayToken(epistemic)
+    }
+  }
+  const channelLabel = channel ? displayToken(channel) : ''
+  return { layer, layerLabel, epistemicLabel, channelLabel }
+}
+
 const getNodeBaseRadius = (node, is3D = false) => {
   const layer = node.layer || nodeLayerKey(node)
   if (is3D) {
@@ -1002,6 +1194,22 @@ const getNodeAnimationStyle = (node, { highlightActive = false, highlighted = fa
     opacity *= 0.18 + (progress * 0.82)
     labelOpacity *= progress
     haloOpacity *= progress
+  }
+
+  // M10 playback: bind radius + color to the frame's real value/delta so a
+  // rising metric reads warm + larger and a falling one reads cool + smaller,
+  // instead of only the reveal animation. Guarded: no-op when no real state.
+  if (status !== 'hidden') {
+    const overlay = getNodeStateOverlay(node)
+    if (overlay) {
+      color = blendColors(color, overlay.tint, overlay.blend)
+      radius *= overlay.scale
+      if (overlay.status === 'critical') {
+        haloColor = overlay.tint
+        haloOpacity = Math.max(haloOpacity, 0.28)
+        strokeColor = is3D ? strokeColor : '#7f1d1d'
+      }
+    }
   }
 
   if (highlightActive) {
@@ -1078,10 +1286,20 @@ const getLinkAnimationStyle = (
     ? 'hidden'
     : rawStatus
   const progress = getEntityAnimationProgress(link)
-  const baseColor = getLinkBaseColorByType(link.type || link?.rawData?.fact_type || link?.name)
+  // M10: classify the edge so the spatial skeleton reads faint while causal
+  // coupling reads bold + channel-colored (kills the undifferentiated hairball).
+  const edgeLayer = getEdgeLayer(link)
+  const spatial = edgeLayer === 'spatial_fact'
+  const intraCluster = isIntraClusterSpatialEdge(link)
+  const typeColor = getLinkBaseColorByType(link.type || link?.rawData?.fact_type || link?.name)
+  const baseColor = spatial
+    ? '#94a3b8'
+    : getCausalChannelColor(link, typeColor)
   let color = baseColor
-  let width = is3D ? 0.55 : 1.5
-  let opacity = is3D ? 0.26 : 0.24
+  let width = spatial ? (is3D ? 0.35 : 0.85) : (is3D ? 0.7 : 1.8)
+  let opacity = spatial
+    ? (intraCluster ? (is3D ? 0.08 : 0.07) : (is3D ? 0.16 : 0.14))
+    : (is3D ? 0.32 : 0.32)
   let dashArray = undefined
   let labelOpacity = 0.32
   let labelColor = '#666666'
@@ -1156,6 +1374,22 @@ const getLinkAnimationStyle = (
       opacity = status === 'faded' ? 0.04 : (is3D ? 0.06 : 0.1)
       labelOpacity = Math.min(labelOpacity, 0.16)
     }
+  }
+
+  // M10 epistemic honesty: observed=solid, inferred=dashed, speculative=dotted.
+  // Only override the dash pattern when the edge is not already animating /
+  // highlighted with its own dash, so reveal pulses stay legible.
+  if (!highlighted && status !== 'new' && status !== 'active') {
+    const epistemicDash = getEpistemicDashArray(link, is3D)
+    if (epistemicDash !== undefined) dashArray = epistemicDash
+  }
+
+  // Keep the spatial skeleton quiet so causal structure stays readable, except
+  // when an edge is explicitly highlighted/focused (handled above).
+  if (spatial && !highlighted && !(highlightActive && focused) && status !== 'active' && status !== 'new') {
+    width = Math.min(width, is3D ? 0.4 : 1)
+    opacity = Math.min(opacity, intraCluster ? (is3D ? 0.08 : 0.07) : (is3D ? 0.18 : 0.16))
+    labelOpacity = Math.min(labelOpacity, 0.08)
   }
 
   return {
@@ -2859,6 +3093,39 @@ onUnmounted(() => {
   white-space: nowrap;
 }
 
+/* M10 edge-layer legend */
+.legend-edge-layers {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 14px;
+  margin-top: 10px;
+  padding-top: 8px;
+  border-top: 1px dashed #ececec;
+}
+
+.legend-edge-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: #555;
+}
+
+.legend-edge-line {
+  width: 18px;
+  height: 0;
+  flex-shrink: 0;
+}
+
+.legend-edge-spatial {
+  border-top: 1px solid #94a3b8;
+  opacity: 0.7;
+}
+
+.legend-edge-causal {
+  border-top: 2.5px solid #6d28d9;
+}
+
 /* Edge Labels Toggle - Top Right */
 .edge-labels-toggle {
   position: absolute;
@@ -3147,6 +3414,48 @@ input:checked + .slider:before {
   color: #333;
   line-height: 1.5;
   word-break: break-word;
+}
+
+/* M10 honesty badges (edge detail) */
+.edge-honesty-badges {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+
+.edge-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 8px;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1.6;
+  border: 1px solid transparent;
+}
+
+.edge-badge-spatial {
+  background: #f1f5f9;
+  color: #475569;
+  border-color: #e2e8f0;
+}
+
+.edge-badge-causal {
+  background: #ede9fe;
+  color: #6d28d9;
+  border-color: #ddd6fe;
+}
+
+.edge-badge-epistemic {
+  background: #fff7ed;
+  color: #b45309;
+  border-color: #fed7aa;
+}
+
+.edge-badge-channel {
+  background: #ecfeff;
+  color: #0e7490;
+  border-color: #cffafe;
 }
 
 /* Building hint */

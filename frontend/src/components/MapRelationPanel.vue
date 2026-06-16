@@ -22,8 +22,16 @@
       />
       <div v-if="hasData" class="map-summary-overlay" :class="{ 'is-embedded': embedded }">
         <span class="summary-chip summary-chip-accent">{{ highlightLabel || '推演关系回放' }}</span>
+        <span
+          v-if="isSyntheticGrounding"
+          class="summary-chip summary-chip-synthetic"
+          title="节点位置为示意性散布，并非真实地理坐标"
+        >非地理示意 / non-geographic</span>
         <span class="summary-chip">{{ nodeCount }} 个节点</span>
         <span class="summary-chip">{{ shownEdgeCount }} 条连线</span>
+        <span v-if="edgeLayerSummary" class="summary-chip summary-chip-layers">
+          骨架 {{ edgeLayerSummary.spatial }} · 因果 {{ edgeLayerSummary.causal }}
+        </span>
         <span v-if="suppressedEdgeCount > 0" class="summary-chip summary-chip-muted">
           已整理 {{ suppressedEdgeCount }} 条高密度连线
         </span>
@@ -91,6 +99,47 @@ const edgeList = computed(() => {
 const nodeCount = computed(() => nodeList.value.length)
 const edgeCount = computed(() => edgeList.value.length)
 const hasData = computed(() => nodeCount.value > 0 || edgeCount.value > 0)
+
+// M10 honesty: never dress a synthetic (hash/radial) layout as real geography.
+const geographicGrounding = computed(() => {
+  const top = String(props.mapData?.geographic_grounding || '').trim().toLowerCase()
+  if (top === 'map_seed' || top === 'synthetic') return top
+  const meta = String(props.mapData?.meta?.geographic_grounding || '').trim().toLowerCase()
+  if (meta === 'map_seed' || meta === 'synthetic') return meta
+  return ''
+})
+
+const isSyntheticGrounding = computed(() => {
+  if (geographicGrounding.value === 'synthetic') return true
+  if (geographicGrounding.value === 'map_seed') return false
+  // Fall back to per-node grounding: if no node claims real geography, the
+  // layout is non-geographic schematic scatter.
+  if (!nodeList.value.length) return false
+  const anyGeographic = nodeList.value.some((node) => {
+    if (node?.is_geographic === true || node?.attributes?.is_geographic === true) return true
+    const placement = String(node?.attributes?.placement || '').toLowerCase()
+    return placement === 'geographic'
+  })
+  return !anyGeographic
+})
+
+// M10 edge-layer summary (prefer backend meta, recount as fallback).
+const edgeLayerSummary = computed(() => {
+  const meta = props.mapData?.meta || {}
+  let spatial = Number(meta.spatial_fact_edge_count)
+  let causal = Number(meta.causal_edge_count)
+  if (!Number.isFinite(spatial) || !Number.isFinite(causal)) {
+    spatial = 0
+    causal = 0
+    for (const edge of edgeList.value) {
+      const layer = edgeLayerOf(edge)
+      if (layer === 'spatial_fact') spatial += 1
+      else if (layer === 'causal') causal += 1
+    }
+  }
+  if (spatial <= 0 && causal <= 0) return null
+  return { spatial, causal }
+})
 
 const mapCenter = computed(() => {
   const center = props.mapData?.center || {}
@@ -539,8 +588,89 @@ function nodeColor(node, kind, fallbackGroup = '') {
   return '#0f766e'
 }
 
+// --- M10 honesty helpers: split spatial skeleton vs causal coupling ---------
+function edgeLayerOf(edge) {
+  const layer = String(edge?.edge_layer || edge?.attributes?.edge_layer || '').trim().toLowerCase()
+  if (layer === 'spatial_fact' || layer === 'causal') return layer
+  return ''
+}
+
+function isSpatialFactEdge(edge) {
+  return edgeLayerOf(edge) === 'spatial_fact'
+}
+
+function edgeChannelOf(edge) {
+  return String(
+    edge?.channel
+    || edge?.attributes?.interaction_channel
+    || edge?.attributes?.channel_type
+    || edge?.attributes?.channel
+    || ''
+  ).trim().toLowerCase()
+}
+
+const MAP_CHANNEL_COLORS = {
+  physical: '#0891b2',
+  transport: '#0d9488',
+  mobility: '#0d9488',
+  information: '#7c3aed',
+  social: '#7c3aed',
+  economic: '#b45309',
+  supply: '#b45309',
+  governance: '#0f766e',
+  policy: '#0f766e',
+  health: '#dc2626',
+  ecological: '#16a34a',
+  environment: '#16a34a',
+}
+
+function edgeEpistemicOf(edge) {
+  return String(
+    edge?.epistemic
+    || edge?.provenance
+    || edge?.attributes?.epistemic_status
+    || edge?.attributes?.validation_status
+    || ''
+  ).trim().toLowerCase()
+}
+
+// observed/structural -> solid, inferred -> dashed, speculative/assumed -> dotted
+function epistemicDashArray(edge) {
+  const token = edgeEpistemicOf(edge)
+  if (!token) return undefined
+  if (token.includes('observ') || token.includes('structural') || token.includes('confirm') || token.includes('fact')) {
+    return undefined
+  }
+  if (token.includes('specul') || token.includes('assum') || token.includes('hypo')) return '1.5 5'
+  if (token.includes('infer') || token.includes('estimat') || token.includes('derive')) return '7 5'
+  return undefined
+}
+
+function edgeClusterId(edge, endpoint) {
+  const attrs = edge?.attributes || {}
+  if (endpoint === 'source') {
+    return String(attrs.source_region_id || attrs.source_cluster_id || attrs.source_community_id || '').trim()
+  }
+  return String(attrs.target_region_id || attrs.target_cluster_id || attrs.target_community_id || '').trim()
+}
+
+function isIntraClusterSpatialEdge(edge) {
+  if (!isSpatialFactEdge(edge)) return false
+  const source = edgeClusterId(edge, 'source')
+  const target = edgeClusterId(edge, 'target')
+  return Boolean(source) && Boolean(target) && source === target
+}
+
 function edgeColor(edge, highlighted) {
   if (highlighted) return '#dc2626'
+  // M10: spatial skeleton reads faint grey; causal reads channel-colored.
+  if (isSpatialFactEdge(edge)) return '#94a3b8'
+  const channel = edgeChannelOf(edge)
+  if (channel) {
+    for (const [token, color] of Object.entries(MAP_CHANNEL_COLORS)) {
+      if (channel.includes(token)) return color
+    }
+  }
   const type = String(edge?.fact_type || edge?.name || '').toLowerCase()
   if (type === 'dynamic_edge') return '#b45309'
   if (type === 'agent_influence' || type === 'influences_region') return '#2563eb'
@@ -656,9 +786,13 @@ function nodeVisualState(node, kind, highlighted) {
 function edgeVisualState(edge, highlighted) {
   const status = entityAnimationStatus(edge)
   const progress = entityAnimationProgress(edge)
+  // M10: classify so the spatial skeleton stays faint and causal coupling
+  // reads bold; intra-cluster spatial edges are further de-emphasized.
+  const spatial = isSpatialFactEdge(edge)
+  const intraCluster = isIntraClusterSpatialEdge(edge)
   let color = edgeColor(edge, false)
-  let weight = 1.35
-  let opacity = 0.38
+  let weight = spatial ? 0.8 : 1.6
+  let opacity = spatial ? (intraCluster ? 0.1 : 0.2) : 0.42
   let dashArray = undefined
 
   if (status === 'new') {
@@ -685,6 +819,19 @@ function edgeVisualState(edge, highlighted) {
   if (status !== 'hidden') {
     weight *= 0.55 + progress * 0.45
     opacity *= 0.08 + progress * 0.92
+  }
+
+  // M10 epistemic honesty dash, only when the edge is in a steady (non-pulse)
+  // state so reveal animation dashes win during playback.
+  if (!highlighted && status !== 'new' && status !== 'active' && status !== 'faded') {
+    const epistemicDash = epistemicDashArray(edge)
+    if (epistemicDash !== undefined) dashArray = epistemicDash
+  }
+
+  // Keep the spatial skeleton subdued behind causal structure.
+  if (spatial && !highlighted && status !== 'new' && status !== 'active') {
+    weight = Math.min(weight, 1)
+    opacity = Math.min(opacity, intraCluster ? 0.1 : 0.22)
   }
 
   if (highlighted) {
@@ -842,6 +989,19 @@ function stableUnit(value) {
 
 .summary-chip-muted {
   color: #475569;
+}
+
+.summary-chip-synthetic {
+  background: rgba(241, 245, 249, 0.94);
+  color: #475569;
+  border-color: rgba(148, 163, 184, 0.4);
+  border-style: dashed;
+}
+
+.summary-chip-layers {
+  background: rgba(237, 233, 254, 0.9);
+  color: #6d28d9;
+  border-color: rgba(196, 181, 253, 0.6);
 }
 
 .empty-state {

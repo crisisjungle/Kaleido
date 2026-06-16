@@ -372,6 +372,9 @@
               </template>
 
               <template v-else-if="activeTab === 'narrative'">
+                <section class="narrative-trace-note" v-if="narrativeTab">
+                  这是一条<strong>探索轨迹</strong>，记录每轮的关系张力与不确定性，不是对未来的预测。
+                </section>
                 <section class="narrative-list" v-if="narrativeTab">
                   <article v-for="round in narrativeTab.rounds || []" :key="round.round" class="narrative-card">
                     <div class="narrative-head">
@@ -379,9 +382,19 @@
                         <h3>Round {{ round.round }}</h3>
                         <p>{{ formatTimestamp(round.timestamp) }}</p>
                       </div>
-                      <span class="metric-pill">
-                        {{ round.top_region?.name || '未识别区域' }}
-                      </span>
+                      <div class="narrative-head-tags">
+                        <span
+                          v-if="round.narrative_source"
+                          class="source-badge"
+                          :class="isLiveNarrative(round.narrative_source) ? 'live' : 'template'"
+                          :title="round.narrative_source"
+                        >
+                          {{ isLiveNarrative(round.narrative_source) ? '实时推理' : '模板' }}
+                        </span>
+                        <span class="metric-pill">
+                          {{ round.top_region?.name || '未识别区域' }}
+                        </span>
+                      </div>
                     </div>
                     <div class="narrative-columns">
                       <div class="narrative-block">
@@ -396,6 +409,43 @@
                         <span class="block-label">最大不确定性</span>
                         <p>{{ round.uncertainty }}</p>
                       </div>
+                    </div>
+
+                    <div
+                      v-if="normalizeFeedbackLoops(round.detected_feedback_loops).length"
+                      class="loop-chip-section"
+                    >
+                      <span class="block-label">检测到的反馈环</span>
+                      <div class="loop-chip-wrap">
+                        <span
+                          v-for="(loop, idx) in normalizeFeedbackLoops(round.detected_feedback_loops)"
+                          :key="`${round.round}-loop-${idx}`"
+                          class="loop-chip"
+                          :class="`loop-${loop.loopType || 'unknown'}`"
+                          :title="loop.loopType ? loopTypeLabel(loop.loopType) + '回路' : '反馈环'"
+                        >
+                          <span class="loop-chip-dot"></span>
+                          <span class="loop-chip-label">{{ loop.label }}</span>
+                          <span v-if="loop.loopType" class="loop-chip-type">{{ loopTypeLabel(loop.loopType) }}</span>
+                        </span>
+                      </div>
+                    </div>
+
+                    <div
+                      v-if="normalizeTurningPoints(round.turning_points).length"
+                      class="turning-section"
+                    >
+                      <span class="block-label">转折点</span>
+                      <ol class="turning-timeline">
+                        <li
+                          v-for="(point, idx) in normalizeTurningPoints(round.turning_points)"
+                          :key="`${round.round}-turn-${idx}`"
+                          class="turning-item"
+                        >
+                          <span class="turning-marker"></span>
+                          <span class="turning-text">{{ point }}</span>
+                        </li>
+                      </ol>
                     </div>
                   </article>
                 </section>
@@ -413,15 +463,50 @@
                       <div class="hero-kicker">Node Exploration</div>
                       <h2>{{ selectedNode.name }}</h2>
                       <div class="chip-wrap">
+                        <span
+                          v-if="selectedNodeProvenance"
+                          class="provenance-badge"
+                          :class="`prov-${selectedNodeProvenance.tone}`"
+                          :title="selectedNodeGroundingReason || selectedNodeProvenance.label"
+                        >
+                          {{ selectedNodeProvenance.label }}
+                        </span>
                         <span v-for="label in selectedNode.labels || []" :key="label" class="data-chip">{{ label }}</span>
                       </div>
+                      <p v-if="selectedNodeGroundingReason" class="grounding-reason">
+                        来源说明：{{ selectedNodeGroundingReason }}
+                      </p>
                     </div>
                     <div class="node-hero-actions">
+                      <button
+                        v-if="selectedNodeEvidenceRefs.length"
+                        class="mini-btn"
+                        :class="{ active: evidenceDrawerOpen }"
+                        @click="toggleEvidenceDrawer"
+                      >
+                        证据 ({{ selectedNodeEvidenceRefs.length }})
+                      </button>
                       <button class="mini-btn" @click="refreshNodeContext">刷新上下文</button>
                       <button class="mini-btn primary" :disabled="nodeExploreLoading" @click="runNodeExplore">
                         {{ nodeExploreLoading ? '分析中...' : '深度探索' }}
                       </button>
                     </div>
+                  </section>
+
+                  <section
+                    v-if="evidenceDrawerOpen && selectedNodeEvidenceRefs.length"
+                    class="evidence-drawer"
+                  >
+                    <div class="section-header">
+                      <h3>证据来源</h3>
+                      <span>{{ selectedNodeEvidenceRefs.length }} 条</span>
+                    </div>
+                    <ul class="evidence-list">
+                      <li v-for="(ref, idx) in selectedNodeEvidenceRefs" :key="`evidence-${idx}`" class="evidence-item">
+                        <strong>{{ ref.label }}</strong>
+                        <span v-if="ref.detail">{{ ref.detail }}</span>
+                      </li>
+                    </ul>
                   </section>
 
                   <div v-if="nodeContextLoading" class="analysis-state loading compact">
@@ -502,7 +587,10 @@
                           <div v-for="item in section.items || []" :key="`${section.id}-${item.label}-${item.content}`" class="explore-item">
                             <div class="explore-item-head">
                               <strong>{{ item.label }}</strong>
-                              <span class="source-chip">{{ item.source_type }}</span>
+                              <span
+                                class="source-chip"
+                                :class="provenanceMeta(item.source_type) ? `prov-${provenanceMeta(item.source_type).tone}` : ''"
+                              >{{ item.source_type }}</span>
                             </div>
                             <p>{{ item.content }}</p>
                           </div>
@@ -944,6 +1032,110 @@ const feedbackDeltaLabel = (key) => {
     vulnerability_score: '脆弱性',
   }
   return map[key] || key
+}
+
+// --- M9 honesty helpers (additive, guarded) -------------------------------
+// detected_feedback_loops / turning_points may arrive as plain strings OR as
+// objects ({region_names, loop_type, description, ...}); normalize both shapes
+// so the UI never breaks on missing fields.
+const normalizeFeedbackLoop = (loop) => {
+  if (loop === null || loop === undefined) return null
+  if (typeof loop === 'string') {
+    const text = loop.trim()
+    if (!text) return null
+    return { label: text, loopType: '', regions: [] }
+  }
+  if (typeof loop !== 'object') return null
+  const regions = Array.isArray(loop.region_names)
+    ? loop.region_names.filter(Boolean).map(item => String(item))
+    : []
+  const loopType = String(loop.loop_type || '').toLowerCase()
+  const label = regions.length
+    ? regions.join(' → ')
+    : String(loop.loop || loop.description || loop.label || loop.name || '反馈环')
+  return { label, loopType, regions }
+}
+
+const normalizeFeedbackLoops = (loops) => {
+  if (!Array.isArray(loops)) return []
+  return loops.map(normalizeFeedbackLoop).filter(Boolean)
+}
+
+const loopTypeLabel = (loopType) => {
+  if (loopType === 'reinforcing') return '增强'
+  if (loopType === 'balancing') return '平衡'
+  return loopType || '回路'
+}
+
+const normalizeTurningPoint = (point) => {
+  if (point === null || point === undefined) return null
+  if (typeof point === 'string') {
+    const text = point.trim()
+    return text || null
+  }
+  if (typeof point !== 'object') return null
+  const text = point.description || point.note || point.label || point.name || ''
+  return String(text).trim() || null
+}
+
+const normalizeTurningPoints = (points) => {
+  if (!Array.isArray(points)) return []
+  return points.map(normalizeTurningPoint).filter(Boolean)
+}
+
+const isLiveNarrative = (source) => source === 'snapshot.reasoning.summary'
+
+// Provenance / source_type honesty tri-state. Maps observed/inferred/assumed
+// (and the Chinese deterministic labels the backend already emits) onto a
+// stable {key, label, tone} triple for badge styling.
+const provenanceMeta = (raw) => {
+  const token = String(raw || '').trim().toLowerCase()
+  const observed = new Set(['observed', '直接观测', '观测'])
+  const inferred = new Set(['inferred', '多轮推断', '推断', '机制工件'])
+  const assumed = new Set(['assumed', '假设', '图谱补全', '模板'])
+  if (observed.has(token) || observed.has(String(raw || '').trim())) {
+    return { key: 'observed', label: '观测', tone: 'observed' }
+  }
+  if (inferred.has(token) || inferred.has(String(raw || '').trim())) {
+    return { key: 'inferred', label: '推断', tone: 'inferred' }
+  }
+  if (assumed.has(token) || assumed.has(String(raw || '').trim())) {
+    return { key: 'assumed', label: '假设', tone: 'assumed' }
+  }
+  if (!raw) return null
+  return { key: 'other', label: String(raw), tone: 'neutral' }
+}
+
+const selectedNodeProvenance = computed(() => {
+  const attrs = nodeContext.value?.node?.attributes || {}
+  return provenanceMeta(attrs.provenance || attrs.source_type)
+})
+
+const selectedNodeEvidenceRefs = computed(() => {
+  const attrs = nodeContext.value?.node?.attributes || {}
+  const refs = attrs.evidence_refs
+  if (!Array.isArray(refs)) return []
+  return refs
+    .map((ref) => {
+      if (ref === null || ref === undefined) return null
+      if (typeof ref === 'string') return { label: ref.trim(), detail: '' }
+      if (typeof ref !== 'object') return null
+      const label = ref.label || ref.ref || ref.id || ref.source || ref.name || '证据'
+      const detail = ref.detail || ref.note || ref.description || ref.quote || ''
+      return { label: String(label).trim(), detail: String(detail).trim() }
+    })
+    .filter((item) => item && item.label)
+})
+
+const selectedNodeGroundingReason = computed(() => {
+  const attrs = nodeContext.value?.node?.attributes || {}
+  const reason = attrs.grounding_reason
+  return reason ? String(reason).trim() : ''
+})
+
+const evidenceDrawerOpen = ref(false)
+const toggleEvidenceDrawer = () => {
+  evidenceDrawerOpen.value = !evidenceDrawerOpen.value
 }
 
 const resolveAnalysisStatus = (data) => {
@@ -2062,6 +2254,214 @@ onBeforeUnmount(() => {
 .report-tab-shell {
   min-height: auto;
   overflow: visible;
+}
+
+/* --- M9 honesty UI (narrative loops / turning points / provenance) ------ */
+.narrative-trace-note {
+  padding: 12px 16px;
+  border-radius: 16px;
+  background: rgba(15, 118, 110, 0.08);
+  border: 1px dashed rgba(15, 118, 110, 0.3);
+  color: #0f766e;
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.narrative-trace-note strong {
+  color: #0f5f58;
+}
+
+.narrative-head-tags {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.source-badge {
+  display: inline-flex;
+  align-items: center;
+  border-radius: 999px;
+  padding: 5px 10px;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.source-badge.live {
+  background: rgba(5, 150, 105, 0.14);
+  color: #047857;
+}
+
+.source-badge.template {
+  background: rgba(148, 163, 184, 0.18);
+  color: #475569;
+}
+
+.loop-chip-section,
+.turning-section {
+  margin-top: 16px;
+}
+
+.loop-chip-wrap {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.loop-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  border-radius: 999px;
+  padding: 7px 12px;
+  font-size: 12px;
+  font-weight: 700;
+  background: rgba(148, 163, 184, 0.14);
+  color: #334155;
+  border: 1px solid transparent;
+}
+
+.loop-chip-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: currentColor;
+  flex: 0 0 auto;
+}
+
+.loop-chip-type {
+  font-size: 10px;
+  font-weight: 700;
+  opacity: 0.85;
+  padding: 2px 6px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.55);
+}
+
+.loop-chip.loop-reinforcing {
+  background: rgba(220, 38, 38, 0.1);
+  color: #b91c1c;
+  border-color: rgba(220, 38, 38, 0.24);
+}
+
+.loop-chip.loop-balancing {
+  background: rgba(37, 99, 235, 0.1);
+  color: #1d4ed8;
+  border-color: rgba(37, 99, 235, 0.24);
+}
+
+.turning-timeline {
+  list-style: none;
+  margin: 10px 0 0;
+  padding: 0 0 0 6px;
+  border-left: 2px solid rgba(216, 176, 76, 0.5);
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.turning-item {
+  position: relative;
+  padding-left: 16px;
+  line-height: 1.6;
+  color: #0f172a;
+  font-size: 13px;
+}
+
+.turning-marker {
+  position: absolute;
+  left: -7px;
+  top: 6px;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: #d8b04c;
+  box-shadow: 0 0 0 3px rgba(216, 176, 76, 0.2);
+}
+
+.provenance-badge {
+  display: inline-flex;
+  align-items: center;
+  border-radius: 999px;
+  padding: 6px 10px;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.provenance-badge.prov-observed,
+.source-chip.prov-observed {
+  background: rgba(5, 150, 105, 0.14);
+  color: #047857;
+}
+
+.provenance-badge.prov-inferred,
+.source-chip.prov-inferred {
+  background: rgba(37, 99, 235, 0.12);
+  color: #1d4ed8;
+}
+
+.provenance-badge.prov-assumed,
+.source-chip.prov-assumed {
+  background: rgba(202, 138, 4, 0.16);
+  color: #92600a;
+}
+
+.provenance-badge.prov-neutral,
+.source-chip.prov-neutral {
+  background: rgba(148, 163, 184, 0.16);
+  color: #475569;
+}
+
+.grounding-reason {
+  margin: 8px 0 0;
+  font-size: 12px;
+  color: #64748b;
+  line-height: 1.55;
+}
+
+.mini-btn.active {
+  background: rgba(15, 118, 110, 0.12);
+  border-color: rgba(15, 118, 110, 0.4);
+  color: #0f766e;
+}
+
+.evidence-drawer {
+  border-radius: 22px;
+  background: #ffffff;
+  border: 1px solid rgba(148, 163, 184, 0.16);
+  box-shadow: 0 8px 24px rgba(15, 23, 42, 0.05);
+  padding: 18px 20px;
+}
+
+.evidence-list {
+  list-style: none;
+  margin: 12px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.evidence-item {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 12px 14px;
+  border-radius: 14px;
+  background: rgba(15, 23, 42, 0.04);
+}
+
+.evidence-item strong {
+  font-size: 13px;
+  color: #0f172a;
+}
+
+.evidence-item span {
+  font-size: 12px;
+  color: #64748b;
+  line-height: 1.55;
 }
 
 @media (max-width: 1280px) {

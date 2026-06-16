@@ -218,10 +218,23 @@ class EnvProfileGenerator:
         profile_created_callback: Optional[Callable[[EnvAgentProfile, int, int, str], None]] = None,
         parallel_count: int = 3,
         target_agent_count: Optional[int] = None,
+        map_seed_id: Optional[str] = None,
+        seed_dir: Optional[str] = None,
     ) -> EnvProfileGenerationResult:
         injected_variables = injected_variables or []
         prepared_entities = [self._prepare_entity(entity) for entity in entities]
         is_map_seed = self._looks_like_map_seed_context(prepared_entities)
+        # Optional on-disk map-seed handle. When present it activates the
+        # (previously dormant) disk-grounding path inside
+        # PublicDataGroundingService.ground() and TransportContextResolver.resolve(),
+        # flipping the grounding source to ``map_seed_grounded`` for real
+        # map-seed runs. Fully guarded: when no handle is supplied the kwargs
+        # stay empty and downstream behavior is byte-for-byte unchanged.
+        seed_grounding_kwargs: Dict[str, Any] = {}
+        if map_seed_id:
+            seed_grounding_kwargs["seed_id"] = map_seed_id
+        if seed_dir:
+            seed_grounding_kwargs["seed_dir"] = seed_dir
         regions = self._build_regions(
             prepared_entities=prepared_entities,
             simulation_requirement=simulation_requirement,
@@ -235,6 +248,7 @@ class EnvProfileGenerator:
             regions=[region.to_dict() for region in regions],
             diffusion_template=diffusion_template,
             document_text=document_text,
+            **seed_grounding_kwargs,
         )
         self._apply_grounding_priors(regions, grounding_summary)
         diffusion_context = self.transport_context_resolver.resolve(
@@ -242,6 +256,7 @@ class EnvProfileGenerator:
             diffusion_template=diffusion_template,
             reference_time=reference_time,
             preferred_provider=diffusion_provider,
+            **seed_grounding_kwargs,
         )
         transport_edges = self._build_transport_edges(
             regions=regions,

@@ -27,7 +27,6 @@ from ..services.simulation_map_projection import SimulationMapProjectionBuilder
 from ..services.simulation_realtime_graph import SimulationRealtimeGraphBuilder
 from ..services.task_executor import TaskExecutor
 from ..services.zep_entity_reader import ZepEntityReader
-from ..services.oasis_profile_generator import OasisProfileGenerator
 from ..services.simulation_manager import SimulationManager, SimulationStatus
 from ..services.simulation_runner import SimulationRunner, RunnerStatus
 from ..utils.atomic_file import read_json_file, write_json_file
@@ -1983,73 +1982,16 @@ def download_simulation_script(script_name: str):
 @simulation_bp.route('/generate-profiles', methods=['POST'])
 def generate_profiles():
     """
-    直接从图谱生成OASIS Agent Profile（不创建模拟）
-    
-    请求（JSON）：
-        {
-            "graph_id": "envfish_xxxx",     // 必填
-            "entity_types": ["Student"],      // 可选
-            "use_llm": true,                  // 可选
-            "platform": "reddit"              // 可选
-        }
+    [已停用] OASIS 社交模拟已退役，此端点不再生成 Agent Profile。
+
+    返回 410 Gone，提示调用方该功能已被移除。
     """
-    try:
-        data = request.get_json() or {}
-        
-        graph_id = data.get('graph_id')
-        if not graph_id:
-            return jsonify({
-                "success": False,
-                "error": "请提供 graph_id"
-            }), 400
-        
-        entity_types = data.get('entity_types')
-        use_llm = data.get('use_llm', True)
-        platform = data.get('platform', 'reddit')
-        
-        reader = ZepEntityReader()
-        filtered = reader.filter_defined_entities(
-            graph_id=graph_id,
-            defined_entity_types=entity_types,
-            enrich_with_edges=True
-        )
-        
-        if filtered.filtered_count == 0:
-            return jsonify({
-                "success": False,
-                "error": "没有找到符合条件的实体"
-            }), 400
-        
-        generator = OasisProfileGenerator()
-        profiles = generator.generate_profiles_from_entities(
-            entities=filtered.entities,
-            use_llm=use_llm
-        )
-        
-        if platform == "reddit":
-            profiles_data = [p.to_reddit_format() for p in profiles]
-        elif platform == "twitter":
-            profiles_data = [p.to_twitter_format() for p in profiles]
-        else:
-            profiles_data = [p.to_dict() for p in profiles]
-        
-        return jsonify({
-            "success": True,
-            "data": {
-                "platform": platform,
-                "entity_types": list(filtered.entity_types),
-                "count": len(profiles_data),
-                "profiles": profiles_data
-            }
-        })
-        
-    except Exception as e:
-        logger.error(f"生成Profile失败: {str(e)}")
-        return jsonify({
-            "success": False,
-            "error": str(e),
-            "traceback": traceback.format_exc()
-        }), 500
+    return jsonify({
+        "success": False,
+        "error": "retired",
+        "message": "OASIS social simulation has been retired; profile generation via this endpoint is no longer supported.",
+        "deprecated": True
+    }), 410
 
 
 # ============== 模拟运行控制接口 ==============

@@ -358,7 +358,10 @@ const applyAnimationToGraph = (graph, frame) => {
           timeline_delay_ms: state.timeline_delay_ms,
           animation_elapsed_ms: state.animation_elapsed_ms,
           animation_progress: state.animation_progress,
-          animation_due: state.animation_due
+          animation_due: state.animation_due,
+          value: state.value,
+          delta: state.delta,
+          state_status: state.state_status
         }
       }
     })
@@ -384,7 +387,10 @@ const applyAnimationToGraph = (graph, frame) => {
           timeline_delay_ms: state.timeline_delay_ms,
           animation_elapsed_ms: state.animation_elapsed_ms,
           animation_progress: state.animation_progress,
-          animation_due: state.animation_due
+          animation_due: state.animation_due,
+          value: state.value,
+          delta: state.delta,
+          state_status: state.state_status
         }
       }
     })

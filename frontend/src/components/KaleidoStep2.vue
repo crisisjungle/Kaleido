@@ -133,7 +133,7 @@
 
         <div class="catalog">
           <div class="panel-title-row">
-            <h3>变量注入</h3>
+            <h3>变量注入<span class="variable-kind-tag perturbation">扰动</span></h3>
             <div class="action-row compact">
               <button class="ghost-btn" :disabled="!canEditParameters" @click="addVariable('disaster')">+ 灾难变量</button>
               <button class="ghost-btn" :disabled="!canEditParameters" @click="addVariable('policy')">+ 政策变量</button>
@@ -226,6 +226,26 @@
                     </option>
                   </select>
                 </label>
+              </div>
+            </article>
+          </div>
+        </div>
+
+        <div class="catalog" v-if="stableContextVariables.length > 0">
+          <div class="panel-title-row">
+            <h3>稳态背景变量<span class="variable-kind-tag stable">稳态</span></h3>
+            <span class="hint">{{ stableContextVariables.length }} 项 · 不进入扰动注入，仅作为背景上下文</span>
+          </div>
+          <div class="stable-context-list">
+            <article v-for="item in stableContextVariables" :key="item.key" class="stable-context-card">
+              <div class="stable-context-head">
+                <strong>{{ item.name }}</strong>
+                <span v-if="item.epistemicRole" class="stable-context-role">{{ displayToken(item.epistemicRole) }}</span>
+              </div>
+              <p v-if="item.description">{{ item.description }}</p>
+              <div class="stable-context-meta">
+                <span v-if="item.direction">方向 {{ displayToken(item.direction) }}</span>
+                <span v-if="item.intensity !== null && item.intensity !== undefined">强度 {{ normalizeScore(item.intensity) }}</span>
               </div>
             </article>
           </div>
@@ -550,6 +570,64 @@
             </div>
           </div>
 
+          <div
+            v-if="selectedRiskObject.has_runtime_signal || (selectedRiskObject.tension_trace || []).length || selectedRiskObject.uncertainty_band"
+            class="risk-runtime-box"
+          >
+            <div class="risk-runtime-head">
+              <span class="catalog-title">运行态张力</span>
+              <span class="runtime-hint">{{ selectedRiskObject.has_runtime_signal ? '随推演演化' : '尚无运行信号 · 暂用静态严重性' }}</span>
+            </div>
+            <div class="risk-runtime-row">
+              <div v-if="selectedRiskObject.has_runtime_signal && normalizeTension(selectedRiskObject.runtime_tension) !== null" class="runtime-tension-pill">
+                <span>当前张力</span>
+                <strong>{{ normalizeTension(selectedRiskObject.runtime_tension) }}</strong>
+              </div>
+              <span
+                v-if="runtimeStatusMeta(selectedRiskObject.runtime_status)"
+                class="runtime-status-tag"
+                :class="`is-${runtimeStatusMeta(selectedRiskObject.runtime_status).cls}`"
+              >
+                {{ runtimeStatusMeta(selectedRiskObject.runtime_status).label }}
+              </span>
+              <span v-if="selectedRiskObject.turning_point" class="runtime-turning-tag">⚑ 转折点</span>
+              <svg
+                v-if="buildTensionSparkline(selectedRiskObject.tension_trace)"
+                class="tension-sparkline"
+                :viewBox="`0 0 ${buildTensionSparkline(selectedRiskObject.tension_trace).width} ${buildTensionSparkline(selectedRiskObject.tension_trace).height}`"
+                :width="buildTensionSparkline(selectedRiskObject.tension_trace).width"
+                :height="buildTensionSparkline(selectedRiskObject.tension_trace).height"
+                preserveAspectRatio="none"
+                role="img"
+                aria-label="张力轨迹"
+              >
+                <polyline
+                  :points="buildTensionSparkline(selectedRiskObject.tension_trace).polyline"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="1.6"
+                  stroke-linejoin="round"
+                  stroke-linecap="round"
+                />
+                <circle
+                  :cx="buildTensionSparkline(selectedRiskObject.tension_trace).lastX"
+                  :cy="buildTensionSparkline(selectedRiskObject.tension_trace).lastY"
+                  r="2.2"
+                  fill="currentColor"
+                />
+              </svg>
+            </div>
+            <div v-if="formatUncertaintyBand(selectedRiskObject.uncertainty_band)" class="risk-uncertainty-band">
+              <span class="band-label">{{ formatUncertaintyBand(selectedRiskObject.uncertainty_band).label }}</span>
+              <strong>
+                {{ formatUncertaintyBand(selectedRiskObject.uncertainty_band).center }}
+                <small v-if="formatUncertaintyBand(selectedRiskObject.uncertainty_band).range">
+                  ({{ formatUncertaintyBand(selectedRiskObject.uncertainty_band).range }})
+                </small>
+              </strong>
+            </div>
+          </div>
+
           <div class="risk-note-box">
             <span>当前触发原因</span>
             <strong>{{ selectedRiskObject.why_now || '场景配置完成后会显示 why now。' }}</strong>
@@ -565,7 +643,15 @@
               <div v-if="riskObjectEntityNodes.length > 0" class="node-list">
                 <article v-for="node in riskObjectEntityNodes" :key="node.id" class="node-card">
                   <div class="node-card-head">
-                    <strong>{{ node.name }}</strong>
+                    <strong>
+                      <span
+                        v-if="provenanceMeta(node.provenance)"
+                        class="provenance-dot"
+                        :class="`is-${provenanceMeta(node.provenance).cls}`"
+                        :title="`来源：${provenanceMeta(node.provenance).label}`"
+                      ></span>
+                      {{ node.name }}
+                    </strong>
                     <span class="node-state" :class="{ matched: node.matched }">{{ node.matched ? '图谱节点' : '风险引用' }}</span>
                   </div>
                   <div class="tag-wrap">
@@ -1141,6 +1227,38 @@ const groundingHints = computed(() => {
 
 const selectedRiskObjectId = ref('')
 
+const stableContextVariables = computed(() => {
+  const candidates = [
+    resolvedConfig.value?.stable_context_variables,
+    configRealtime.value?.stable_context_variables,
+    configRealtime.value?.config?.stable_context_variables,
+    configSnapshot.value?.stable_context_variables,
+    props.projectData?.scene_seed?.stable_context_variables,
+    props.projectData?.sceneSeed?.stable_context_variables
+  ]
+  for (const source of candidates) {
+    if (Array.isArray(source) && source.length > 0) {
+      return source
+        .map((item, index) => {
+          if (!item || typeof item !== 'object') {
+            const text = toDisplayString(item, '')
+            return text ? { name: text, key: `stable-${index}` } : null
+          }
+          return {
+            key: toDisplayString(item.id || item.variable_id || item.name || `stable-${index}`, `stable-${index}`),
+            name: toDisplayString(item.name || item.title || item.label || `稳态背景 ${index + 1}`, `稳态背景 ${index + 1}`),
+            description: toDisplayString(item.description || item.summary || '', ''),
+            epistemicRole: toDisplayString(item.epistemic_role || item.epistemicRole || '', ''),
+            direction: toDisplayString(item.direction || '', ''),
+            intensity: item.intensity ?? item.intensity_0_100 ?? null
+          }
+        })
+        .filter(Boolean)
+    }
+  }
+  return []
+})
+
 const riskSourceCandidates = computed(() => [
   resolvedConfig.value,
   configRealtime.value,
@@ -1517,6 +1635,7 @@ const riskObjectEntityNodes = computed(() => {
       uuid: node?.uuid || token,
       name: node?.name || evidence?.title || token || `entity_${index + 1}`,
       labels: normalizeLabels(node?.labels),
+      provenance: node?.provenance || node?.attributes?.provenance || evidence?.provenance || '',
       matched: Boolean(node)
     }
   })
@@ -2482,6 +2601,88 @@ function bandFromScore(value) {
   if (number >= 60) return '预警'
   if (number >= 35) return '稳定'
   return '平稳'
+}
+
+const RUNTIME_STATUS_META = {
+  rising: { label: '上升', cls: 'rising' },
+  falling: { label: '回落', cls: 'falling' },
+  critical: { label: '临界', cls: 'critical' },
+  elevated: { label: '偏高', cls: 'elevated' },
+  steady: { label: '平稳', cls: 'steady' }
+}
+
+function runtimeStatusMeta(value) {
+  const key = String(value || '').trim().toLowerCase()
+  return RUNTIME_STATUS_META[key] || { label: displayToken(value, '平稳'), cls: 'steady' }
+}
+
+function tensionTraceValues(trace) {
+  if (!Array.isArray(trace)) return []
+  return trace
+    .map((point) => {
+      if (point && typeof point === 'object') {
+        return Number(point.value ?? point.tension ?? point.runtime_tension ?? point.center)
+      }
+      return Number(point)
+    })
+    .filter((value) => Number.isFinite(value))
+}
+
+function buildTensionSparkline(trace, width = 96, height = 26) {
+  const values = tensionTraceValues(trace)
+  if (values.length < 2) return null
+  const min = Math.min(...values)
+  const max = Math.max(...values)
+  const span = max - min || 1
+  const stepX = width / (values.length - 1)
+  const points = values.map((value, index) => {
+    const x = index * stepX
+    const y = height - ((value - min) / span) * (height - 2) - 1
+    return `${x.toFixed(1)},${y.toFixed(1)}`
+  })
+  const lastValue = values[values.length - 1]
+  const lastX = (values.length - 1) * stepX
+  const lastY = height - ((lastValue - min) / span) * (height - 2) - 1
+  return {
+    width,
+    height,
+    polyline: points.join(' '),
+    lastX: lastX.toFixed(1),
+    lastY: lastY.toFixed(1),
+    count: values.length
+  }
+}
+
+function normalizeTension(value) {
+  const number = Number(value)
+  if (!Number.isFinite(number)) return null
+  return number <= 1 ? Math.round(number * 100) : Math.round(number)
+}
+
+function formatUncertaintyBand(band) {
+  if (!band || typeof band !== 'object') return null
+  const center = normalizeTension(band.center)
+  if (center === null) return null
+  const lower = normalizeTension(band.lower)
+  const upper = normalizeTension(band.upper)
+  const range = (lower !== null && upper !== null) ? `${lower} – ${upper}` : null
+  return {
+    center,
+    range,
+    label: toDisplayString(band.label, '推断区间(非测量)'),
+    derived: band.derived !== false
+  }
+}
+
+const PROVENANCE_META = {
+  observed: { label: '观察', cls: 'observed' },
+  inferred: { label: '推断', cls: 'inferred' },
+  assumed: { label: '假设', cls: 'assumed' }
+}
+
+function provenanceMeta(value) {
+  const key = String(value || '').trim().toLowerCase()
+  return PROVENANCE_META[key] || null
 }
 
 function familyKeyFromText(value) {
@@ -4236,6 +4437,177 @@ textarea {
   margin-top: 8px;
   color: #183058;
   line-height: 1.5;
+}
+
+/* runtime tension / uncertainty band (additive) */
+.risk-runtime-box {
+  border-radius: 18px;
+  padding: 14px;
+  background: rgba(245, 248, 255, 0.78);
+  border: 1px solid rgba(20, 33, 61, 0.08);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.risk-runtime-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.risk-runtime-head .runtime-hint {
+  font-size: 11px;
+  color: #7382a3;
+}
+
+.risk-runtime-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.runtime-tension-pill {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  background: rgba(28, 196, 135, 0.12);
+  color: #0d7a52;
+  font-size: 12px;
+}
+
+.runtime-tension-pill strong {
+  font-size: 15px;
+  font-variant-numeric: tabular-nums;
+}
+
+.runtime-status-tag {
+  font-size: 11px;
+  padding: 3px 9px;
+  border-radius: 999px;
+  border: 1px solid currentColor;
+}
+
+.runtime-status-tag.is-rising,
+.runtime-status-tag.is-elevated { color: #c2641a; }
+.runtime-status-tag.is-critical { color: #c0392b; background: rgba(192, 57, 43, 0.08); }
+.runtime-status-tag.is-falling { color: #0d7a52; }
+.runtime-status-tag.is-steady { color: #5a6b8c; }
+
+.runtime-turning-tag {
+  font-size: 11px;
+  padding: 3px 9px;
+  border-radius: 999px;
+  color: #8a4bcf;
+  background: rgba(138, 75, 207, 0.1);
+}
+
+.tension-sparkline {
+  color: #2f6fed;
+  margin-left: auto;
+}
+
+.risk-uncertainty-band {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding-top: 4px;
+  border-top: 1px dashed rgba(20, 33, 61, 0.14);
+}
+
+.risk-uncertainty-band .band-label {
+  font-size: 11px;
+  color: #7382a3;
+}
+
+.risk-uncertainty-band strong {
+  color: #183058;
+  font-variant-numeric: tabular-nums;
+}
+
+.risk-uncertainty-band small {
+  color: #7382a3;
+  font-weight: 500;
+}
+
+/* provenance tri-color dot (additive) */
+.provenance-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  margin-right: 5px;
+  vertical-align: middle;
+}
+
+.provenance-dot.is-observed { background: #1cc487; }
+.provenance-dot.is-inferred {
+  background: transparent;
+  border: 1.5px dashed #e0a020;
+}
+.provenance-dot.is-assumed { background: #9aa6bd; }
+
+/* perturbation vs stable-context (additive) */
+.variable-kind-tag {
+  margin-left: 8px;
+  font-size: 10px;
+  padding: 2px 7px;
+  border-radius: 999px;
+  vertical-align: middle;
+}
+
+.variable-kind-tag.perturbation {
+  background: rgba(231, 111, 81, 0.14);
+  color: #c2491f;
+}
+
+.variable-kind-tag.stable {
+  background: rgba(90, 107, 140, 0.12);
+  color: #4a5a7c;
+}
+
+.stable-context-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: 10px;
+}
+
+.stable-context-card {
+  border-radius: 14px;
+  padding: 12px;
+  background: rgba(244, 246, 250, 0.7);
+  border: 1px dashed rgba(74, 90, 124, 0.3);
+}
+
+.stable-context-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.stable-context-role {
+  font-size: 10px;
+  color: #4a5a7c;
+}
+
+.stable-context-card p {
+  margin: 6px 0 0;
+  font-size: 12px;
+  color: #4f5d78;
+  line-height: 1.5;
+}
+
+.stable-context-meta {
+  display: flex;
+  gap: 10px;
+  margin-top: 6px;
+  font-size: 11px;
+  color: #7382a3;
 }
 
 .risk-step-list,

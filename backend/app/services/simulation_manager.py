@@ -483,6 +483,16 @@ class SimulationManager:
                 state.profiles_count = len(incremental_profiles)
                 self._save_simulation_state(state)
 
+            # Thread the on-disk map-seed handle so the profile generator can
+            # activate the disk-grounding path (PublicDataGroundingService.ground
+            # / TransportContextResolver.resolve read the seed's WorldCover/OSM/
+            # Open-Meteo artifacts and flip the grounding source to
+            # ``map_seed_grounded``). Only set for real map-seed runs; otherwise
+            # it stays None and generation behavior is unchanged.
+            profile_map_seed_id = (
+                state.map_seed_id if state.source_mode == "map_seed" else None
+            )
+
             result = generator.generate_from_entities(
                 entities=filtered.entities,
                 simulation_requirement=simulation_requirement,
@@ -498,6 +508,7 @@ class SimulationManager:
                 profile_created_callback=profile_created,
                 parallel_count=parallel_profile_count,
                 target_agent_count=target_agent_count,
+                map_seed_id=profile_map_seed_id,
             )
 
             state.profiles_count = len(result.profiles)
