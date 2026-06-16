@@ -22,9 +22,24 @@
     }
 """
 
+import re
 from typing import Any, Dict, List, Optional
 
 from ..config import Config
+
+
+def _to_pascal_ascii(name: Any) -> str:
+    """Zep requires entity-type names in PascalCase containing only ASCII
+    alphanumerics. Convert any LLM-proposed name (incl. CJK/snake_case) to that
+    form; returns '' when there is no usable ASCII content (caller skips it)."""
+    tokens = re.findall(r"[A-Za-z0-9]+", str(name or ""))
+    return "".join(token[:1].upper() + token[1:] for token in tokens)
+
+
+def _to_zep_edge_name(name: Any) -> str:
+    """Zep edge-type names: ASCII UPPER_SNAKE (e.g. AFFECTS, LOCATED_IN)."""
+    tokens = re.findall(r"[A-Za-z0-9]+", str(name or ""))
+    return "_".join(token.upper() for token in tokens)
 
 
 # 开放实体类型词表（复杂生态本体的候选集合）。
@@ -253,6 +268,7 @@ class OntologyGenerator:
                 name, desc = item.strip(), ""
             else:
                 continue
+            name = _to_pascal_ascii(name)  # Zep entity types must be ASCII PascalCase
             if not name or name in seen:
                 continue
             seen.add(name)
@@ -267,12 +283,14 @@ class OntologyGenerator:
             return out
         for item in value:
             if not isinstance(item, dict):
-                if isinstance(item, str) and item.strip() and item.strip() not in seen:
-                    seen.add(item.strip())
-                    out.append({"name": item.strip(), "description": "",
-                                "channel": "generic", "direction": "directed", "sign": "±"})
+                if isinstance(item, str):
+                    ename = _to_zep_edge_name(item)
+                    if ename and ename not in seen:
+                        seen.add(ename)
+                        out.append({"name": ename, "description": "",
+                                    "channel": "generic", "direction": "directed", "sign": "±"})
                 continue
-            name = str(item.get("name", "")).strip()
+            name = _to_zep_edge_name(item.get("name", ""))  # Zep edge types: ASCII UPPER_SNAKE
             if not name or name in seen:
                 continue
             seen.add(name)
