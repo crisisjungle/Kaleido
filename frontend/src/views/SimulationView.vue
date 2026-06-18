@@ -7,6 +7,9 @@
       </div>
 
       <div class="header-right">
+        <button class="layout-toggle" @click="toggleGraphCollapse">
+          {{ viewMode === 'workbench' ? '◧ 展开图谱' : '▣ 收起图谱' }}
+        </button>
         <WorkflowStepMenu :current-step="2" current-name="场景设计" />
         <div class="step-divider"></div>
         <span class="status-indicator" :class="statusClass">
@@ -113,10 +116,10 @@ const statusClass = computed(() => {
 })
 
 const statusText = computed(() => {
-  if (currentStatus.value === 'error') return 'Error'
-  if (currentStatus.value === 'completed') return 'Ready'
-  if (currentStatus.value === 'idle') return 'Idle'
-  return 'Preparing'
+  if (currentStatus.value === 'error') return '错误'
+  if (currentStatus.value === 'completed') return '就绪'
+  if (currentStatus.value === 'idle') return '空闲'
+  return '准备中'
 })
 
 const isPreparing = computed(() => currentStatus.value === 'processing')
@@ -436,6 +439,11 @@ const toggleMaximize = (target) => {
   } else {
     viewMode.value = target
   }
+}
+
+// 收起/展开左侧图谱：收起后右栏内容全宽铺开（解决 50/50 挤压）
+const toggleGraphCollapse = () => {
+  viewMode.value = viewMode.value === 'workbench' ? 'split' : 'workbench'
 }
 
 const handleGoBack = () => {
@@ -868,6 +876,25 @@ onUnmounted(() => {
   background: #FFF;
   color: #000;
   box-shadow: 0 6px 16px rgba(16, 35, 29, 0.08);
+}
+
+.layout-toggle {
+  border: 1px solid rgba(16, 35, 29, 0.12);
+  background: rgba(255, 255, 255, 0.78);
+  padding: 6px 14px;
+  font-size: 12px;
+  font-weight: 600;
+  color: #10231D;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: all 0.18s ease;
+  font-family: inherit;
+  white-space: nowrap;
+}
+
+.layout-toggle:hover {
+  background: #FFF;
+  box-shadow: 0 4px 12px rgba(16, 35, 29, 0.1);
 }
 
 .header-right {

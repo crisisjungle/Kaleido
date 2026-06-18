@@ -7,6 +7,9 @@
       </div>
 
       <div class="header-right">
+        <button class="layout-toggle" @click="toggleGraphCollapse">
+          {{ viewMode === 'workbench' ? '◧ 展开图谱' : '▣ 收起图谱' }}
+        </button>
         <WorkflowStepMenu :current-step="currentStep" :current-name="stepNames[currentStep - 1]" />
         <div class="step-divider"></div>
         <span class="status-indicator" :class="statusClass">
@@ -259,14 +262,14 @@ const statusClass = computed(() => {
 })
 
 const statusText = computed(() => {
-  if (error.value) return 'Error'
-  if (stepStatus.value === 'processing') return 'Generating Config'
-  if (stepStatus.value === 'completed') return 'Config Ready'
-  if (stepStatus.value === 'error') return 'Config Error'
-  if (currentPhase.value >= 2) return 'Ready'
-  if (currentPhase.value === 1) return 'Building Graph'
-  if (currentPhase.value === 0) return 'Generating Ontology'
-  return 'Initializing'
+  if (error.value) return '错误'
+  if (stepStatus.value === 'processing') return '生成配置中'
+  if (stepStatus.value === 'completed') return '配置就绪'
+  if (stepStatus.value === 'error') return '配置错误'
+  if (currentPhase.value >= 2) return '就绪'
+  if (currentPhase.value === 1) return '构建图谱中'
+  if (currentPhase.value === 0) return '生成本体中'
+  return '初始化中'
 })
 
 // --- Helpers ---
@@ -286,6 +289,11 @@ const toggleMaximize = (target) => {
   } else {
     viewMode.value = target
   }
+}
+
+// 收起/展开左侧图谱：收起后右栏内容全宽铺开（解决 50/50 挤压）
+const toggleGraphCollapse = () => {
+  viewMode.value = viewMode.value === 'workbench' ? 'split' : 'workbench'
 }
 
 const buildSimulationRunRoute = (simulationId, params = {}) => {
@@ -785,6 +793,25 @@ onUnmounted(() => {
   display: flex;
   align-items: center;
   gap: 16px;
+}
+
+.layout-toggle {
+  border: 1px solid rgba(16, 35, 29, 0.12);
+  background: rgba(255, 255, 255, 0.78);
+  padding: 6px 14px;
+  font-size: 12px;
+  font-weight: 600;
+  color: #10231D;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: all 0.18s ease;
+  font-family: inherit;
+  white-space: nowrap;
+}
+
+.layout-toggle:hover {
+  background: #FFF;
+  box-shadow: 0 4px 12px rgba(16, 35, 29, 0.1);
 }
 
 .workflow-step {
