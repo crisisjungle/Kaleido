@@ -122,20 +122,16 @@
               <span class="detail-label">名称：</span>
               <span class="detail-value">{{ selectedItem.data.name }}</span>
             </div>
-            <div class="detail-row">
-              <span class="detail-label">UUID:</span>
-              <span class="detail-value uuid-text">{{ selectedItem.data.uuid }}</span>
-            </div>
             <div class="detail-row" v-if="selectedItem.data.created_at">
               <span class="detail-label">创建时间：</span>
               <span class="detail-value">{{ formatDateTime(selectedItem.data.created_at) }}</span>
             </div>
             
             <!-- Properties -->
-            <div class="detail-section" v-if="selectedItem.data.attributes && Object.keys(selectedItem.data.attributes).length > 0">
+            <div class="detail-section" v-if="visibleAttributeEntries(selectedItem.data.attributes).length > 0">
               <div class="section-title">属性</div>
               <div class="properties-list">
-                <div v-for="(value, key) in selectedItem.data.attributes" :key="key" class="property-item">
+                <div v-for="[key, value] in visibleAttributeEntries(selectedItem.data.attributes)" :key="key" class="property-item">
                   <span class="property-key">{{ formatPropertyKey(key) }}：</span>
                   <span class="property-value">{{ formatPropertyValue(value) }}</span>
                 </div>
@@ -194,10 +190,6 @@
                   </div>
                   
                   <div class="self-loop-item-content" v-show="expandedSelfLoops.has(loop.uuid || idx)">
-                    <div class="detail-row" v-if="loop.uuid">
-                      <span class="detail-label">UUID:</span>
-                      <span class="detail-value uuid-text">{{ loop.uuid }}</span>
-                    </div>
                     <div class="detail-row" v-if="loop.fact">
                       <span class="detail-label">事实：</span>
                       <span class="detail-value fact-text">{{ loop.fact }}</span>
@@ -227,10 +219,6 @@
                 {{ selectedItem.data.source_name }} → {{ displayToken(selectedItem.data.name || 'RELATED_TO') }} → {{ selectedItem.data.target_name }}
               </div>
               
-              <div class="detail-row">
-                <span class="detail-label">UUID:</span>
-                <span class="detail-value uuid-text">{{ selectedItem.data.uuid }}</span>
-              </div>
               <div class="detail-row">
                 <span class="detail-label">标签：</span>
                 <span class="detail-value">{{ displayToken(selectedItem.data.name || 'RELATED_TO') }}</span>
@@ -278,7 +266,7 @@
                 <span class="detail-value">{{ formatDateTime(selectedItem.data.created_at) }}</span>
               </div>
               <div class="detail-row" v-if="selectedItem.data.valid_at">
-                <span class="detail-label">Valid From:</span>
+                <span class="detail-label">生效时间：</span>
                 <span class="detail-value">{{ formatDateTime(selectedItem.data.valid_at) }}</span>
               </div>
             </template>
@@ -363,7 +351,7 @@
 import { ref, onMounted, onUnmounted, watch, nextTick, computed } from 'vue'
 import * as d3 from 'd3'
 import MapRelationPanel from './MapRelationPanel.vue'
-import { formatTokenLabelZh, translateDisplayToken } from '../utils/displayText'
+import { formatTokenLabelZh, translateDisplayToken, formatFieldLabelZh, isInternalAttributeKey } from '../utils/displayText'
 
 const props = defineProps({
   graphData: Object,
@@ -472,12 +460,19 @@ const displayToken = (value, fallback = '') => {
   return translateDisplayToken(value, fallback || String(value || ''))
 }
 
-const formatPropertyKey = (key) => formatTokenLabelZh(key, key)
+const formatPropertyKey = (key) => formatFieldLabelZh(key, key)
+
+// 只展示有意义的字段，过滤动画/内部/调试 key（*_round、animation_*、uuid、id…）
+const visibleAttributeEntries = (attributes) => {
+  if (!attributes || typeof attributes !== 'object') return []
+  return Object.entries(attributes).filter(([key]) => !isInternalAttributeKey(key))
+}
 
 const formatPropertyValue = (value) => {
   if (value === null || value === undefined || value === '') return '无'
   if (Array.isArray(value)) return value.map((item) => displayToken(item)).join('、')
   if (typeof value === 'object') return JSON.stringify(value)
+  if (typeof value === 'number') return Number.isInteger(value) ? String(value) : value.toFixed(1)
   return displayToken(value)
 }
 
