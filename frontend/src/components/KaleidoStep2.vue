@@ -78,9 +78,6 @@
               <input v-model.number="maxRounds" type="number" min="4" :disabled="!canEditParameters" @input="markTimePlanManual" />
             </label>
           </div>
-          <div class="grounding-box">
-            <p>{{ timePlanReasoning || '现阶段默认使用当下地图与当前环境基线，避免历史/未来时间与真实地图数据源不一致。系统仍会根据场景类型自动推荐步长和推演轮次。' }}</p>
-          </div>
         </div>
 
         <div class="catalog">
@@ -307,12 +304,6 @@
           </div>
         </div>
 
-        <div class="catalog" v-if="agentSourceMode === 'graph'">
-          <div class="catalog-title">临时预览说明</div>
-          <div class="grounding-box">
-            <p>这里不是失败降级，而是正式配置还没生成前的图谱预览：系统先把图谱里的个体、组织、生态和治理节点临时当作代理体展示。正式代理体配置生成后，会切换成完整代理体档案，包含主区域、影响范围、初始状态、倾向、动机和敏感项。</p>
-          </div>
-        </div>
       </section>
 
       <section
@@ -375,12 +366,6 @@
           </div>
         </div>
 
-        <div class="catalog">
-          <div class="catalog-title">这部分在看什么</div>
-          <div class="grounding-box">
-            <p>{{ relationPanelExplanation }}</p>
-          </div>
-        </div>
 
         <div class="catalog">
           <div class="panel-title-row">
@@ -4164,8 +4149,10 @@ textarea {
   box-shadow: 0 8px 20px rgba(17, 31, 59, 0.04);
 }
 
+/* 说教灰字：折叠掉，不再用整段解释给数据缺陷打补丁 */
+.parameter-lock-note,
 .region-explain-box {
-  margin-bottom: 14px;
+  display: none;
 }
 
 .region-card p,
