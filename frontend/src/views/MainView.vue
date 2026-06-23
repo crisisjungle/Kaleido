@@ -70,7 +70,7 @@ const route = useRoute()
 const router = useRouter()
 
 // Layout State
-const viewMode = ref('split') // graph | split | workbench
+const viewMode = ref('workbench') // graph | split | workbench — 默认全宽，图谱可一键展开
 
 // Step State
 const currentStep = ref(2) // 1: 背景生成, 2: 场景设计, 3: 开始模拟, 4: 报告互动

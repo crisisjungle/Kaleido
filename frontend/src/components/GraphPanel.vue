@@ -33,6 +33,12 @@
             3D
           </button>
         </div>
+        <!-- 治毛球：图谱密度 — 强关系只显最关键的连线，默认聚焦因果网络 -->
+        <div v-if="graphMode !== 'map'" class="mode-switch density-switch" title="图谱密度：过滤掉空间骨架/弱关系，让强关系浮现">
+          <button class="mode-btn" :class="{ active: edgeDensity === 'strong' }" @click="edgeDensity = 'strong'" title="只显强关系（去掉骨架与推测连线）">强关系</button>
+          <button class="mode-btn" :class="{ active: edgeDensity === 'standard' }" @click="edgeDensity = 'standard'" title="标准：聚焦因果网络">标准</button>
+          <button class="mode-btn" :class="{ active: edgeDensity === 'all' }" @click="edgeDensity = 'all'" title="显示全部关系（含空间骨架）">全部</button>
+        </div>
         <button class="tool-btn" @click="$emit('refresh')" :disabled="loading" title="刷新图谱">
           <span class="icon-refresh" :class="{ 'spinning': loading }">↻</span>
           <span class="btn-text">刷新</span>
@@ -333,6 +339,9 @@
           <span class="legend-edge-line legend-edge-causal"></span>
           <span class="legend-label">因果连线 {{ edgeLayerSummary.causal }}</span>
         </span>
+        <span v-if="renderedEdgeStats.total && renderedEdgeStats.shown < renderedEdgeStats.total" class="legend-edge-shown">
+          当前显示 {{ renderedEdgeStats.shown }} / 共 {{ renderedEdgeStats.total }} 条
+        </span>
       </div>
     </div>
     
@@ -395,6 +404,8 @@ const graphSvg = ref(null)
 const graph3dContainer = ref(null)
 const selectedItem = ref(null)
 const showEdgeLabels = ref(false)
+const edgeDensity = ref('standard') // strong | standard | all — 治毛球：默认聚焦因果网络
+const renderedEdgeStats = ref({ shown: 0, total: 0 })
 const graphMode = ref('2d')
 const graph3DState = ref('idle')
 const graph3DErrorMessage = ref('')
@@ -1059,6 +1070,77 @@ const isIntraClusterSpatialEdge = (edge) => {
   return Boolean(source) && Boolean(target) && source === target
 }
 
+// --- 治毛球：按密度筛选要渲染的边 -----------------------------------------
+// 思路：空间骨架边本就是淡化噪声，先移除；推测性因果边降级；必要时按
+// "证据强度 + 节点度数"封顶，让强关系浮现而不糊成一团。诚实显示
+// "当前显示 N / 共 M"，不做静默截断。
+const edgeEpistemicScore = (edge) => {
+  const token = getEdgeEpistemic(edge)
+  if (!token) return 2
+  if (token.includes('observ') || token.includes('structural') || token.includes('confirm') || token.includes('fact')) return 3
+  if (token.includes('specul') || token.includes('assum') || token.includes('hypo')) return 1
+  return 2
+}
+
+const DENSITY_CAP = { strong: 160, standard: 600 }
+
+const computeDensityPlan = (edgesData, nodeIds) => {
+  const connected = (edgesData || []).filter(
+    e => nodeIds.has(e.source_node_uuid) && nodeIds.has(e.target_node_uuid)
+  )
+  const total = connected.length
+  const mode = edgeDensity.value
+  if (mode === 'all') {
+    return { allow: () => true, shown: total, total }
+  }
+
+  // 节点度数（用于重要度排序的次级信号）
+  const degree = new Map()
+  connected.forEach(e => {
+    degree.set(e.source_node_uuid, (degree.get(e.source_node_uuid) || 0) + 1)
+    degree.set(e.target_node_uuid, (degree.get(e.target_node_uuid) || 0) + 1)
+  })
+
+  // 回放中本轮"活跃/新增"的边：无论档位与封顶，永远保留（否则会把正在演化的关系筛掉）
+  const isLiveAnimatedEdge = (e) => {
+    const s = String(readEdgeRaw(e)?.attributes?.animation_status || '').toLowerCase()
+    return s === 'active' || s === 'new'
+  }
+
+  const alwaysKeep = []   // 标准模式下保留的（已淡化的）空间骨架 + 回放活跃边
+  const causalPool = []
+  for (const e of connected) {
+    if (isLiveAnimatedEdge(e)) {
+      alwaysKeep.push(e)
+      continue
+    }
+    if (isSpatialFactEdge(e)) {
+      if (mode === 'strong') continue   // 强关系：去掉空间骨架
+      alwaysKeep.push(e)                 // 标准：保留骨架（本就淡化），与图例一致
+      continue
+    }
+    if (mode === 'strong' && edgeEpistemicScore(e) <= 1) continue // 强关系：再去掉推测性因果
+    causalPool.push(e)
+  }
+
+  // 只对因果边封顶——毛球的根源在因果连线
+  const cap = DENSITY_CAP[mode] || 600
+  let causalKept = causalPool
+  if (causalPool.length > cap) {
+    causalKept = causalPool
+      .map(e => ({
+        e,
+        score: edgeEpistemicScore(e) * 1000
+          + Math.min(degree.get(e.source_node_uuid) || 0, degree.get(e.target_node_uuid) || 0)
+      }))
+      .sort((a, b) => b.score - a.score)
+      .slice(0, cap)
+      .map(x => x.e)
+  }
+  const allowSet = new Set([...alwaysKeep, ...causalKept])
+  return { allow: (e) => allowSet.has(e), shown: allowSet.size, total }
+}
+
 // --- M10 node playback: bind radius/color to the frame's real value/delta ----
 const readNodeStateStatus = (node) => {
   const attrs = node?.rawData?.attributes ?? node?.attributes ?? {}
@@ -1130,9 +1212,9 @@ const getNodeBaseRadius = (node, is3D = false) => {
 
 const getNodeAnimationStyle = (node, { highlightActive = false, highlighted = false, is3D = false } = {}) => {
   const rawStatus = getEntityAnimationStatus(node)
-  const status = props.highlightMode === 'animation' && !['new', 'active'].includes(rawStatus)
-    ? 'hidden'
-    : rawStatus
+  // 回放/动画中不再把"非脉冲"元素整体藏掉——否则整张关系网消失（"显示不出来"）。
+  // 直接采用每个节点/边自身的状态：steady 背景常显、new/active 高亮跳动、hidden 才隐藏。
+  const status = rawStatus
   const progress = getEntityAnimationProgress(node)
   const baseColor = getNodeColorByType(node.type)
   const baseRadius = getNodeBaseRadius(node, is3D)
@@ -1230,7 +1312,9 @@ const getNodeAnimationStyle = (node, { highlightActive = false, highlighted = fa
       opacity = 0
       labelOpacity = 0
     } else {
-      opacity = is3D ? 0.24 : 0.24
+      // 回放/动画模式：非焦点的"背景网络"必须保持清晰可见（不要压到 0.24 看不清整张网，
+      // 那正是"显示不出来"的观感来源）；点击聚焦等其它高亮场景仍强压暗以突出选中项。
+      opacity = props.highlightMode === 'animation' ? Math.max(opacity * 0.62, 0.5) : 0.24
       labelOpacity = node.layer === 'agent' ? 0.08 : 0.22
     }
   }
@@ -1253,9 +1337,9 @@ const getNodeAnimationStyle = (node, { highlightActive = false, highlighted = fa
 const shouldShowNodeLabel = (node, { highlightActive = false, highlighted = false } = {}) => {
   if (highlighted) return true
   const rawStatus = getEntityAnimationStatus(node)
-  const status = props.highlightMode === 'animation' && !['new', 'active'].includes(rawStatus)
-    ? 'hidden'
-    : rawStatus
+  // 回放/动画中不再把"非脉冲"元素整体藏掉——否则整张关系网消失（"显示不出来"）。
+  // 直接采用每个节点/边自身的状态：steady 背景常显、new/active 高亮跳动、hidden 才隐藏。
+  const status = rawStatus
   if (status === 'hidden') return false
   if (status === 'new' || status === 'active') return true
   const layer = node.layer || nodeLayerKey(node)
@@ -1277,9 +1361,9 @@ const getLinkAnimationStyle = (
   } = {},
 ) => {
   const rawStatus = getEntityAnimationStatus(link)
-  const status = props.highlightMode === 'animation' && !['new', 'active'].includes(rawStatus)
-    ? 'hidden'
-    : rawStatus
+  // 回放/动画中不再把"非脉冲"元素整体藏掉——否则整张关系网消失（"显示不出来"）。
+  // 直接采用每个节点/边自身的状态：steady 背景常显、new/active 高亮跳动、hidden 才隐藏。
+  const status = rawStatus
   const progress = getEntityAnimationProgress(link)
   // M10: classify the edge so the spatial skeleton reads faint while causal
   // coupling reads bold + channel-colored (kills the undifferentiated hairball).
@@ -1455,8 +1539,12 @@ const renderGraph3D = async () => {
   )
   const highlightActive = highlightedNodeIds.size > 0 || highlightedEdgeIdSet.size > 0
 
+  // 治毛球：按当前密度档位筛选要渲染的边
+  const densityPlan = computeDensityPlan(edgesData, nodeIds)
+  renderedEdgeStats.value = { shown: densityPlan.shown, total: densityPlan.total }
+
   const links = edgesData
-    .filter(edge => nodeIds.has(edge.source_node_uuid) && nodeIds.has(edge.target_node_uuid))
+    .filter(edge => nodeIds.has(edge.source_node_uuid) && nodeIds.has(edge.target_node_uuid) && densityPlan.allow(edge))
     .map((edge, index) => ({
       source: edge.source_node_uuid,
       target: edge.target_node_uuid,
@@ -1795,12 +1883,16 @@ const renderGraph = () => {
   })
 
   const nodeIds = new Set(nodes.map(n => n.id))
-  
+
+  // 治毛球：按当前密度档位筛选要渲染的边
+  const densityPlan = computeDensityPlan(edgesData, nodeIds)
+  renderedEdgeStats.value = { shown: densityPlan.shown, total: densityPlan.total }
+
   // 处理边数据，计算同一对节点间的边数量和索引
   const edgePairCount = {}
   const selfLoopEdges = {} // 按节点分组的自环边
   const tempEdges = edgesData
-    .filter(e => nodeIds.has(e.source_node_uuid) && nodeIds.has(e.target_node_uuid))
+    .filter(e => nodeIds.has(e.source_node_uuid) && nodeIds.has(e.target_node_uuid) && densityPlan.allow(e))
   
   // 统计每对节点之间的边数量，收集自环边
   tempEdges.forEach(e => {
@@ -2526,6 +2618,11 @@ watch(
   }
 )
 
+// 治毛球：切换密度档位时整图重渲染（边集合变了，需重建结构）
+watch(edgeDensity, () => {
+  nextTick(scheduleGraphRender)
+})
+
 // 监听边标签显示开关
 watch(showEdgeLabels, (newVal) => {
   if (linkLabelsRef) {
@@ -2674,6 +2771,12 @@ onUnmounted(() => {
 .mode-btn.active {
   background: #111;
   color: #FFF;
+}
+
+/* 治毛球：密度档位按钮（标签更长，放开最小宽度） */
+.density-switch .mode-btn {
+  min-width: auto;
+  padding: 0 10px;
 }
 
 .tool-btn {
@@ -3119,6 +3222,13 @@ onUnmounted(() => {
 
 .legend-edge-causal {
   border-top: 2.5px solid #6d28d9;
+}
+
+.legend-edge-shown {
+  width: 100%;
+  font-size: 11px;
+  font-weight: 600;
+  color: #7B2D8E;
 }
 
 /* Edge Labels Toggle - Top Right */

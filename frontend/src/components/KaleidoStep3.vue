@@ -4,9 +4,6 @@
       <div class="hero-copy">
         <div class="eyebrow">KALEIDO / STEP 3</div>
         <h2>推演工作台与运行干预</h2>
-        <p>
-          把轮次播放、区域热区、多智能体互动、风险链路和变量注入收进同一工作台，按步骤切换，不再挤在一张长屏里。
-        </p>
       </div>
 
       <div class="hero-controls">
@@ -33,46 +30,15 @@
         <span>场景</span>
         <strong>{{ scenarioLabel }}</strong>
       </div>
-      <div class="status-card">
-        <span>模板</span>
-        <strong>{{ templateLabel }}</strong>
-      </div>
-      <div class="status-card">
-        <span>区域</span>
-        <strong>{{ regionRows.length }}</strong>
-      </div>
-      <div class="status-card">
-        <span>子区域</span>
-        <strong>{{ subregionRows.length }}</strong>
-      </div>
-      <div class="status-card">
-        <span>活跃代理体</span>
-        <strong>{{ activeAgentCount }}</strong>
-      </div>
-      <div class="status-card">
-        <span>事件</span>
-        <strong>{{ spreadEvents.length }}</strong>
-      </div>
-      <div class="status-card">
-        <span>交互</span>
-        <strong>{{ agentInteractions.length }}</strong>
-      </div>
-      <div class="status-card">
-        <span>干预</span>
-        <strong>{{ interventionRows.length }}</strong>
-      </div>
-      <div class="status-card">
-        <span>不确定性</span>
-        <strong>{{ uncertaintyLabel }}</strong>
-      </div>
+      <!-- 11卡状态条 → 3：模板/区域/子区域/活跃代理体/事件/交互/干预/不确定性 计数已并入各 tab 内容，
+           顶栏只保留轮次/阶段/场景三项核心状态（同时移除了 不确定性 n/a 与 模板 原始 id 泄漏） -->
     </div>
 
     <section class="workspace-shell">
       <div class="workspace-topbar">
         <div class="workspace-copy">
           <div class="eyebrow workspace-eyebrow">第 3 步工作台</div>
-          <h3>按步骤观察区域脉冲、Agent 互动与中途变量</h3>
-          <p>先看运行总览，再切到多智能体与风险链路，最后在注入面板里插入变量并追踪系统日志。</p>
+          <h3>观察区域脉冲、多智能体互动与风险链路</h3>
         </div>
 
         <div class="workspace-tabs" role="tablist" aria-label="Step3 工作台标签页">
@@ -227,7 +193,8 @@
 
             <div class="pulse-metric">
               <div class="pulse-metric-head">
-                <span>推演进度</span>
+                <!-- 回放态下这是"回放到第几轮"的位置，而非运行进度，避免与「阶段=已完成」打架 -->
+                <span>{{ isReplayOnly ? '回放进度' : '推演进度' }}</span>
                 <strong class="mono">{{ progressPercent }}%</strong>
               </div>
               <div class="progress-track">
@@ -380,36 +347,11 @@
         </div>
       </section>
 
+      <!-- 多智能体并入「运行总览」（4 tab → 2）：去掉重复的 summary-grid，直接接在运行总览下方 -->
       <section
-        v-if="activeWorkspaceTab === 'agents'"
-        id="workspace-panel-agents"
-        role="tabpanel"
-        aria-labelledby="workspace-tab-agents"
-        class="workspace-panel"
+        v-if="activeWorkspaceTab === 'overview'"
+        class="workspace-panel workspace-panel-merged"
       >
-        <div class="summary-grid">
-          <article class="summary-card">
-            <span>代理体范围</span>
-            <strong>{{ activeAgentCount }}</strong>
-            <p>{{ environmentEffectCount }} 条人地作用</p>
-          </article>
-          <article class="summary-card">
-            <span>子区域热度</span>
-            <strong>{{ subregionRows.length }}</strong>
-            <p>{{ formatScoreKeyLabel(subregionHeatKey) }} 作为当前热区维度。</p>
-          </article>
-          <article class="summary-card">
-            <span>交互视图</span>
-            <strong>{{ agentInteractions.length }}</strong>
-            <p>{{ agentInteractionScopeLabel }}</p>
-          </article>
-          <article class="summary-card">
-            <span>领先代理体</span>
-            <strong>{{ agentRows[0]?.name || '等待排序' }}</strong>
-            <p>{{ agentRows[0] ? `${agentRows[0].regionLabel || '区域 n/a'} · ${agentRows[0].subregionLabel || '子区域 n/a'}` : '等待 agent 快照。' }}</p>
-          </article>
-        </div>
-
         <section class="multi-agent-panel stage-panel">
           <div class="panel-title-row">
             <h3>多代理体工作台</h3>
@@ -794,35 +736,12 @@
         </div>
       </section>
 
-      <section
-        v-if="activeWorkspaceTab === 'inject'"
-        id="workspace-panel-inject"
-        role="tabpanel"
-        aria-labelledby="workspace-tab-inject"
-        class="workspace-panel"
-      >
-        <div class="summary-grid">
-          <article class="summary-card accent">
-            <span>注入队列</span>
-            <strong>{{ interventionRows.length }}</strong>
-            <p>{{ interventionRows[0]?.name || '还没有变量记录。' }}</p>
-          </article>
-          <article class="summary-card">
-            <span>生效变量</span>
-            <strong>{{ activeVariableRows.length }}</strong>
-            <p>{{ activeVariableRows[0]?.summary || '当前没有处于生效窗口的变量。' }}</p>
-          </article>
-          <article class="summary-card">
-            <span>系统日志</span>
-            <strong>{{ systemLogs?.length || 0 }}</strong>
-            <p>{{ systemLogs?.[systemLogs.length - 1]?.msg || '等待运行日志。' }}</p>
-          </article>
-          <article class="summary-card">
-            <span>当前轮次</span>
-            <strong>{{ currentRoundNumber }}</strong>
-            <p>{{ runMessage || '变量会以当前轮次为基准插入。' }}</p>
-          </article>
-        </div>
+      <!-- 变量注入收进高级抽屉（写操作，不占主线流程）；去掉重复 summary-grid -->
+      <details class="inject-drawer">
+        <summary class="inject-drawer-summary">
+          <span class="inject-drawer-title">变量注入（高级）</span>
+          <span class="hint">中途注入 · 变量记录 · 系统日志 · {{ interventionRows.length }} 条</span>
+        </summary>
 
         <div class="inject-grid">
           <section class="panel injection-panel">
@@ -961,7 +880,7 @@
             </div>
           </section>
         </div>
-      </section>
+      </details>
     </section>
   </div>
 </template>
@@ -1266,13 +1185,35 @@ const subregionRows = computed(() => {
     .sort((a, b) => b.selectedScore - a.selectedScore)
 })
 
+// 区域/子区域 ID → 名称查表：代理体卡与交互卡别再裸露 jianghan_market_corridor 这类 slug
+const regionNameById = computed(() => {
+  const m = new Map()
+  ;[...regionRows.value, ...subregionRows.value].forEach(r => {
+    if (r?.id) m.set(String(r.id), r.name)
+  })
+  return m
+})
+function resolveRegionName(raw) {
+  if (raw === null || raw === undefined || raw === '') return ''
+  const key = String(raw)
+  return regionNameById.value.get(key)
+    || regionNameById.value.get(key.split('::')[0])
+    || translateDisplayToken(raw, raw)
+}
+
 const agentRows = computed(() => {
   const source = latestSnapshot.value || runDetail.value
-  return normalizeAgentRows(source, selectedScoreKey.value).sort((a, b) => {
-    const scoreDelta = b.vulnerability_score - a.vulnerability_score
-    if (scoreDelta !== 0) return scoreDelta
-    return b.selectedScore - a.selectedScore
-  })
+  return normalizeAgentRows(source, selectedScoreKey.value)
+    .map(a => ({
+      ...a,
+      regionLabel: resolveRegionName(a.regionLabel),
+      subregionLabel: resolveRegionName(a.subregionLabel)
+    }))
+    .sort((a, b) => {
+      const scoreDelta = b.vulnerability_score - a.vulnerability_score
+      if (scoreDelta !== 0) return scoreDelta
+      return b.selectedScore - a.selectedScore
+    })
 })
 
 const selectedRoundInteractions = computed(() => {
@@ -1281,14 +1222,21 @@ const selectedRoundInteractions = computed(() => {
 })
 
 const agentInteractions = computed(() => {
+  const resolveRegions = (list) => list.map(i => ({
+    ...i,
+    sourceRegion: resolveRegionName(i.sourceRegion),
+    targetRegion: resolveRegionName(i.targetRegion)
+  }))
   if (selectedRoundInteractions.value.length > 0) {
-    return selectedRoundInteractions.value
+    return resolveRegions(selectedRoundInteractions.value)
   }
 
   const maxRound = currentRoundNumber.value || Number.MAX_SAFE_INTEGER
-  return normalizeAgentInteractions(runDetail.value)
-    .filter(item => (item.round || 0) <= maxRound)
-    .sort(sortByRoundDesc)
+  return resolveRegions(
+    normalizeAgentInteractions(runDetail.value)
+      .filter(item => (item.round || 0) <= maxRound)
+      .sort(sortByRoundDesc)
+  )
 })
 
 const latestInteraction = computed(() => agentInteractions.value[0] || null)
@@ -1552,28 +1500,14 @@ const workspaceTabs = computed(() => {
       index: '01',
       label: '运行总览',
       meta: `${selectedRoundLabel.value} · ${progressPercent.value}%`,
-      note: '播放控制、区域矩阵、扩散与反馈'
-    },
-    {
-      value: 'agents',
-      index: '02',
-      label: '多智能体',
-      meta: `${agentRows.value.length} agents`,
-      note: 'subregion heat、agent 排行、interaction ledger'
+      note: '播放控制、区域脉冲、多智能体互动'
     },
     {
       value: 'risk',
-      index: '03',
-      label: '风险链路',
-      meta: riskObjects.value.length > 0 ? `${riskObjects.value.length} objects` : '等待生成',
-      note: 'risk object、关联实体、作用区域'
-    },
-    {
-      value: 'inject',
-      index: '04',
-      label: '变量注入',
-      meta: `${interventionRows.value.length} records`,
-      note: '中途注入、变量记录、系统日志'
+      index: '02',
+      label: '关系与风险',
+      meta: riskObjects.value.length > 0 ? `${riskObjects.value.length} 个风险对象` : '等待生成',
+      note: '风险对象、关联实体、作用区域'
     }
   ]
 })
@@ -1784,7 +1718,7 @@ function normalizeRegionRows(source) {
       }
       const name = item.region || item.region_name || item.name || item.label || item.id || `region_${idx}`
       rows.push({
-        id: item.id || `${name}-${idx}`,
+        id: item.region_id || item.id || `${name}-${idx}`,
         name,
         tagline: item.region_type || item.category || item.type || '',
         exposure_score: normalizeScore(item.exposure_score ?? item.exposure ?? 0),
@@ -2006,20 +1940,28 @@ function normalizeAgentInteractions(source) {
 
   if (!Array.isArray(raw)) return []
 
-  return raw.map((item, idx) => ({
-    id: item.id || `${item.round || item.round_num || idx}-${idx}`,
-    round: item.round || item.round_num || idx + 1,
-    channel: translateDisplayToken(item.channel || item.interaction_channel || 'social', '社会'),
-    sourceName: item.source_agent_name || item.source_name || item.agent_name || `agent_${item.source_agent_id ?? idx}`,
-    targetName: item.target_agent_name || item.target_name || '',
-    sourceRegion: item.source_region_name || item.source_region || item.region || '',
-    targetRegion: item.target_region_name || item.target_region || '',
-    actionType: translateDisplayToken(item.action_type || item.type || '', ''),
-    actionLabel: translateDisplayToken(item.action_type || item.type || 'interaction', '交互'),
-    rationale: item.rationale || item.description || item.note || 'agent interaction',
-    targetDeltaLabel: formatDeltaLabel(item.delta || item.target_delta || {}),
-    summary: item.summary || item.description || item.rationale || item.note || 'agent interaction'
-  }))
+  return raw.map((item, idx) => {
+    // 清洗叙述句里嵌入的内部渠道 token（如 governance_hierarchy → 治理层级）
+    const rawChannel = String(item.channel || item.interaction_channel || '').trim()
+    const cleanText = (text) => {
+      const s = String(text || '')
+      return rawChannel ? s.split(rawChannel).join(translateDisplayToken(rawChannel, rawChannel)) : s
+    }
+    return {
+      id: item.id || `${item.round || item.round_num || idx}-${idx}`,
+      round: item.round || item.round_num || idx + 1,
+      channel: translateDisplayToken(rawChannel || 'social', '社会'),
+      sourceName: item.source_agent_name || item.source_name || item.agent_name || `agent_${item.source_agent_id ?? idx}`,
+      targetName: item.target_agent_name || item.target_name || '',
+      sourceRegion: item.source_region_name || item.source_region || item.region || '',
+      targetRegion: item.target_region_name || item.target_region || '',
+      actionType: translateDisplayToken(item.action_type || item.type || '', ''),
+      actionLabel: translateDisplayToken(item.action_type || item.type || 'interaction', '交互'),
+      rationale: cleanText(item.rationale || item.description || item.note || 'agent interaction'),
+      targetDeltaLabel: formatDeltaLabel(item.delta || item.target_delta || {}),
+      summary: cleanText(item.summary || item.description || item.rationale || item.note || 'agent interaction')
+    }
+  })
 }
 
 function normalizeInterventionRows(raw, defaultStatus = 'configured') {
@@ -2117,7 +2059,7 @@ function formatDeltaLabel(delta) {
   const entries = Object.entries(delta).filter(([, value]) => Number(value) !== 0)
   if (entries.length === 0) return ''
   const [key, value] = entries[0]
-  return `${String(key).replace(/_/g, ' ')} ${Number(value).toFixed(1)}`
+  return `${translateDisplayToken(key, String(key).replace(/_/g, ' '))} ${Number(value).toFixed(1)}`
 }
 
 function normalizeEvents(source) {
@@ -2956,6 +2898,41 @@ onUnmounted(() => {
   display: flex;
   flex-direction: column;
   gap: 14px;
+}
+
+/* 多智能体并入运行总览后，加一条分隔让两段视觉上分组 */
+.workspace-panel-merged {
+  margin-top: 4px;
+  padding-top: 18px;
+  border-top: 1px dashed rgba(29, 39, 58, 0.1);
+}
+
+/* 变量注入高级抽屉 */
+.inject-drawer {
+  margin-top: 14px;
+  border: 1px solid rgba(29, 39, 58, 0.1);
+  border-radius: 18px;
+  background: rgba(248, 250, 253, 0.7);
+  padding: 4px 18px;
+}
+
+.inject-drawer[open] {
+  padding-bottom: 18px;
+}
+
+.inject-drawer-summary {
+  cursor: pointer;
+  list-style-position: inside;
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  padding: 12px 0;
+}
+
+.inject-drawer-title {
+  font-size: 15px;
+  font-weight: 700;
+  color: #1d273a;
 }
 
 .summary-grid {

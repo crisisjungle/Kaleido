@@ -367,31 +367,7 @@
         </div>
 
 
-        <div class="catalog">
-          <div class="panel-title-row">
-            <h3>区域与代理体归属</h3>
-            <span class="hint">按主区域和影响范围汇总；未生成前仅显示区域骨架</span>
-          </div>
-          <div v-if="regionAnchorMatrix.length > 0" class="relation-grid">
-            <article v-for="region in regionAnchorMatrix" :key="region.regionKey" class="relation-card">
-              <div class="region-card-head">
-                <div>
-                  <div class="region-card-index mono">R{{ region.rank }}</div>
-                  <strong>{{ region.displayName }}</strong>
-                </div>
-                <span class="region-card-type">{{ region.agentCount }} 个代理体</span>
-              </div>
-              <p>{{ region.summary }}</p>
-              <div class="chip-wrap">
-                <span v-for="family in region.topFamilies" :key="family" class="chip">{{ family }}</span>
-                <span v-if="region.topFamilies.length === 0" class="empty-chip">暂无分类聚合</span>
-              </div>
-            </article>
-          </div>
-          <div v-else class="empty-state">
-            当前还没有可用的区域锚点，系统会在配置完成后补全关系矩阵。
-          </div>
-        </div>
+        <!-- 区域与代理体归属矩阵已并入「区域划分」tab（同源 regionAnchorMatrix），此处不再重复渲染 -->
 
         <div class="catalog" v-if="relationSummary.sampleEdges.length > 0">
           <div class="catalog-title">关系样例</div>
@@ -724,18 +700,20 @@
       </div>
     </section>
 
-    <section class="log-shell">
-      <div class="panel-title-row">
-        <h3>系统日志</h3>
-        <span class="hint mono">{{ simulationId || '未生成模拟' }}</span>
-      </div>
+    <details class="log-shell">
+      <summary class="log-summary">
+        <div class="panel-title-row">
+          <h3>系统日志</h3>
+          <span class="hint mono">{{ simulationId || '未生成模拟' }}</span>
+        </div>
+      </summary>
       <div class="logs">
         <div v-for="(log, index) in systemLogs" :key="index" class="log-line">
           <span class="log-time">{{ log.time }}</span>
           <span class="log-msg">{{ log.msg }}</span>
         </div>
       </div>
-    </section>
+    </details>
   </div>
 </template>
 
@@ -3072,7 +3050,12 @@ function summarizeRelations(edges) {
     if (sampleEdges.length < 6) {
       const source = getEdgeEndpoint(edge, ['source', 'from', 'head'], lookup)
       const target = getEdgeEndpoint(edge, ['target', 'to', 'tail'], lookup)
-      const channelLabel = humanizeSnakeCase(channel, 'general')
+      const channelLabel = translateDisplayToken(channel, humanizeSnakeCase(channel, '综合'))
+      // 清洗 rationale 句子里嵌入的内部渠道 token（如 governance_hierarchy）
+      const rawRationale = toDisplayString(edge?.rationale || '', '')
+      const rationale = channel
+        ? rawRationale.split(channel).join(translateDisplayToken(channel, channelLabel))
+        : rawRationale
       sampleEdges.push({
         key: `${label}-${index}`,
         label,
@@ -3081,7 +3064,7 @@ function summarizeRelations(edges) {
         summary: source && target
           ? `${source} ${relationMeta.displayLabel} ${target}`
           : source || target || '关系边',
-        rationale: toDisplayString(edge?.rationale || '', ''),
+        rationale,
         channelLabel,
         strengthLabel: Number.isFinite(Number(edge?.strength)) ? Number(edge.strength).toFixed(2) : ''
       })
@@ -3092,7 +3075,7 @@ function summarizeRelations(edges) {
     total: (edges || []).length,
     crossRegionCount,
     channels: Array.from(channelCounts.entries())
-      .map(([label, count]) => ({ label, count, displayLabel: humanizeSnakeCase(label, '综合') }))
+      .map(([label, count]) => ({ label, count, displayLabel: translateDisplayToken(label, humanizeSnakeCase(label, '综合')) }))
       .sort((left, right) => right.count - left.count),
     types: Array.from(labelCounts.entries())
       .map(([label, count]) => ({
@@ -4705,6 +4688,17 @@ textarea {
   min-height: 0;
 }
 
+.log-summary {
+  cursor: pointer;
+  list-style-position: inside;
+}
+
+.log-summary .panel-title-row {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+}
+
 .logs {
   display: flex;
   flex-direction: column;
@@ -4712,6 +4706,7 @@ textarea {
   max-height: 180px;
   overflow: auto;
   padding-right: 4px;
+  margin-top: 12px;
 }
 
 .log-line {

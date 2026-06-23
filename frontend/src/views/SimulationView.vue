@@ -82,7 +82,7 @@ const props = defineProps({
 })
 
 // Layout State
-const viewMode = ref('split')
+const viewMode = ref('split') // Step3 推演：图谱是主角，默认展示（可一键收起）
 
 // Data State
 const currentSimulationId = ref(route.params.simulationId)

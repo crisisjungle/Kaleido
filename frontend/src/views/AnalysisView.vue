@@ -6,6 +6,9 @@
       </div>
 
       <div class="header-right">
+        <button class="layout-toggle" @click="toggleGraphCollapse">
+          {{ viewMode === 'workbench' ? '◧ 展开图谱' : '▣ 收起图谱' }}
+        </button>
         <WorkflowStepMenu :current-step="4" current-name="结果分析" />
         <div class="step-divider"></div>
         <span class="status-indicator" :class="statusClass">
@@ -686,7 +689,7 @@ const tabs = [
   { id: 'report', label: '报告' },
 ]
 
-const viewMode = ref('split')
+const viewMode = ref('workbench') // 默认全宽，图谱可一键展开
 const reportId = ref(route.params.reportId)
 const simulationId = ref('')
 const graphId = ref('')
@@ -982,6 +985,11 @@ const toggleMaximize = (target) => {
   } else {
     viewMode.value = target
   }
+}
+
+// 收起/展开左侧图谱：收起后右栏内容全宽铺开（解决 50/50 挤压）
+const toggleGraphCollapse = () => {
+  viewMode.value = viewMode.value === 'workbench' ? 'split' : 'workbench'
 }
 
 const metricWidth = (value) => {
@@ -1570,6 +1578,26 @@ onBeforeUnmount(() => {
 .header-right {
   display: flex;
   align-items: center;
+  gap: 16px;
+}
+
+.layout-toggle {
+  border: 1px solid rgba(16, 35, 29, 0.12);
+  background: rgba(255, 255, 255, 0.78);
+  padding: 6px 14px;
+  font-size: 12px;
+  font-weight: 600;
+  color: #10231D;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: all 0.18s ease;
+  font-family: inherit;
+  white-space: nowrap;
+}
+
+.layout-toggle:hover {
+  background: #FFF;
+  box-shadow: 0 4px 12px rgba(16, 35, 29, 0.1);
 }
 
 .status-indicator {

@@ -5,6 +5,10 @@ const TOKEN_MAP = {
   // —— 场景/模式 ——
   baseline_mode: '基线态', crisis_mode: '灾难态',
   legacy_envfish_v1: '经典推演', llm_mechanism_v1: '机制推演',
+  // —— 扩散/传播模板 ——
+  bio_ecological_transmission: '生物生态传播', marine: '海洋扩散',
+  atmospheric_dispersion: '大气扩散', hydrological_flow: '水文流动',
+  human_mobility: '人口流动', supply_chain_propagation: '供应链传导',
   // —— 干预/变量类型 ——
   policy: '政策', disaster: '灾害', restrict: '限制', relocate: '迁移',
   subsidize: '补贴', monitor: '监测', disclose: '披露', repair: '修复',
@@ -25,6 +29,10 @@ const TOKEN_MAP = {
   infrastructure: '基础设施', science_city: '科学城', 'science city': '科学城',
   protected_area: '保护区', 'protected area': '保护区',
   cross_border: '跨边界', 'cross border': '跨边界',
+  support_belt: '支撑带', transport_belt: '交通带', industrial_belt: '工业带',
+  ecological_belt: '生态带', residential_belt: '居住带',
+  urban_core: '城市核心', civic: '公共服务', mixed_use: '混合功能',
+  near: '近距', mid: '中距', far: '远距',
   // —— 主体/节点类型（图例、节点详情都用到）——
   government: '政府', governance: '治理', organization: '组织', human: '个体',
   ecology: '生态', actor: '行动者', entity: '实体', Entity: '实体',
@@ -48,10 +56,16 @@ const TOKEN_MAP = {
   transmits_to: '向下游传导', competes_for: '竞争资源', depends_on: '依赖',
   regulates: '调控', exposes: '暴露', amplifies: '放大', mitigates: '缓解',
   triggers: '触发', approaches_threshold: '逼近阈值', triggers_collapse: '触发崩溃',
+  collaborates_with: '协作', 'collaborates with': '协作', collaborates: '协作',
+  supports: '支持', uses: '使用', coordinates: '协调', collaborate: '协作',
+  coordinate: '协调', inform: '通知', request: '请求', escalate: '上报',
+  comply: '配合', mobilize: '动员', interaction: '交互',
   // —— 互动/传播渠道 ——
   water_flow: '水流', information: '信息', social: '社会', community: '社区',
   economic: '经济', mechanism: '机制', transport: '交通',
   ecology_corridor_signal: '生态廊道', governance_hierarchy: '治理层级',
+  local_contact: '就近接触', health_response: '卫生响应', supply_chain: '供应链',
+  media_reach: '媒体触达', physical_contact: '物理接触', information_flow: '信息流',
   // —— 状态向量字段（节点详情）——
   exposure_score: '暴露度', spread_pressure: '扩散压力', panic_level: '恐慌度',
   vulnerability_score: '脆弱性', ecosystem_integrity: '生态完整度',
@@ -134,7 +148,8 @@ export function formatFieldLabelZh(key, fallback = '') {
 export function formatDistanceLabelZh(value) {
   if (value === null || value === undefined || value === '') return ''
   const number = Number(value)
-  if (!Number.isFinite(number)) return String(value)
+  // 分类型距离带（near/mid/far 等）走中文清洗层，不再裸露英文
+  if (!Number.isFinite(number)) return translateDisplayToken(value, String(value))
   if (Math.abs(number) >= 1000) return `${(number / 1000).toFixed(1)} km`
   return `${Math.round(number)} m`
 }

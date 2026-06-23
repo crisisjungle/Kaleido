@@ -7,6 +7,9 @@
       </div>
 
       <div class="header-right">
+        <button class="layout-toggle" @click="toggleGraphCollapse">
+          {{ viewMode === 'workbench' ? '◧ 展开图谱' : '▣ 收起图谱' }}
+        </button>
         <WorkflowStepMenu :current-step="3" current-name="推演播放" />
         <div class="step-divider"></div>
         <span class="status-indicator" :class="statusClass">
@@ -85,7 +88,7 @@ const props = defineProps({
 })
 
 // Layout State
-const viewMode = ref('split')
+const viewMode = ref('split') // Step3 推演：图谱是主角，默认展示（可一键收起）
 
 // Data State
 const currentSimulationId = ref(route.params.simulationId)
@@ -206,11 +209,21 @@ const buildTimelineState = (state = {}, frame = {}, maxDelay = 0, focusIds = new
     ? 0
     : Math.max(0, Math.min(1, (elapsed - timelineDelay) / revealWindow))
   const isDue = progress > 0
+  // 已建立的背景网络（steady）必须常显（淡）——不能因为"本帧不参与脉冲"被判成 hidden，
+  // 否则回放时整张关系网消失、只剩本轮的几个脉冲节点（"显示不出来"的根因）。
+  // 只有尚未揭示的 new/active 才在到达各自揭示时刻前暂隐。
   let visualStatus = rawStatus
-  if (!isDue) {
+  let revealProgress = progress
+  let due = isDue
+  if (rawStatus === 'hidden') {
     visualStatus = 'hidden'
   } else if (rawStatus === 'steady') {
-    visualStatus = 'faded'
+    // 已建立的背景网络：完整可见（不再淡到看不见），脉冲交给 new/active 高亮
+    visualStatus = 'steady'
+    revealProgress = 1
+    due = true
+  } else if (!isDue) {
+    visualStatus = 'hidden'
   }
 
   return {
@@ -220,8 +233,8 @@ const buildTimelineState = (state = {}, frame = {}, maxDelay = 0, focusIds = new
     delay_ms: timelineDelay,
     timeline_delay_ms: timelineDelay,
     animation_elapsed_ms: elapsed,
-    animation_progress: progress,
-    animation_due: isDue
+    animation_progress: revealProgress,
+    animation_due: due
   }
 }
 
@@ -748,6 +761,11 @@ const toggleMaximize = (target) => {
   }
 }
 
+// 收起/展开左侧图谱：收起后右栏内容全宽铺开（解决 50/50 挤压）
+const toggleGraphCollapse = () => {
+  viewMode.value = viewMode.value === 'workbench' ? 'split' : 'workbench'
+}
+
 const handleGoBack = async () => {
   // 在返回 Step 2 之前，先关闭正在运行的模拟
   addLog('准备返回 Step 2，正在关闭模拟...')
@@ -1156,6 +1174,25 @@ onUnmounted(() => {
   display: flex;
   align-items: center;
   gap: 16px;
+}
+
+.layout-toggle {
+  border: 1px solid rgba(16, 35, 29, 0.12);
+  background: rgba(255, 255, 255, 0.78);
+  padding: 6px 14px;
+  font-size: 12px;
+  font-weight: 600;
+  color: #10231D;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: all 0.18s ease;
+  font-family: inherit;
+  white-space: nowrap;
+}
+
+.layout-toggle:hover {
+  background: #FFF;
+  box-shadow: 0 4px 12px rgba(16, 35, 29, 0.1);
 }
 
 .workflow-step {
