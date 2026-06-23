@@ -66,7 +66,7 @@
                   <strong>{{ overview.default_round || 0 }}</strong>
                 </div>
                 <div class="hero-metric">
-                  <span class="metric-label">Agents</span>
+                  <span class="metric-label">代理体</span>
                   <strong>{{ overview.node_stats?.agent_count || 0 }}</strong>
                 </div>
                 <div class="hero-metric">
@@ -82,7 +82,7 @@
                   <strong>{{ overview.node_stats?.risk_object_count || 0 }}</strong>
                 </div>
                 <div class="hero-metric">
-                  <span class="metric-label">Emergent</span>
+                  <span class="metric-label">涌现关系</span>
                   <strong>{{ overview.node_stats?.dynamic_edge_count || 0 }}</strong>
                 </div>
               </div>
@@ -163,7 +163,7 @@
                         <div class="metric-card-head">
                           <div>
                             <h4>{{ region.name }}</h4>
-                            <p>{{ region.region_type || 'region' }}</p>
+                            <p>{{ translateDisplayToken(region.region_type, '区域') }}</p>
                           </div>
                           <span class="metric-pill">{{ formatMetricValue(region[selectedMetric]) }}</span>
                         </div>
@@ -189,7 +189,7 @@
                         <div class="metric-card-head">
                           <div>
                             <h4>{{ subregion.name }}</h4>
-                            <p>{{ subregion.parent_region_id || subregion.region_type || 'subregion' }}</p>
+                            <p>{{ resolveRegionName(subregion.parent_region_id) || translateDisplayToken(subregion.region_type, '子区域') }}</p>
                           </div>
                           <span class="metric-pill">{{ formatMetricValue(subregion[selectedMetric]) }}</span>
                         </div>
@@ -277,7 +277,7 @@
                     </div>
                     <div class="secondary-list">
                       <article v-for="item in mechanismsTab.round_reasoning || []" :key="item.round" class="secondary-card">
-                        <strong>Round {{ item.round }} · {{ item.llm_participation || 'recorded' }}</strong>
+                        <strong>第 {{ item.round }} 轮 · {{ translateDisplayToken(item.llm_participation, '已记录') }}</strong>
                         <p>{{ item.summary || item.reasoning_summary || item.fallback_reason }}</p>
                       </article>
                     </div>
@@ -309,8 +309,8 @@
                   <article v-for="item in feedbackTab.items || []" :key="item.id" class="feedback-card">
                     <div class="feedback-card-head">
                       <div>
-                        <h4>{{ item.region_name || item.region_id || '未命名节点' }}</h4>
-                        <p>Round {{ item.round || feedbackTab.current_round }}</p>
+                        <h4>{{ item.region_name || resolveRegionName(item.region_id) || '反馈传播链' }}</h4>
+                        <p>第 {{ item.round || feedbackTab.current_round }} 轮</p>
                       </div>
                       <span class="source-chip">{{ item.source_type }}</span>
                     </div>
@@ -320,7 +320,7 @@
                         {{ feedbackDeltaLabel(key) }} {{ formatDelta(value) }}
                       </span>
                     </div>
-                    <div class="feedback-source">{{ item.source }}</div>
+                    <div v-if="item.source && !isInternalSourcePath(item.source)" class="feedback-source">{{ item.source }}</div>
                   </article>
                 </section>
                 <section v-if="feedbackTab?.ecological_impacts?.length" class="secondary-section">
@@ -382,7 +382,7 @@
                   <article v-for="round in narrativeTab.rounds || []" :key="round.round" class="narrative-card">
                     <div class="narrative-head">
                       <div>
-                        <h3>Round {{ round.round }}</h3>
+                        <h3>第 {{ round.round }} 轮</h3>
                         <p>{{ formatTimestamp(round.timestamp) }}</p>
                       </div>
                       <div class="narrative-head-tags">
@@ -675,6 +675,7 @@ import {
 } from '../api/report'
 import { getSimulationAnimation } from '../api/simulation'
 import { markWorkflowStep } from '../store/workflowNavigation'
+import { translateDisplayToken } from '../utils/displayText'
 
 const route = useRoute()
 const router = useRouter()
@@ -997,8 +998,29 @@ const metricWidth = (value) => {
   return `${Math.max(0, Math.min(100, safe))}%`
 }
 
+// 区域 ID（slug/uuid）→ 真实名称查表，杜绝 jianghan_market_corridor / 未命名节点 之类泄漏
+const regionNameById = computed(() => {
+  const map = {}
+  const add = (list) => {
+    ;(list || []).forEach(r => {
+      const id = r?.region_id || r?.id || r?.uuid
+      const name = r?.name || r?.region_name
+      if (id && name) map[String(id)] = name
+    })
+  }
+  add(currentRoundSnapshot.value?.regions)
+  add(currentRoundSnapshot.value?.subregions)
+  add(regionsTab.value?.regions)
+  add(regionsTab.value?.subregions)
+  add(graphData.value?.nodes)
+  return map
+})
+const resolveRegionName = (id) => (id ? (regionNameById.value[String(id)] || '') : '')
+// 内部点分路径（latest_snapshot.feedback.xxx）不上屏
+const isInternalSourcePath = (text) => /^[a-z0-9_]+(\.[a-z0-9_]+)+$/i.test(String(text || '').trim())
+
 const formatMetricValue = (value) => {
-  if (value === null || value === undefined || value === '') return 'NA'
+  if (value === null || value === undefined || value === '') return '暂无'
   const num = Number(value)
   return Number.isFinite(num) ? num.toFixed(1) : value
 }
