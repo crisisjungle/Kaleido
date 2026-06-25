@@ -112,7 +112,11 @@
               </div>
 
               <template v-else-if="activeTab === 'regions'">
-                <section class="control-bar" v-if="regionsTab">
+                <div class="subview-switch">
+                  <button type="button" :class="{ active: regionRolesView === 'regions' }" @click="setRegionRolesView('regions')">区域态势</button>
+                  <button type="button" :class="{ active: regionRolesView === 'roles' }" @click="setRegionRolesView('roles')">角色透镜</button>
+                </div>
+                <section class="control-bar" v-if="regionsTab" v-show="regionRolesView === 'regions'">
                   <div class="control-group">
                     <span class="control-label">指标</span>
                     <select v-model="selectedMetric" class="control-select">
@@ -142,7 +146,7 @@
                   </div>
                 </section>
 
-                <section v-if="currentRoundSnapshot" class="region-layout">
+                <section v-if="currentRoundSnapshot" v-show="regionRolesView === 'regions'" class="region-layout">
                   <div class="metric-highlight">
                     <div class="metric-highlight-head">
                       <span class="metric-highlight-title">区域态势</span>
@@ -199,6 +203,40 @@
                       </article>
                     </div>
                   </div>
+                </section>
+                <section class="role-grid" v-if="rolesTab" v-show="regionRolesView === 'roles'">
+                  <article v-for="group in rolesTab.groups || []" :key="group.group_id" class="role-card">
+                    <div class="role-card-head">
+                      <div>
+                        <h3>{{ group.title }}</h3>
+                        <p>{{ group.description }}</p>
+                      </div>
+                      <span class="metric-pill">{{ group.node_count }} 个节点</span>
+                    </div>
+                    <div class="role-metrics">
+                      <div v-for="metric in group.focus_metrics || []" :key="metric.key" class="role-metric-item">
+                        <span>{{ metric.label }}</span>
+                        <strong>{{ formatMetricValue(group.metric_averages?.[metric.key]) }}</strong>
+                      </div>
+                    </div>
+                    <div class="role-subsection">
+                      <span class="subsection-title">代表节点</span>
+                      <div class="chip-wrap">
+                        <span v-for="node in group.sample_nodes || []" :key="`${group.group_id}-${node.agent_id || node.name}`" class="data-chip">
+                          {{ node.name }}
+                        </span>
+                      </div>
+                    </div>
+                    <div class="role-subsection" v-if="group.dominant_regions?.length">
+                      <span class="subsection-title">主受影响区域</span>
+                      <div class="region-score-list">
+                        <div v-for="region in group.dominant_regions" :key="`${group.group_id}-${region.region_name}`" class="region-score-item">
+                          <span>{{ resolveRegionName(region.region_name) || region.region_name }}</span>
+                          <strong>{{ formatMetricValue(region.score) }}</strong>
+                        </div>
+                      </div>
+                    </div>
+                  </article>
                 </section>
               </template>
 
@@ -336,43 +374,6 @@
                       <p>{{ item.note }}</p>
                     </article>
                   </div>
-                </section>
-              </template>
-
-              <template v-else-if="activeTab === 'roles'">
-                <section class="role-grid" v-if="rolesTab">
-                  <article v-for="group in rolesTab.groups || []" :key="group.group_id" class="role-card">
-                    <div class="role-card-head">
-                      <div>
-                        <h3>{{ group.title }}</h3>
-                        <p>{{ group.description }}</p>
-                      </div>
-                      <span class="metric-pill">{{ group.node_count }} 个节点</span>
-                    </div>
-                    <div class="role-metrics">
-                      <div v-for="metric in group.focus_metrics || []" :key="metric.key" class="role-metric-item">
-                        <span>{{ metric.label }}</span>
-                        <strong>{{ formatMetricValue(group.metric_averages?.[metric.key]) }}</strong>
-                      </div>
-                    </div>
-                    <div class="role-subsection">
-                      <span class="subsection-title">代表节点</span>
-                      <div class="chip-wrap">
-                        <span v-for="node in group.sample_nodes || []" :key="`${group.group_id}-${node.agent_id || node.name}`" class="data-chip">
-                          {{ node.name }}
-                        </span>
-                      </div>
-                    </div>
-                    <div class="role-subsection" v-if="group.dominant_regions?.length">
-                      <span class="subsection-title">主受影响区域</span>
-                      <div class="region-score-list">
-                        <div v-for="region in group.dominant_regions" :key="`${group.group_id}-${region.region_name}`" class="region-score-item">
-                          <span>{{ region.region_name }}</span>
-                          <strong>{{ formatMetricValue(region.score) }}</strong>
-                        </div>
-                      </div>
-                    </div>
-                  </article>
                 </section>
               </template>
 
@@ -682,13 +683,13 @@ import { translateDisplayToken } from '../utils/displayText'
 const route = useRoute()
 const router = useRouter()
 
+// 7 tab → 4：轮次叙事为主 + 反馈环 + 区域·角色(合并) + 节点探索；机制/报告靠后
 const tabs = [
-  { id: 'regions', label: '区域态势' },
-  { id: 'mechanisms', label: '机制推演' },
-  { id: 'feedback', label: '反馈环' },
-  { id: 'roles', label: '角色透镜' },
   { id: 'narrative', label: '轮次叙事' },
+  { id: 'feedback', label: '反馈环' },
+  { id: 'regions', label: '区域·角色' },
   { id: 'node-explore', label: '节点探索' },
+  { id: 'mechanisms', label: '机制推演' },
   { id: 'report', label: '报告' },
 ]
 
@@ -707,7 +708,8 @@ const overview = ref(null)
 const overviewLoading = ref(false)
 const overviewError = ref('')
 
-const activeTab = ref('regions')
+const activeTab = ref('narrative') // 轮次叙事为主
+const regionRolesView = ref('regions') // 「区域·角色」合并 tab 的子视图：regions | roles
 const loadedTabs = ref(new Set())
 const tabData = ref({
   regions: null,
@@ -778,6 +780,11 @@ const mechanismsTab = computed(() => tabData.value.mechanisms)
 const feedbackTab = computed(() => tabData.value.feedback)
 const rolesTab = computed(() => tabData.value.roles)
 const narrativeTab = computed(() => tabData.value.narrative)
+// 「区域·角色」子视图切换；切到角色时按需加载 roles 数据
+const setRegionRolesView = (view) => {
+  regionRolesView.value = view
+  if (view === 'roles') ensureTabLoaded('roles')
+}
 // 机制空则折叠：没有任何机制工件时，只显示一句说明，不再渲染 5 个空段
 const mechanismHasDetail = computed(() => {
   const m = mechanismsTab.value
@@ -1195,8 +1202,9 @@ const resolveAnalysisStatus = (data) => {
 }
 
 const normalizeTab = (value) => {
+  if (value === 'roles') return 'regions' // 角色透镜已并入「区域·角色」
   const valid = new Set(tabs.map(tab => tab.id))
-  return valid.has(value) ? value : 'regions'
+  return valid.has(value) ? value : 'narrative'
 }
 
 const refreshGraph = async () => {
@@ -1290,8 +1298,12 @@ const loadOverview = async () => {
 
     const nextTab = normalizeTab(route.query.tab)
     activeTab.value = nextTab
+    if (route.query.tab === 'roles') regionRolesView.value = 'roles'
     if (nextTab !== 'node-explore') {
       await ensureTabLoaded(nextTab)
+    }
+    if (nextTab === 'regions' && regionRolesView.value === 'roles') {
+      await ensureTabLoaded('roles')
     }
     startOverviewPolling()
   } catch (err) {
@@ -1490,6 +1502,7 @@ watch(
 watch(
   () => route.query.tab,
   async (tab) => {
+    if (tab === 'roles') setRegionRolesView('roles')
     const normalized = normalizeTab(tab)
     if (normalized !== activeTab.value) {
       activeTab.value = normalized
@@ -1774,6 +1787,35 @@ onBeforeUnmount(() => {
   display: flex;
   flex-wrap: wrap;
   gap: 10px;
+}
+
+/* 「区域·角色」合并 tab 内的子视图切换 */
+.subview-switch {
+  display: inline-flex;
+  gap: 4px;
+  padding: 4px;
+  margin-bottom: 14px;
+  border: 1px solid rgba(148, 163, 184, 0.28);
+  border-radius: 999px;
+  background: rgba(248, 250, 253, 0.8);
+}
+
+.subview-switch button {
+  border: none;
+  background: transparent;
+  padding: 7px 18px;
+  border-radius: 999px;
+  font-size: 13px;
+  font-weight: 700;
+  color: #64748b;
+  cursor: pointer;
+  transition: all 0.18s ease;
+  font-family: inherit;
+}
+
+.subview-switch button.active {
+  background: #102a43;
+  color: #ffffff;
 }
 
 .tab-btn {
