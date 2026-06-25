@@ -85,7 +85,7 @@ const TOKEN_MAP = {
   map_seed_grounded: '地图接地', local_fallback: '本地回退',
   // —— 时滞 / 方向 ——
   immediate: '即时', hours: '小时级', days: '天级', weeks: '周级', months: '月级',
-  positive: '正向', negative: '负向', bidirectional: '双向', conditional: '条件性',
+  positive: '正向', negative: '负向', neutral: '中性', bidirectional: '双向', conditional: '条件性',
   increase: '增强', decrease: '减弱', higher_is_worse: '越高越差', higher_is_better: '越高越好',
   // —— 风险/运行态 ——
   watch: '观察', incident: '事件', tracked: '跟踪', elevated: '升高',

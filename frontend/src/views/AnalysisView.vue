@@ -212,10 +212,11 @@
                       </span>
                     </div>
                     <div class="metric-highlight-sub">
-                      {{ mechanismsTab.scenario_model?.scenario_summary || '当前案例尚未生成 llm_mechanism_v1 机制工件。' }}
+                      {{ mechanismsTab.scenario_model?.scenario_summary || '当前案例尚未生成机制工件（机制推演模式才会产出机制图、状态变量与推理账本）。' }}
                     </div>
                   </div>
 
+                  <template v-if="mechanismHasDetail">
                   <div class="secondary-section">
                     <div class="section-header">
                       <h3>场景状态变量</h3>
@@ -226,7 +227,7 @@
                         <div class="metric-card-head">
                           <div>
                             <h4>{{ item.label || item.key }}</h4>
-                            <p>{{ item.polarity || 'neutral' }}</p>
+                            <p>{{ translateDisplayToken(item.polarity, '中性') }}</p>
                           </div>
                         </div>
                         <div class="feedback-loop">{{ item.description }}</div>
@@ -246,11 +247,11 @@
                             <h4>{{ edge.relation_label }}</h4>
                             <p>{{ edge.source }} → {{ edge.target }}</p>
                           </div>
-                          <span class="source-chip">{{ edge.scope || 'mechanism' }}</span>
+                          <span class="source-chip">{{ translateDisplayToken(edge.scope, '机制') }}</span>
                         </div>
                         <div class="feedback-loop">{{ edge.mechanism }}</div>
                         <div class="delta-grid">
-                          <span class="delta-chip">延迟 {{ edge.latency || 'unknown' }}</span>
+                          <span class="delta-chip">延迟 {{ translateDisplayToken(edge.latency, '未知') }}</span>
                           <span class="delta-chip">置信 {{ formatMetricValue((edge.confidence || 0) * 100) }}</span>
                         </div>
                       </article>
@@ -294,6 +295,7 @@
                       </span>
                     </div>
                   </div>
+                  </template>
                 </section>
               </template>
 
@@ -776,6 +778,18 @@ const mechanismsTab = computed(() => tabData.value.mechanisms)
 const feedbackTab = computed(() => tabData.value.feedback)
 const rolesTab = computed(() => tabData.value.roles)
 const narrativeTab = computed(() => tabData.value.narrative)
+// 机制空则折叠：没有任何机制工件时，只显示一句说明，不再渲染 5 个空段
+const mechanismHasDetail = computed(() => {
+  const m = mechanismsTab.value
+  if (!m) return false
+  return Boolean(
+    m.scenario_model?.state_variables?.length ||
+    m.mechanism_graph?.edges?.length ||
+    m.relation_samples?.length ||
+    m.round_reasoning?.length ||
+    m.simulation_audit?.quality_flags?.length
+  )
+})
 const regionsRounds = computed(() => regionsTab.value?.rounds || [])
 const animationFrames = computed(() => Array.isArray(animationData.value?.frames) ? animationData.value.frames : [])
 const timelineRoundValues = computed(() => {
@@ -1683,54 +1697,67 @@ onBeforeUnmount(() => {
   overflow: visible;
 }
 
+/* 巨型竖排 hero → 单行细条：标题 + 摘要（截断）在左，指标内联在右 */
 .analysis-hero {
   display: flex;
+  align-items: center;
   justify-content: space-between;
-  gap: 20px;
-  padding: 20px 22px;
-  border-radius: 24px;
+  gap: 24px;
+  padding: 12px 22px;
+  border-radius: 16px;
   background: linear-gradient(135deg, #102a43 0%, #1f5f5b 56%, #d8b04c 100%);
   color: #f8fafc;
 }
 
 .hero-main {
   min-width: 0;
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  flex-wrap: wrap;
 }
 
 .hero-kicker {
-  font-size: 12px;
+  font-size: 11px;
   text-transform: uppercase;
   letter-spacing: 0.12em;
-  color: rgba(248, 250, 252, 0.72);
+  color: rgba(248, 250, 252, 0.58);
+  flex-shrink: 0;
 }
 
 .hero-title {
-  margin: 6px 0 10px;
-  font-size: 32px;
-  line-height: 1.1;
+  margin: 0;
+  font-size: 20px;
+  line-height: 1.2;
+  white-space: nowrap;
 }
 
 .hero-summary {
   margin: 0;
-  max-width: 760px;
-  line-height: 1.6;
-  color: rgba(248, 250, 252, 0.88);
+  flex: 1 1 220px;
+  min-width: 0;
+  font-size: 12px;
+  line-height: 1.4;
+  color: rgba(248, 250, 252, 0.78);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .hero-metrics {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(120px, 1fr));
-  gap: 12px;
-  min-width: 280px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 20px;
+  min-width: 0;
+  flex-shrink: 0;
 }
 
 .hero-metric {
-  padding: 14px;
-  border-radius: 18px;
-  background: rgba(255, 255, 255, 0.12);
-  backdrop-filter: blur(10px);
+  padding: 0;
+  border-radius: 0;
+  background: transparent;
   display: flex;
-  flex-direction: column;
+  align-items: baseline;
   gap: 6px;
 }
 
@@ -1740,7 +1767,7 @@ onBeforeUnmount(() => {
 }
 
 .hero-metric strong {
-  font-size: 24px;
+  font-size: 18px;
 }
 
 .tab-bar {
