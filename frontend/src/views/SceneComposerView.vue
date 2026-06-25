@@ -51,22 +51,30 @@
                 <small class="field-hint">支持逐行填写，也支持贴入 JSON 数组。</small>
               </label>
 
-              <section v-if="advancedOpen" class="advanced-panel">
-                <label class="field">
-                  <span>重点关系 / 关注问题</span>
-                  <textarea
-                    v-model="form.focus"
-                    rows="3"
-                    placeholder="例：游客活动、滨海生态、城市开发与公园管理之间的关系。"
-                  ></textarea>
-                </label>
+              <!-- 上传文档上移出"高级"，主流程即可见 -->
+              <div class="field">
+                <span>上传参考文档（选填）</span>
+                <div class="upload-box compact-upload" @click="fileInput?.click()">
+                  <input ref="fileInput" class="hidden-input" type="file" multiple accept=".pdf,.md,.txt,.markdown" @change="handleFileSelect" />
+                  <strong>拖入或点击上传参考文档</strong>
+                  <p>支持 PDF / MD / TXT。</p>
+                </div>
+                <div v-if="files.length" class="file-list">
+                  <div v-for="(file, index) in files" :key="`${file.name}-${file.size}-${index}`" class="file-chip">
+                    <span>{{ file.name }}</span>
+                    <button type="button" @click="removeFile(index)">×</button>
+                  </div>
+                </div>
+              </div>
 
+              <section v-if="advancedOpen" class="advanced-panel">
+                <!-- 4 个重叠的上下文 textarea 合成 1 个（focus/补充背景/分析边界/报告问题 → additional_context） -->
                 <label class="field">
-                  <span>补充背景线索</span>
+                  <span>补充背景与关注点（选填）</span>
                   <textarea
                     v-model="form.additionalContext"
-                    rows="4"
-                    placeholder="补充这个区域的历史机制、已知事实、治理背景、生态过程或其他上下文。"
+                    rows="6"
+                    placeholder="关注的关系/问题、已知背景与事实、分析边界与排除项、希望报告重点回答的问题——都写在这里即可。&#10;例：&#10;- 关注游客活动、滨海生态与公园管理之间的关系&#10;- 只分析当前片区稳态，不扩展到全市&#10;- 希望报告回答：哪些生态受体最敏感、哪些扰动最先打破平衡"
                   ></textarea>
                 </label>
 
@@ -80,24 +88,6 @@
                 </label>
 
                 <label class="field">
-                  <span>分析边界 / 排除项</span>
-                  <textarea
-                    v-model="form.analysisBoundaries"
-                    rows="3"
-                    placeholder="- 只分析当前片区稳态，不扩展到全市&#10;- 不讨论长期政策争议，只关注生态与运行机制"
-                  ></textarea>
-                </label>
-
-                <label class="field">
-                  <span>希望报告重点回答的问题</span>
-                  <textarea
-                    v-model="form.reportQuestions"
-                    rows="4"
-                    placeholder="- 这个区域的稳态主要由哪些主体和设施维持？&#10;- 哪些生态受体最敏感？&#10;- 哪些扰动会最先打破当前平衡？"
-                  ></textarea>
-                </label>
-
-                <label class="field">
                   <span>进入推演的默认目标</span>
                   <textarea
                     v-model="form.simulationRequirement"
@@ -106,21 +96,6 @@
                   ></textarea>
                 </label>
 
-                <div class="field">
-                  <span>上传参考文档</span>
-                  <div class="upload-box compact-upload" @click="fileInput?.click()">
-                    <input ref="fileInput" class="hidden-input" type="file" multiple accept=".pdf,.md,.txt,.markdown" @change="handleFileSelect" />
-                    <strong>拖入或点击上传参考文档</strong>
-                    <p>支持 PDF / MD / TXT。</p>
-                  </div>
-
-                  <div v-if="files.length" class="file-list">
-                    <div v-for="(file, index) in files" :key="`${file.name}-${file.size}-${index}`" class="file-chip">
-                      <span>{{ file.name }}</span>
-                      <button type="button" @click="removeFile(index)">×</button>
-                    </div>
-                  </div>
-                </div>
               </section>
             </div>
 
