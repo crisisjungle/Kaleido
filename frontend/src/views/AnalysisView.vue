@@ -1715,7 +1715,8 @@ onBeforeUnmount(() => {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 24px;
+  flex-wrap: wrap;
+  gap: 10px 28px;
   padding: 12px 22px;
   border-radius: 16px;
   background: linear-gradient(135deg, #102a43 0%, #1f5f5b 56%, #d8b04c 100%);
@@ -1723,11 +1724,8 @@ onBeforeUnmount(() => {
 }
 
 .hero-main {
+  flex: 1 1 340px;
   min-width: 0;
-  display: flex;
-  align-items: baseline;
-  gap: 12px;
-  flex-wrap: wrap;
 }
 
 .hero-kicker {
@@ -1739,10 +1737,9 @@ onBeforeUnmount(() => {
 }
 
 .hero-title {
-  margin: 0;
-  font-size: 20px;
-  line-height: 1.2;
-  white-space: nowrap;
+  margin: 2px 0 0;
+  font-size: 19px;
+  line-height: 1.25;
 }
 
 .hero-summary {

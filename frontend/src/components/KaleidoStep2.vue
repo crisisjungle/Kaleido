@@ -501,7 +501,7 @@
               <span v-if="item.risk_object_id === primaryRiskObjectId" class="risk-primary-tag">主要</span>
             </div>
             <strong>{{ item.title }}</strong>
-            <p>{{ item.why_now || item.summary || '等待风险对象摘要。' }}</p>
+            <p v-if="!isRiskPlaceholderText(item.why_now || item.summary)">{{ item.why_now || item.summary }}</p>
             <div class="risk-meta">
               <span>严重性 {{ normalizeScore(item.severity_score) }}</span>
               <span>可行动性 {{ normalizeScore(item.actionability_score) }}</span>
@@ -516,7 +516,7 @@
                 {{ selectedRiskObject.mode === 'incident' ? '事件预览' : '观察预览' }}
               </div>
               <h3>{{ selectedRiskObject.title }}</h3>
-              <p>{{ selectedRiskObject.summary || selectedRiskObject.why_now || '等待风险对象摘要。' }}</p>
+              <p v-if="!isRiskPlaceholderText(selectedRiskObject.summary || selectedRiskObject.why_now)">{{ selectedRiskObject.summary || selectedRiskObject.why_now }}</p>
             </div>
 
             <div class="risk-score-strip">
@@ -589,79 +589,81 @@
             </div>
           </div>
 
-          <div class="risk-note-box">
+          <div v-if="!isRiskPlaceholderText(selectedRiskObject.why_now)" class="risk-note-box">
             <span>当前触发原因</span>
-            <strong>{{ selectedRiskObject.why_now || '场景配置完成后会显示 why now。' }}</strong>
+            <strong>{{ selectedRiskObject.why_now }}</strong>
           </div>
 
           <div class="risk-step-list">
             <span v-for="step in selectedRiskObject.chain_steps || []" :key="step" class="chip">{{ displayToken(step) }}</span>
           </div>
 
-          <div class="risk-node-grid">
-            <section class="risk-mini-panel">
-              <div class="catalog-title">相关实体节点</div>
-              <div v-if="riskObjectEntityNodes.length > 0" class="node-list">
-                <article v-for="node in riskObjectEntityNodes" :key="node.id" class="node-card">
-                  <div class="node-card-head">
-                    <strong>
-                      <span
-                        v-if="provenanceMeta(node.provenance)"
-                        class="provenance-dot"
-                        :class="`is-${provenanceMeta(node.provenance).cls}`"
-                        :title="`来源：${provenanceMeta(node.provenance).label}`"
-                      ></span>
-                      {{ node.name }}
-                    </strong>
-                    <span class="node-state" :class="{ matched: node.matched }">{{ node.matched ? '图谱节点' : '风险引用' }}</span>
-                  </div>
-                  <div class="tag-wrap">
-                    <span v-for="label in node.labels" :key="label" class="mini-tag">{{ displayToken(label) }}</span>
-                  </div>
-                </article>
-              </div>
-              <div v-else class="empty-state">生成配置后将展示相关实体节点。</div>
-            </section>
+          <!-- 层级：运行态明细有数据才展开，且只渲染非空的小节；全空时折叠成一句话，不再堆 4 张空卡 -->
+          <template v-if="riskRuntimeHasDetail">
+            <div v-if="riskObjectEntityNodes.length > 0 || riskObjectRegionNodes.length > 0" class="risk-node-grid">
+              <section v-if="riskObjectEntityNodes.length > 0" class="risk-mini-panel">
+                <div class="catalog-title">相关实体节点</div>
+                <div class="node-list">
+                  <article v-for="node in riskObjectEntityNodes" :key="node.id" class="node-card">
+                    <div class="node-card-head">
+                      <strong>
+                        <span
+                          v-if="provenanceMeta(node.provenance)"
+                          class="provenance-dot"
+                          :class="`is-${provenanceMeta(node.provenance).cls}`"
+                          :title="`来源：${provenanceMeta(node.provenance).label}`"
+                        ></span>
+                        {{ node.name }}
+                      </strong>
+                      <span class="node-state" :class="{ matched: node.matched }">{{ node.matched ? '图谱节点' : '风险引用' }}</span>
+                    </div>
+                    <div class="tag-wrap">
+                      <span v-for="label in node.labels" :key="label" class="mini-tag">{{ displayToken(label) }}</span>
+                    </div>
+                  </article>
+                </div>
+              </section>
 
-            <section class="risk-mini-panel">
-              <div class="catalog-title">相关区域</div>
-              <div v-if="riskObjectRegionNodes.length > 0" class="node-list">
-                <article v-for="region in riskObjectRegionNodes" :key="region.id" class="node-card">
-                  <div class="node-card-head">
-                    <strong>{{ region.name }}</strong>
-                    <span class="node-state" :class="{ matched: region.matched }">{{ region.matched ? '图谱节点' : '作用域' }}</span>
-                  </div>
-                  <div class="tag-wrap">
-                    <span v-for="label in region.labels" :key="label" class="mini-tag">{{ displayToken(label) }}</span>
-                  </div>
-                </article>
-              </div>
-              <div v-else class="empty-state">当前没有可映射的区域节点。</div>
-            </section>
-          </div>
+              <section v-if="riskObjectRegionNodes.length > 0" class="risk-mini-panel">
+                <div class="catalog-title">相关区域</div>
+                <div class="node-list">
+                  <article v-for="region in riskObjectRegionNodes" :key="region.id" class="node-card">
+                    <div class="node-card-head">
+                      <strong>{{ region.name }}</strong>
+                      <span class="node-state" :class="{ matched: region.matched }">{{ region.matched ? '图谱节点' : '作用域' }}</span>
+                    </div>
+                    <div class="tag-wrap">
+                      <span v-for="label in region.labels" :key="label" class="mini-tag">{{ displayToken(label) }}</span>
+                    </div>
+                  </article>
+                </div>
+              </section>
+            </div>
 
-          <div class="risk-node-grid secondary">
-            <section class="risk-mini-panel">
-              <div class="catalog-title">受影响群簇</div>
-              <div v-if="riskObjectClusters.length > 0" class="cluster-list">
-                <article v-for="cluster in riskObjectClusters" :key="cluster.cluster_id" class="cluster-mini-card">
-                  <div class="node-card-head">
-                    <strong>{{ cluster.name }}</strong>
-                    <span class="mini-tag accent">错配风险 {{ normalizeScore(cluster.mismatch_risk) }}</span>
-                  </div>
-                  <p>{{ formatInlineList(cluster.dependency_profile, '暂无依赖结构') }}</p>
-                </article>
-              </div>
-              <div v-else class="empty-state">当前还没有受影响群簇预览。</div>
-            </section>
+            <div v-if="riskObjectClusters.length > 0 || (selectedRiskObject.turning_points || []).length > 0" class="risk-node-grid secondary">
+              <section v-if="riskObjectClusters.length > 0" class="risk-mini-panel">
+                <div class="catalog-title">受影响群簇</div>
+                <div class="cluster-list">
+                  <article v-for="cluster in riskObjectClusters" :key="cluster.cluster_id" class="cluster-mini-card">
+                    <div class="node-card-head">
+                      <strong>{{ cluster.name }}</strong>
+                      <span class="mini-tag accent">错配风险 {{ normalizeScore(cluster.mismatch_risk) }}</span>
+                    </div>
+                    <p>{{ formatInlineList(cluster.dependency_profile, '暂无依赖结构') }}</p>
+                  </article>
+                </div>
+              </section>
 
-            <section class="risk-mini-panel">
-              <div class="catalog-title">转折点</div>
-              <ul v-if="(selectedRiskObject.turning_points || []).length > 0" class="bullet-list">
-                <li v-for="point in selectedRiskObject.turning_points" :key="point">{{ point }}</li>
-              </ul>
-              <div v-else class="empty-state">当前对象还没有显式转折点。</div>
-            </section>
+              <section v-if="(selectedRiskObject.turning_points || []).length > 0" class="risk-mini-panel">
+                <div class="catalog-title">转折点</div>
+                <ul class="bullet-list">
+                  <li v-for="point in selectedRiskObject.turning_points" :key="point">{{ point }}</li>
+                </ul>
+              </section>
+            </div>
+          </template>
+          <div v-else class="risk-runtime-empty">
+            运行推演后，这里会显示该风险对象的关联实体、作用区域、受影响群簇与转折点。
           </div>
         </div>
       </div>
@@ -1548,6 +1550,19 @@ const selectedRiskObject = computed(() => {
   if (riskObjects.value.length === 0) return null
   return riskObjects.value.find(item => item.risk_object_id === selectedRiskObjectId.value) || riskObjects.value[0]
 })
+
+// 层级：运行态明细（实体/区域/群簇/转折点）是否有真实数据 —— 没有就折叠成一句话，不渲染 4 张空卡
+const riskRuntimeHasDetail = computed(() =>
+  riskObjectEntityNodes.value.length > 0 ||
+  riskObjectRegionNodes.value.length > 0 ||
+  riskObjectClusters.value.length > 0 ||
+  (selectedRiskObject.value?.turning_points || []).length > 0
+)
+// 占位/等待文案不重复上屏（推演前 why_now 只是占位，别在每张卡上重复）
+const isRiskPlaceholderText = (text) => {
+  const s = String(text || '')
+  return !s || s.includes('等待推演运行态刷新') || s.includes('等待风险对象摘要') || s.includes('场景配置完成后')
+}
 
 const graphNodeByUuid = computed(() => {
   const map = new Map()
@@ -4630,6 +4645,16 @@ textarea {
   background: rgba(24, 48, 88, 0.04);
   color: #65728f;
   font-size: 13px;
+}
+
+/* 运行态明细全空时的一句话折叠（替代 4 张空卡） */
+.risk-runtime-empty {
+  font-size: 13px;
+  color: #94a3b8;
+  padding: 12px 14px;
+  border: 1px dashed rgba(148, 163, 184, 0.32);
+  border-radius: 12px;
+  background: rgba(248, 250, 253, 0.5);
 }
 
 .bullet-list {
