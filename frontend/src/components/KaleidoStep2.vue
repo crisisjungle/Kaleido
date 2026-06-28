@@ -1,36 +1,34 @@
 <template>
   <div class="envfish-step envfish-step2">
     <section class="workspace-shell">
-      <div class="workspace-topbar">
-        <div class="workspace-tabs" role="tablist" aria-label="Step2 工作台标签页">
-          <button
-            v-for="tab in workspaceTabs"
-            :key="tab.value"
-            type="button"
-            :id="`workspace-tab-${tab.value}`"
-            role="tab"
-            class="workspace-tab"
-            :class="{ active: activeWorkspaceTab === tab.value }"
-            :aria-selected="activeWorkspaceTab === tab.value"
-            :aria-controls="`workspace-panel-${tab.value}`"
-            @click="activeWorkspaceTab = tab.value"
-          >
-            <span class="workspace-tab-label">{{ tab.label }}</span>
-            <span class="workspace-tab-meta">{{ tab.meta }}</span>
-          </button>
+      <!-- 场景简报：一句话讲清整个场景 + 常驻"进入推演" -->
+      <header class="briefing-header">
+        <div class="briefing-head-copy">
+          <div class="briefing-kicker">场景简报</div>
+          <h2 class="briefing-title">{{ hazardTemplateMeta.label }}</h2>
+          <p class="briefing-summary-line">{{ sceneSummaryLine }}</p>
+        </div>
+        <button class="primary-btn briefing-cta" :disabled="!isReady" @click="handleNextStep">进入推演 →</button>
+      </header>
+
+      <div class="briefing-stats">
+        <span class="briefing-stats-label">系统从你的背景生成了这个场景</span>
+        <div class="briefing-stat-row">
+          <div class="briefing-stat"><strong>{{ riskObjects.length }}</strong><span>风险对象</span></div>
+          <div class="briefing-stat"><strong>{{ regionRecords.length }}</strong><span>区域</span></div>
+          <div class="briefing-stat"><strong>{{ agentCards.length }}</strong><span>代理体</span></div>
+          <div class="briefing-stat"><strong>{{ relationSummary.total }}</strong><span>关系</span></div>
         </div>
       </div>
 
       <section
-        v-show="activeWorkspaceTab === 'parameters'"
-        id="workspace-panel-parameters"
-        role="tabpanel"
-        aria-labelledby="workspace-tab-parameters"
-        class="panel workspace-panel parameters"
+        class="briefing-section bsec-parameters panel workspace-panel parameters"
+        :class="{ collapsed: !isExpanded('parameters') }"
       >
-        <div class="panel-title-row">
+        <div class="panel-title-row briefing-head" @click="toggleSection('parameters')">
           <h3>推演参数</h3>
-          <span class="hint">{{ parameterStatusLabel }}</span>
+          <span class="hint">{{ paramsSummaryLine }}</span>
+          <i class="bh-chev" aria-hidden="true">⌄</i>
         </div>
 
         <div class="grounding-box parameter-lock-note">
@@ -250,15 +248,13 @@
       </section>
 
       <section
-        v-show="activeWorkspaceTab === 'agents'"
-        id="workspace-panel-agents"
-        role="tabpanel"
-        aria-labelledby="workspace-tab-agents"
-        class="panel workspace-panel agents"
+        class="briefing-section bsec-agents panel workspace-panel agents"
+        :class="{ collapsed: !isExpanded('agents') }"
       >
-        <div class="panel-title-row">
+        <div class="panel-title-row briefing-head" @click="toggleSection('agents')">
           <h3>代理体配置</h3>
           <span class="hint">{{ agentSourceLabel }}</span>
+          <i class="bh-chev" aria-hidden="true">⌄</i>
         </div>
 
         <div class="summary-grid">
@@ -307,15 +303,13 @@
       </section>
 
       <section
-        v-show="activeWorkspaceTab === 'relations'"
-        id="workspace-panel-relations"
-        role="tabpanel"
-        aria-labelledby="workspace-tab-relations"
-        class="panel workspace-panel relations"
+        class="briefing-section bsec-relations panel workspace-panel relations"
+        :class="{ collapsed: !isExpanded('relations') }"
       >
-        <div class="panel-title-row">
+        <div class="panel-title-row briefing-head" @click="toggleSection('relations')">
           <h3>{{ relationSectionTitle }}</h3>
           <span class="hint">{{ relationSourceLabel }}</span>
+          <i class="bh-chev" aria-hidden="true">⌄</i>
         </div>
 
         <div class="summary-grid">
@@ -384,15 +378,13 @@
       </section>
 
       <section
-        v-show="activeWorkspaceTab === 'region'"
-        id="workspace-panel-region"
-        role="tabpanel"
-        aria-labelledby="workspace-tab-region"
-        class="panel workspace-panel region"
+        class="briefing-section bsec-region panel workspace-panel region"
+        :class="{ collapsed: !isExpanded('region') }"
       >
-        <div class="panel-title-row">
-          <h3>细分区域预览</h3>
+        <div class="panel-title-row briefing-head" @click="toggleSection('region')">
+          <h3>区域划分</h3>
           <span class="hint">{{ regionSourceLabel }}</span>
+          <i class="bh-chev" aria-hidden="true">⌄</i>
         </div>
 
         <div class="catalog baseline-panel">
@@ -475,15 +467,13 @@
       </section>
 
       <section
-        v-show="activeWorkspaceTab === 'risk'"
-        id="workspace-panel-risk"
-        role="tabpanel"
-        aria-labelledby="workspace-tab-risk"
-        class="panel workspace-panel risk-preview-shell"
+        class="briefing-section bsec-risk panel workspace-panel risk-preview-shell"
+        :class="{ collapsed: !isExpanded('risk') }"
       >
-      <div class="panel-title-row">
-        <h3>风险对象预览</h3>
-        <span class="hint">{{ riskObjects.length }} 个对象 / 第 2 步预览</span>
+      <div class="panel-title-row briefing-head" @click="toggleSection('risk')">
+        <h3>风险对象</h3>
+        <span class="hint">{{ riskObjects.length }} 个 · 推演前为定义</span>
+        <i class="bh-chev" aria-hidden="true">⌄</i>
       </div>
 
       <div v-if="riskObjects.length > 0" class="risk-preview-grid">
@@ -1134,6 +1124,21 @@ function syncVariableSelections() {
     targetNodeId: resolveNodeOptionValue(variable.targetNodeId)
   }))
 }
+
+// 场景简报：分节折叠状态（风险默认展开，其余收起）+ 一句话摘要
+const expandedSections = ref({ parameters: false, risk: true, region: false, agents: false, relations: false })
+const isExpanded = (key) => !!expandedSections.value[key]
+const toggleSection = (key) => { expandedSections.value[key] = !expandedSections.value[key] }
+
+const sceneSummaryLine = computed(() => {
+  const scenario = translateDisplayToken(scenarioMode.value, '常态')
+  const search = String(searchMode.value).includes('deep') ? '深度搜索' : '快速搜索'
+  return [scenario, search, temporalProfileLabel.value].filter(Boolean).join(' · ')
+})
+const paramsSummaryLine = computed(() => {
+  const search = String(searchMode.value).includes('deep') ? '深度搜索' : '快速搜索'
+  return [temporalProfileLabel.value, search, `${injectedVariables.value.length} 个变量`].filter(Boolean).join(' · ')
+})
 
 const workspaceTabs = computed(() => {
   const inputTab = {
@@ -3682,6 +3687,95 @@ onUnmounted(() => {
   padding: 18px;
   overflow: visible;
 }
+
+/* ===== 场景简报布局：一句话头部 + 生成统计 + 可折叠分节（CSS order 重排，风险居前）===== */
+.briefing-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+.briefing-kicker {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  color: #9aa3b2;
+}
+.briefing-title {
+  margin: 5px 0 0;
+  font-size: 20px;
+  font-weight: 600;
+  color: #173056;
+}
+.briefing-summary-line {
+  margin: 6px 0 0;
+  font-size: 13px;
+  color: #5d687f;
+}
+.briefing-cta {
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+.briefing-stats {
+  display: flex;
+  align-items: center;
+  gap: 28px;
+  padding: 14px 0;
+  border-top: 0.5px solid rgba(29, 39, 58, 0.1);
+  border-bottom: 0.5px solid rgba(29, 39, 58, 0.1);
+}
+.briefing-stats-label {
+  font-size: 13px;
+  color: #5d687f;
+  max-width: 96px;
+  line-height: 1.4;
+  flex-shrink: 0;
+}
+.briefing-stat-row {
+  display: flex;
+  gap: 30px;
+  flex-wrap: wrap;
+}
+.briefing-stat {
+  display: flex;
+  flex-direction: column;
+}
+.briefing-stat strong {
+  font-size: 22px;
+  font-weight: 600;
+  color: #173056;
+}
+.briefing-stat span {
+  font-size: 12px;
+  color: #9aa3b2;
+}
+
+.briefing-section { order: 9; }
+.bsec-parameters { order: 1; }
+.bsec-risk { order: 2; }
+.bsec-region { order: 3; }
+.bsec-agents { order: 4; }
+.bsec-relations { order: 5; }
+
+.briefing-head {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  cursor: pointer;
+  user-select: none;
+}
+.bh-chev {
+  margin-left: auto;
+  font-style: normal;
+  font-size: 14px;
+  color: #9aa3b2;
+  transition: transform 0.18s ease;
+}
+.briefing-section.collapsed .bh-chev { transform: rotate(-90deg); }
+.briefing-section.collapsed > :not(.briefing-head) { display: none !important; }
+/* 折叠态紧凑：去掉 min-height 与标题下边距，只剩一行 */
+.briefing-section.collapsed { min-height: 0 !important; overflow: visible; }
+.briefing-section.collapsed .briefing-head { margin-bottom: 0; }
 
 .workspace-topbar {
   display: flex;
