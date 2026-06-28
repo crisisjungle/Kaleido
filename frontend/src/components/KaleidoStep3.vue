@@ -54,12 +54,8 @@
             :aria-controls="`workspace-panel-${tab.value}`"
             @click="activeWorkspaceTab = tab.value"
           >
-            <span class="workspace-tab-index">{{ tab.index }}</span>
-            <span class="workspace-tab-main">
-              <span class="workspace-tab-label">{{ tab.label }}</span>
-              <span class="workspace-tab-meta">{{ tab.meta }}</span>
-            </span>
-            <span class="workspace-tab-note">{{ tab.note }}</span>
+            <span class="workspace-tab-label">{{ tab.label }}</span>
+            <span class="workspace-tab-meta">{{ tab.meta }}</span>
           </button>
         </div>
       </div>
@@ -2857,74 +2853,48 @@ onUnmounted(() => {
   color: #0f517d;
 }
 
+/* tab 从大卡片 → 安静的下划线文字 tab（不再占满一行抢视觉） */
 .workspace-tabs {
-  display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 10px;
-  flex: 1;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 24px;
+  width: 100%;
+  border-bottom: 0.5px solid rgba(29, 39, 58, 0.12);
 }
 
 .workspace-tab {
-  display: grid;
-  grid-template-columns: auto 1fr;
-  gap: 10px;
-  align-items: start;
-  border: 1px solid rgba(29, 39, 58, 0.1);
-  border-radius: 20px;
-  padding: 14px;
-  background: linear-gradient(180deg, rgba(255, 255, 255, 0.92), rgba(248, 251, 255, 0.92));
-  color: #183058;
+  display: inline-flex;
+  align-items: baseline;
+  gap: 8px;
+  border: none;
+  background: transparent;
+  padding: 6px 2px 10px;
+  margin-bottom: -1px;
+  border-bottom: 2px solid transparent;
+  color: #8a93a6;
   text-align: left;
   cursor: pointer;
-  transition: transform 0.18s ease, box-shadow 0.18s ease, border-color 0.18s ease;
+  font-family: inherit;
+  transition: color 0.15s ease, border-color 0.15s ease;
 }
 
-.workspace-tab:hover,
-.workspace-tab.active {
-  transform: translateY(-1px);
-  box-shadow: 0 12px 24px rgba(17, 31, 59, 0.08);
-  border-color: rgba(17, 61, 122, 0.18);
-}
-
-.workspace-tab.active {
-  background: linear-gradient(180deg, rgba(232, 242, 255, 0.96), rgba(255, 244, 225, 0.94));
-}
-
-.workspace-tab-index {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 34px;
-  height: 34px;
-  border-radius: 12px;
-  background: rgba(17, 61, 122, 0.08);
-  color: #113d7a;
-  font-size: 12px;
-  font-weight: 800;
-}
-
-.workspace-tab-main {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  min-width: 0;
-}
-
-.workspace-tab-label {
-  font-size: 14px;
-  font-weight: 800;
+.workspace-tab:hover {
   color: #173056;
 }
 
-.workspace-tab-meta,
-.workspace-tab-note {
-  font-size: 12px;
-  line-height: 1.4;
-  color: #677084;
+.workspace-tab.active {
+  color: #173056;
+  border-bottom-color: #173056;
 }
 
-.workspace-tab-note {
-  grid-column: 1 / -1;
+.workspace-tab-label {
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.workspace-tab-meta {
+  font-size: 12px;
+  color: #8a93a6;
 }
 
 .workspace-panel {
