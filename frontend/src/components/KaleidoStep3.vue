@@ -356,12 +356,13 @@
         v-if="activeWorkspaceTab === 'overview'"
         class="workspace-panel workspace-panel-merged"
       >
-        <section class="multi-agent-panel stage-panel">
-          <div class="panel-title-row">
+        <section class="multi-agent-panel stage-panel briefing-section bsec-agents" :class="{ collapsed: !isExpanded('agents') }">
+          <div class="panel-title-row briefing-head" @click="toggleSection('agents')">
             <h3>多代理体工作台</h3>
             <span class="hint">
               {{ subregionRows.length }} 个子区域 · {{ agentRows.length }} 个代理体 · {{ agentInteractions.length }} 次交互
             </span>
+            <i class="bh-chev" aria-hidden="true">⌄</i>
           </div>
 
           <div class="multi-agent-grid">
@@ -959,6 +960,10 @@ const isInjecting = ref(false)
 const injection = ref(createInjection())
 const selectedRiskObjectId = ref('')
 const activeWorkspaceTab = ref('overview')
+// 简报式分节折叠（多代理体这面"墙"默认收起，点标题展开）
+const expandedSections = ref({ agents: false })
+const isExpanded = (key) => !!expandedSections.value[key]
+const toggleSection = (key) => { expandedSections.value[key] = !expandedSections.value[key] }
 // 层级：长列表默认只显 top-N，按需展开（区域矩阵/子区域/代理体/交互）
 const expandedLists = ref({ regions: false, subregions: false, agents: false, interactions: false })
 const toggleList = (key) => { expandedLists.value[key] = !expandedLists.value[key] }
@@ -3286,6 +3291,25 @@ onUnmounted(() => {
   backdrop-filter: blur(10px);
   box-shadow: 0 12px 32px rgba(17, 31, 59, 0.06);
 }
+
+/* 简报式可折叠分节：标题行可点，其余按需展开 */
+.briefing-head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  cursor: pointer;
+  user-select: none;
+}
+.bh-chev {
+  margin-left: auto;
+  font-style: normal;
+  font-size: 14px;
+  color: #9aa3b2;
+  transition: transform 0.18s ease;
+}
+.briefing-section.collapsed .bh-chev { transform: rotate(-90deg); }
+.briefing-section.collapsed > :not(.briefing-head) { display: none !important; }
+.briefing-section.collapsed { min-height: 0 !important; }
 
 .multi-agent-grid {
   display: grid;
