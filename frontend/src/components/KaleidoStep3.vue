@@ -2992,12 +2992,13 @@ onUnmounted(() => {
   gap: 14px;
 }
 
+/* 单列纵向流：内容全宽铺开，不再用不等高的双列网格留白 */
 .overview-top-grid {
-  grid-template-columns: minmax(0, 1.15fr) minmax(320px, 0.85fr);
+  grid-template-columns: minmax(0, 1fr);
 }
 
 .overview-main-grid {
-  grid-template-columns: minmax(0, 1.15fr) minmax(320px, 0.85fr);
+  grid-template-columns: minmax(0, 1fr);
   min-height: auto;
   flex: 0 0 auto;
 }

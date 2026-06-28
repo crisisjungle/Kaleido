@@ -88,7 +88,7 @@ const props = defineProps({
 })
 
 // Layout State
-const viewMode = ref('split') // Step3 推演：图谱是主角，默认展示（可一键收起）
+const viewMode = ref('workbench') // Step3 推演：默认内容全宽（早期图谱稀疏、50/50 会空半屏）；一键「展开图谱」看演化
 
 // Data State
 const currentSimulationId = ref(route.params.simulationId)

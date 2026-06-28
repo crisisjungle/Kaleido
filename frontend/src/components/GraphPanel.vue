@@ -493,8 +493,9 @@ watch(() => props.isSimulating, (newValue, oldValue) => {
     showEdgeLabels.value = false
   }
   if (wasSimulating.value && !newValue) {
-    // 从模拟中变为非模拟状态，显示结束提示
+    // 从模拟中变为非模拟状态，显示结束提示；几秒后自动消失，不再常驻挡视线
     showSimulationFinishedHint.value = true
+    setTimeout(() => { showSimulationFinishedHint.value = false }, 6000)
   }
   wasSimulating.value = newValue
 }, { immediate: true })
