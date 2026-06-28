@@ -282,7 +282,7 @@
             </div>
 
             <div class="region-list">
-              <article v-for="region in regionRows" :key="region.id" class="region-row">
+              <article v-for="region in (expandedLists.regions ? regionRows : regionRows.slice(0, LIST_PREVIEW.regions))" :key="region.id" class="region-row">
                 <div class="region-meta">
                   <strong>{{ region.name }}</strong>
                   <span>{{ translateDisplayToken(region.tagline, region.tagline) }}</span>
@@ -301,6 +301,14 @@
               <div v-if="regionRows.length === 0" class="empty-state">
                 等待后端返回区域矩阵或轮次快照。
               </div>
+              <button
+                v-if="regionRows.length > LIST_PREVIEW.regions"
+                type="button"
+                class="list-expand-btn"
+                @click="toggleList('regions')"
+              >
+                {{ expandedLists.regions ? '收起' : `展开全部 ${regionRows.length} 个区域 ↓` }}
+              </button>
             </div>
           </section>
 
@@ -367,7 +375,7 @@
                 <span class="hint mono">{{ formatScoreKeyLabel(subregionHeatKey) }}</span>
               </div>
               <div v-if="subregionRows.length > 0" class="subregion-list">
-                <article v-for="subregion in subregionRows.slice(0, 12)" :key="subregion.id" class="subregion-card">
+                <article v-for="subregion in (expandedLists.subregions ? subregionRows : subregionRows.slice(0, LIST_PREVIEW.subregions))" :key="subregion.id" class="subregion-card">
                   <div class="subregion-card-head">
                     <div>
                       <strong>{{ subregion.name }}</strong>
@@ -388,6 +396,14 @@
               <div v-else class="empty-state">
                 当前轮次还没有细分子区域数据。
               </div>
+              <button
+                v-if="subregionRows.length > LIST_PREVIEW.subregions"
+                type="button"
+                class="list-expand-btn"
+                @click="toggleList('subregions')"
+              >
+                {{ expandedLists.subregions ? '收起' : `展开全部 ${subregionRows.length} 个 ↓` }}
+              </button>
             </div>
 
             <div class="mini-panel agent-panel">
@@ -396,7 +412,7 @@
                 <span class="hint mono">{{ agentRows.length }}</span>
               </div>
               <div v-if="agentRows.length > 0" class="agent-leaderboard">
-                <article v-for="agent in agentRows.slice(0, 12)" :key="agent.id" class="agent-rank-card">
+                <article v-for="agent in (expandedLists.agents ? agentRows : agentRows.slice(0, LIST_PREVIEW.agents))" :key="agent.id" class="agent-rank-card">
                   <div class="agent-rank-head">
                     <div class="agent-rank-name">
                       <strong>
@@ -416,8 +432,8 @@
                     <div class="agent-rank-strip-fill" :style="{ width: `${agent.selectedScore}%` }"></div>
                   </div>
                   <div class="agent-rank-meta">
-                    <span>{{ agent.regionLabel || '区域 n/a' }}</span>
-                    <span>{{ agent.subregionLabel || '子区域 n/a' }}</span>
+                    <span>{{ agent.regionLabel || '—' }}</span>
+                    <span>{{ agent.subregionLabel || '—' }}</span>
                     <span>{{ formatScoreKeyLabel(selectedScoreKey) }} {{ agent.selectedScore }}</span>
                   </div>
                   <div class="agent-rank-tags">
@@ -427,8 +443,16 @@
                 </article>
               </div>
               <div v-else class="empty-state">
-                当前没有可展示的 agent 排行。
+                当前没有可展示的代理体排行。
               </div>
+              <button
+                v-if="agentRows.length > LIST_PREVIEW.agents"
+                type="button"
+                class="list-expand-btn"
+                @click="toggleList('agents')"
+              >
+                {{ expandedLists.agents ? '收起' : `展开全部 ${agentRows.length} 个 ↓` }}
+              </button>
             </div>
 
             <div class="mini-panel interaction-panel">
@@ -437,7 +461,7 @@
                 <span class="hint mono">{{ agentInteractionScopeLabel }}</span>
               </div>
               <div v-if="agentInteractions.length > 0" class="interaction-timeline">
-                <article v-for="item in agentInteractions.slice(0, 16)" :key="item.id" class="interaction-card">
+                <article v-for="item in (expandedLists.interactions ? agentInteractions : agentInteractions.slice(0, LIST_PREVIEW.interactions))" :key="item.id" class="interaction-card">
                   <div class="interaction-head">
                     <span class="interaction-round mono">R{{ item.round }}</span>
                     <span class="interaction-channel">{{ item.channel }}</span>
@@ -448,7 +472,7 @@
                     <span v-if="item.targetName"> -> {{ item.targetName }}</span>
                   </p>
                   <div class="interaction-meta">
-                    <span>{{ item.sourceRegion || '来源区域 n/a' }}</span>
+                    <span v-if="item.sourceRegion">{{ item.sourceRegion }}</span>
                     <span v-if="item.targetRegion">{{ item.targetRegion }}</span>
                     <span v-if="item.actionType">{{ item.actionType }}</span>
                     <span v-if="item.targetDeltaLabel">{{ item.targetDeltaLabel }}</span>
@@ -456,8 +480,16 @@
                 </article>
               </div>
               <div v-else class="empty-state">
-                当前还没有 agent 交互事件。
+                当前还没有代理体交互事件。
               </div>
+              <button
+                v-if="agentInteractions.length > LIST_PREVIEW.interactions"
+                type="button"
+                class="list-expand-btn"
+                @click="toggleList('interactions')"
+              >
+                {{ expandedLists.interactions ? '收起' : `展开全部 ${agentInteractions.length} 条 ↓` }}
+              </button>
             </div>
           </div>
         </section>
@@ -931,6 +963,10 @@ const isInjecting = ref(false)
 const injection = ref(createInjection())
 const selectedRiskObjectId = ref('')
 const activeWorkspaceTab = ref('overview')
+// 层级：长列表默认只显 top-N，按需展开（区域矩阵/子区域/代理体/交互）
+const expandedLists = ref({ regions: false, subregions: false, agents: false, interactions: false })
+const toggleList = (key) => { expandedLists.value[key] = !expandedLists.value[key] }
+const LIST_PREVIEW = { regions: 5, subregions: 5, agents: 5, interactions: 6 }
 const lastRunMessage = ref('')
 const isPlayingAnimation = ref(false)
 const playbackSpeedMs = ref(1400)
@@ -3987,6 +4023,26 @@ onUnmounted(() => {
   background: rgba(29, 39, 58, 0.04);
   color: #6f7588;
   font-size: 13px;
+}
+
+/* 长列表"展开全部 / 收起"——安静的整行文字按钮，不抢主次 */
+.list-expand-btn {
+  margin-top: 8px;
+  width: 100%;
+  border: none;
+  background: transparent;
+  color: #2f6f6a;
+  font-size: 13px;
+  font-weight: 600;
+  padding: 8px;
+  cursor: pointer;
+  border-radius: 10px;
+  font-family: inherit;
+  transition: background 0.15s ease;
+}
+
+.list-expand-btn:hover {
+  background: rgba(47, 111, 106, 0.08);
 }
 
 .empty-state.compact {
