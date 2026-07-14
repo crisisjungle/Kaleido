@@ -3,20 +3,38 @@
 Step2: Zep实体读取与过滤、OASIS模拟准备与运行（全程自动化）
 """
 
+import hashlib
+import json
 import os
+import re
 import traceback
+from contextlib import contextmanager
 from typing import Any, Dict
+
+import fcntl
 from flask import request, jsonify, send_file
 
 from . import simulation_bp
 from ..config import Config
 from ..services.map_seed_manager import MapSeedManager
+from ..services.effort_contract import (
+    EffortContractError,
+    assert_effort_reference,
+    assert_effort_snapshot_consistency,
+    build_effort_snapshot,
+    normalize_effort_snapshot,
+)
+from ..services.agent_planning_port import AgentPlanningPortError, plan_scenario_agents
 from ..services.graph_builder import GraphBuilderService
 from ..services.env_simulation_config_generator import normalize_search_mode
 from ..services.mechanism_simulation_service import (
     LEGACY_SIMULATION_ARCHITECTURE,
+    LLM_MECHANISM_ARCHITECTURE,
     normalize_simulation_architecture,
 )
+from ..services.scenario_planner import AGENT_V2_PLAN_SOURCE, ScenarioPlanner
+from ..services.semantic_input import SemanticArtifactStore, SemanticInputNormalizer
+from ..services.scene_material_generator import SceneMaterialGenerator
 from ..services.envfish_models import normalize_time_plan, normalize_transport_family
 from ..services.risk_artifact_store import load_risk_artifacts, write_risk_artifacts
 from ..services.risk_definition_builder import RiskDefinitionBuilder
@@ -29,11 +47,475 @@ from ..services.task_executor import TaskExecutor
 from ..services.zep_entity_reader import ZepEntityReader
 from ..services.simulation_manager import SimulationManager, SimulationStatus
 from ..services.simulation_runner import SimulationRunner, RunnerStatus
+from ..services.display_localization import public_error_message, sanitize_public_dto
 from ..utils.atomic_file import read_json_file, write_json_file
 from ..utils.logger import get_logger
 from ..models.project import ProjectManager
 
 logger = get_logger('envfish.api.simulation')
+
+
+@simulation_bp.after_request
+def _sanitize_simulation_public_response(response):
+    """Apply one non-bypassable display boundary to every JSON route.
+
+    The simulation blueprint contains legacy endpoints with slightly different
+    response shapes.  Keeping the projection here preserves those contracts
+    while ensuring no route can accidentally return raw display copy,
+    traceback/debug fields, internal labels, paths, or exception details.
+    Download/stream responses are intentionally left untouched.
+    """
+
+    if not response.is_json:
+        return response
+    payload = response.get_json(silent=True)
+    if not isinstance(payload, (dict, list)):
+        return response
+
+    projected = sanitize_public_dto(payload)
+    if isinstance(projected, dict) and projected.get("success") is False:
+        projected["error"] = public_error_message(
+            payload.get("error"),
+            "请求未能完成，请稍后重试。",
+        )
+
+    response.set_data(json.dumps(projected, ensure_ascii=False, separators=(",", ":")))
+    response.headers["Content-Type"] = "application/json; charset=utf-8"
+    return response
+
+
+def _public_runtime_success(data: Any):
+    """Serialize a Step 3 runtime DTO through the public display boundary."""
+
+    return jsonify({"success": True, "data": sanitize_public_dto(data)})
+
+
+PREPARE_STAGE_LABELS = {
+    "reading": "读取角色所需实体",
+    "generating_profiles": "生成代理体与关系",
+    "generating_config": "装配和校验场景",
+    "copying_scripts": "完成运行工件",
+    "completed": "已完成",
+}
+
+_CJK_PATTERN = re.compile(r"[\u3400-\u9fff]")
+_INTERNAL_DISPLAY_PATTERN = re.compile(
+    r"(?:(?:agent|entity|region|snapshot|fallback|unknown|unnamed)(?![A-Za-z0-9])|"
+    r"[a-z][a-z0-9]*(?:_[a-z0-9]+)+|"
+    r"[A-Z][a-z0-9]+(?:[A-Z][A-Za-z0-9]+)+|"
+    r"[0-9a-f]{8}-[0-9a-f-]{20,})",
+    re.IGNORECASE,
+)
+
+_GROUNDING_SOURCE_LABELS = {
+    "osm": "开放地图",
+    "openstreetmap": "开放地图",
+    "overpass": "开放地图要素",
+    "worldcover": "全球地表覆盖资料",
+    "esa_worldcover": "全球地表覆盖资料",
+    "open_meteo": "公开气象资料",
+    "noaa": "海洋与大气资料",
+    "usgs": "地质与水文资料",
+    "reverse_geocode": "地名检索资料",
+}
+
+
+def _chinese_display_text(value: Any, fallback: str) -> str:
+    text = str(value or "").strip()
+    if (
+        not text
+        or not _CJK_PATTERN.search(text)
+        or re.search(r"[A-Za-z]", text)
+        or _INTERNAL_DISPLAY_PATTERN.search(text)
+    ):
+        return fallback
+    return text
+
+
+def _grounding_source_labels(values: Any) -> list[str]:
+    labels = []
+    for value in values if isinstance(values, list) else []:
+        label = _GROUNDING_SOURCE_LABELS.get(str(value or "").strip().lower(), "外部资料")
+        if label not in labels:
+            labels.append(label)
+    return labels
+
+
+@contextmanager
+def _prepare_reservation_lock(manager: SimulationManager, simulation_id: str):
+    """Serialize prepare task reservation across web workers for one simulation."""
+
+    lock_path = os.path.join(manager._get_simulation_dir(simulation_id), ".prepare-reservation.lock")
+    with open(lock_path, "a+", encoding="utf-8") as lock_file:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+
+@contextmanager
+def _injection_request_lock(manager: SimulationManager, simulation_id: str):
+    """Serialize runtime injection and idempotency receipts per simulation."""
+
+    lock_path = os.path.join(manager._get_simulation_dir(simulation_id), ".injection-request.lock")
+    with open(lock_path, "a+", encoding="utf-8") as lock_file:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+
+def _normalize_injection_idempotency_key(value: Any) -> str:
+    key = str(value or "").strip()
+    if not key:
+        return ""
+    if len(key) > 128 or not re.fullmatch(r"[A-Za-z0-9._:-]+", key):
+        raise ValueError("干预请求标识格式不正确。")
+    return key
+
+
+def _injection_receipt_path(manager: SimulationManager, simulation_id: str) -> str:
+    return os.path.join(manager._get_simulation_dir(simulation_id), "injection_receipts.json")
+
+
+def _read_injection_receipt(
+    manager: SimulationManager,
+    simulation_id: str,
+    idempotency_key: str,
+) -> Dict[str, Any] | None:
+    if not idempotency_key:
+        return None
+    receipts = read_json_file(_injection_receipt_path(manager, simulation_id), default={})
+    if not isinstance(receipts, dict):
+        return None
+    receipt = receipts.get(idempotency_key)
+    return dict(receipt) if isinstance(receipt, dict) else None
+
+
+def _write_injection_receipt(
+    manager: SimulationManager,
+    simulation_id: str,
+    idempotency_key: str,
+    receipt: Dict[str, Any],
+) -> None:
+    if not idempotency_key:
+        return
+    path = _injection_receipt_path(manager, simulation_id)
+    receipts = read_json_file(path, default={})
+    if not isinstance(receipts, dict):
+        receipts = {}
+    receipts[idempotency_key] = receipt
+    if len(receipts) > 128:
+        receipts = dict(list(receipts.items())[-128:])
+    write_json_file(path, receipts)
+
+
+def _find_active_prepare_task(task_manager: Any, state: Any) -> Any:
+    """Return the latest pending/processing prepare task for this simulation."""
+
+    from ..models.task import TaskStatus
+
+    active_statuses = {TaskStatus.PENDING, TaskStatus.PROCESSING}
+    task_id = str(getattr(state, "prepare_task_id", "") or "").strip()
+    if task_id:
+        task = task_manager.get_task(task_id)
+        if task and task.task_type == "simulation_prepare" and task.status in active_statuses:
+            return task
+
+    for item in task_manager.list_tasks():
+        if item.get("task_type") != "simulation_prepare":
+            continue
+        if str((item.get("metadata") or {}).get("simulation_id") or "") != state.simulation_id:
+            continue
+        if item.get("status") not in {status.value for status in active_statuses}:
+            continue
+        return task_manager.get_task(str(item.get("task_id") or ""))
+    return None
+
+
+def _active_prepare_hash(task: Any, state: Any) -> str:
+    metadata = task.metadata if isinstance(getattr(task, "metadata", None), dict) else {}
+    if "planning_content_hash" in metadata:
+        return str(metadata.get("planning_content_hash") or "")
+    return str(getattr(state, "planning_content_hash", "") or "")
+
+
+def _active_prepare_response(
+    *,
+    task: Any,
+    state: Any,
+    scenario_planning_input: Dict[str, Any],
+    uses_scenario_planner: bool,
+) -> Dict[str, Any]:
+    progress_detail = task.progress_detail if isinstance(task.progress_detail, dict) else {}
+    generation_stage = str(
+        progress_detail.get("current_stage")
+        or ("generating_profiles" if uses_scenario_planner else "reading")
+    )
+    payload = {
+        "simulation_id": state.simulation_id,
+        "task_id": task.task_id,
+        "status": "preparing",
+        "task_status": task.status.value if hasattr(task.status, "value") else str(task.status),
+        "message": "相同场景输入正在生成，已复用当前准备任务。",
+        "progress": int(task.progress or (62 if uses_scenario_planner else 0)),
+        "generation_stage": generation_stage,
+        "generation_stage_label": _prepare_stage_label(generation_stage),
+        "already_prepared": False,
+        "reused_task": True,
+        "effort_snapshot": state.effort_snapshot,
+        "agent_plan_source": state.agent_plan_source or (AGENT_V2_PLAN_SOURCE if uses_scenario_planner else ""),
+    }
+    if uses_scenario_planner:
+        payload["scenario_planning_input"] = scenario_planning_input
+    return payload
+
+
+def _prepare_stage_label(stage: Any) -> str:
+    key = str(stage or "").strip()
+    return PREPARE_STAGE_LABELS.get(key, "正在准备场景")
+
+
+def _build_scenario_foundation(project: Any, state: Any) -> Dict[str, Any]:
+    """Create the immutable Step 1 reference consumed by the Step 2 planner."""
+
+    map_seed = MapSeedManager.get_seed(state.map_seed_id) if state.map_seed_id else None
+    map_graph = (
+        MapSeedManager.get_graph_snapshot(state.map_seed_id, allow_unavailable=True)
+        if state.map_seed_id
+        else None
+    )
+    map_input = (map_seed or {}).get("input") if isinstance((map_seed or {}).get("input"), dict) else {}
+    region_ids = []
+    target_catalog = []
+    map_nodes = (
+        (map_graph or {}).get("nodes")
+        or ((map_graph or {}).get("graph_data") or {}).get("nodes")
+        or []
+    )
+    for node in map_nodes:
+        labels = [str(item).lower() for item in (node.get("labels") or [])]
+        raw_type = " ".join(
+            str(item or "").lower()
+            for item in (
+                node.get("label"),
+                node.get("type"),
+                node.get("entity_type"),
+                (node.get("attributes") or {}).get("category"),
+            )
+        )
+        node_id = str(node.get("uuid") or node.get("id") or "").strip()
+        if not node_id:
+            continue
+        is_region = "region" in labels or "region" in raw_type
+        attributes = node.get("attributes") if isinstance(node.get("attributes"), dict) else {}
+        target_catalog.append({
+            "id": node_id,
+            "name": str(node.get("name") or node.get("label") or node_id),
+            "aliases": list(attributes.get("aliases") or []),
+            "kind": "region" if is_region else "entity",
+        })
+        if is_region and node_id not in region_ids:
+            region_ids.append(node_id)
+
+    semantic_ref = (
+        getattr(state, "semantic_artifact_ref", None)
+        or getattr(project, "semantic_artifact_ref", None)
+        or {}
+    )
+    semantic_artifact = SemanticArtifactStore.get_by_ref(semantic_ref)
+    if not semantic_artifact:
+        scene_seed = (
+            SceneMaterialGenerator.get_seed(getattr(project, "scene_id", None))
+            if getattr(project, "scene_id", None)
+            else None
+        ) or {}
+        scene_input = scene_seed.get("input") if isinstance(scene_seed.get("input"), dict) else {}
+        legacy_variables = (
+            scene_seed.get("initial_variables")
+            or list(getattr(state, "injected_variables", None) or [])
+        )
+        semantic_artifact = SemanticInputNormalizer().normalize_scene(
+            payload={
+                "location": (
+                    scene_input.get("location")
+                    or map_input.get("requested_location")
+                    or (map_seed or {}).get("title")
+                    or project.name
+                ),
+                "time_scope": scene_input.get("time_scope") or "",
+                "event_or_baseline": scene_input.get("event_or_baseline") or "",
+                "additional_context": (
+                    scene_input.get("additional_context")
+                    or getattr(project, "analysis_summary", "")
+                    or ""
+                ),
+                "known_entities": scene_input.get("known_entities") or "",
+                "analysis_boundaries": scene_input.get("analysis_boundaries") or "",
+                "report_questions": scene_input.get("report_questions") or "",
+                "simulation_requirement": (
+                    scene_input.get("simulation_requirement")
+                    or getattr(project, "simulation_requirement", "")
+                    or ""
+                ),
+                "initial_variables": legacy_variables,
+            },
+            document_texts=[ProjectManager.get_extracted_text(project.project_id) or ""],
+            map_context={
+                "map_seed_id": state.map_seed_id or "",
+                "seed": map_seed or {},
+                "graph_data": map_graph or {},
+                "report_text": (
+                    MapSeedManager.get_report_text(state.map_seed_id)
+                    if state.map_seed_id else ""
+                ),
+            },
+        )
+        semantic_ref = SemanticArtifactStore.public_ref(semantic_artifact)
+        state.semantic_artifact_ref = dict(semantic_ref)
+        project.semantic_artifact_ref = dict(semantic_ref)
+        ProjectManager.save_project(project)
+    latest_semantic_artifact = semantic_artifact
+    while (
+        semantic_artifact
+        and semantic_artifact.input_kind not in {"scene_definition", "scene_revision"}
+        and semantic_artifact.previous_artifact_ref
+    ):
+        parent = SemanticArtifactStore.get_by_ref(semantic_artifact.previous_artifact_ref)
+        if not parent:
+            break
+        semantic_artifact = parent
+    if semantic_artifact:
+        semantic_ref = SemanticArtifactStore.public_ref(semantic_artifact)
+    elif latest_semantic_artifact:
+        semantic_artifact = latest_semantic_artifact
+        semantic_ref = SemanticArtifactStore.public_ref(latest_semantic_artifact)
+
+    foundation = {
+        "artifact_id": state.map_seed_id or project.project_id,
+        "contract_version": "foundation.step1.v3",
+        "project_id": project.project_id,
+        "graph_id": state.graph_id,
+        "map_seed_id": state.map_seed_id or "",
+        "location": (
+            map_input.get("requested_location")
+            or (map_seed or {}).get("title")
+            or project.name
+        ),
+        "region_ids": region_ids,
+        "target_catalog": target_catalog,
+        "semantic_artifact_ref": semantic_ref,
+        "scene_semantics": (
+            semantic_artifact.scene.model_dump(mode="json") if semantic_artifact else {}
+        ),
+        "semantic_events": (
+            [item.model_dump(mode="json") for item in semantic_artifact.events]
+            if semantic_artifact else []
+        ),
+        "semantic_policies": (
+            [item.model_dump(mode="json") for item in semantic_artifact.policies]
+            if semantic_artifact else []
+        ),
+    }
+    canonical = json.dumps(foundation, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    foundation["content_hash"] = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    return foundation
+
+
+def _assert_workflow_effort_consistency(project: Any, state: Any) -> Dict[str, Any]:
+    simulation_snapshot = normalize_effort_snapshot(state.effort_snapshot)
+    if getattr(project, "effort_snapshot", None):
+        assert_effort_snapshot_consistency(
+            project.effort_snapshot,
+            simulation_snapshot,
+            reference_name="项目",
+            candidate_name="模拟",
+        )
+    if state.map_seed_id:
+        seed = MapSeedManager.get_seed(state.map_seed_id)
+        if not seed:
+            raise EffortContractError("模拟引用的第一步地图种子不存在")
+        seed_snapshot = seed.get("effort_snapshot")
+        if not isinstance(seed_snapshot, dict):
+            raise EffortContractError("第一步地图种子缺少已锁定的分析强度快照")
+        assert_effort_snapshot_consistency(
+            seed_snapshot,
+            simulation_snapshot,
+            reference_name="第一步地图种子",
+            candidate_name="模拟",
+        )
+    return simulation_snapshot
+
+
+def _scenario_temporal_payload(scenario: Dict[str, Any]) -> tuple[Dict[str, Any], Dict[str, Any]]:
+    plan = dict(scenario.get("temporal_plan") or {})
+    step_unit = str(plan.get("step_unit") or "day")
+    step_size = max(1, int(plan.get("step_value") or 1))
+    total_rounds = max(4, int(plan.get("total_rounds") or 12))
+    time_plan = {
+        "step_unit": step_unit,
+        "step_size": step_size,
+        "total_rounds": total_rounds,
+        "total_coverage_label": str(plan.get("coverage_label_zh") or ""),
+        "reasoning_summary": str(plan.get("generation_reason_zh") or ""),
+        "source": "scenario_planner",
+    }
+    normalized = normalize_time_plan(time_plan, total_rounds=total_rounds, source="scenario_planner")
+    temporal_profile = {
+        "preset": normalized.get("preset") or "standard",
+        "total_rounds": normalized["total_rounds"],
+        "minutes_per_round": normalized["minutes_per_round"],
+    }
+    return normalized, temporal_profile
+
+
+def _validate_step2_planning_request(data: Dict[str, Any]) -> None:
+    for field_name, label in (("event_inputs", "灾害事件"), ("policy_inputs", "政策措施")):
+        # One source sentence may legitimately project into both an event and a
+        # policy. IDs only need to be unique within each semantic collection.
+        seen_ids = set()
+        values = data.get(field_name, [])
+        if values is None:
+            values = []
+        if not isinstance(values, list):
+            raise ValueError(f"{label}必须使用数组格式")
+        for index, item in enumerate(values, start=1):
+            if not isinstance(item, dict):
+                raise ValueError(f"{label}第 {index} 项格式无效")
+            input_id = str(item.get("input_id") or "").strip()
+            if input_id:
+                if input_id in seen_ids:
+                    raise ValueError(f"输入标识重复: {input_id}")
+                seen_ids.add(input_id)
+            for target_field, target_label in (
+                ("target_region_ids", "目标区域"),
+                ("target_entity_ids", "目标设施或对象"),
+            ):
+                targets = item.get(target_field, [])
+                if targets is not None and not isinstance(targets, list):
+                    raise ValueError(f"{label}第 {index} 项的{target_label}必须使用数组格式")
+    overrides = data.get("advanced_overrides", {})
+    if overrides is not None and not isinstance(overrides, dict):
+        raise ValueError("高级设置必须使用对象格式")
+
+
+def _planning_input_matches_existing(
+    manager: SimulationManager,
+    simulation_id: str,
+    scenario_planning_input: Dict[str, Any],
+) -> bool:
+    existing = read_json_file(
+        os.path.join(manager._get_simulation_dir(simulation_id), "scenario_planning_input.json"),
+        default={},
+    )
+    if not isinstance(existing, dict) or not existing:
+        return False
+    return bool(
+        existing.get("content_hash")
+        and existing.get("content_hash") == scenario_planning_input.get("content_hash")
+    )
 
 
 # Interview prompt 优化前缀
@@ -47,7 +529,7 @@ def optimize_interview_prompt(prompt: str) -> str:
     
     Args:
         prompt: 原始提问
-        
+
     Returns:
         优化后的提问
     """
@@ -75,6 +557,8 @@ def _sync_risk_fields_to_config(sim_dir: str, risk_bundle: Dict[str, Any]) -> No
     if not config:
         return
     config["risk_definitions"] = risk_bundle.get("risk_definitions", [])
+    config["risk_contract_version"] = int(risk_bundle.get("risk_contract_version") or 1)
+    config["risk_generation_audit"] = risk_bundle.get("risk_generation_audit", {})
     config["latest_risk_runtime_state"] = risk_bundle.get("latest_risk_runtime_state", {})
     config["risk_objects"] = risk_bundle.get("risk_objects", [])
     summary = risk_bundle.get("risk_objects_summary") or {}
@@ -103,7 +587,7 @@ def get_graph_entities(graph_id: str):
         if not Config.ZEP_API_KEY:
             return jsonify({
                 "success": False,
-                "error": "ZEP_API_KEY未配置"
+                "error": "图谱服务凭证未配置"
             }), 500
         
         entity_types_str = request.args.get('entity_types', '')
@@ -140,7 +624,7 @@ def get_entity_detail(graph_id: str, entity_uuid: str):
         if not Config.ZEP_API_KEY:
             return jsonify({
                 "success": False,
-                "error": "ZEP_API_KEY未配置"
+                "error": "图谱服务凭证未配置"
             }), 500
         
         reader = ZepEntityReader()
@@ -173,7 +657,7 @@ def get_entities_by_type(graph_id: str, entity_type: str):
         if not Config.ZEP_API_KEY:
             return jsonify({
                 "success": False,
-                "error": "ZEP_API_KEY未配置"
+                "error": "图谱服务凭证未配置"
             }), 500
         
         enrich = request.args.get('enrich', 'true').lower() == 'true'
@@ -241,7 +725,7 @@ def create_simulation():
         if not project_id:
             return jsonify({
                 "success": False,
-                "error": "请提供 project_id"
+                "error": "请提供项目编号"
             }), 400
         
         project = ProjectManager.get_project(project_id)
@@ -255,8 +739,38 @@ def create_simulation():
         if not graph_id:
             return jsonify({
                 "success": False,
-                "error": "项目尚未构建图谱，请先调用 /api/graph/build"
+                "error": "项目尚未构建图谱，请先完成项目图谱构建。"
             }), 400
+
+        if project.effort_snapshot:
+            effort_snapshot = normalize_effort_snapshot(project.effort_snapshot)
+        else:
+            effort_snapshot = build_effort_snapshot("high")
+            project.effort_snapshot = effort_snapshot
+            ProjectManager.save_project(project)
+        map_seed_id = str(data.get('map_seed_id') or getattr(project, 'map_seed_id', '') or '').strip()
+        if map_seed_id:
+            map_seed = MapSeedManager.get_seed(map_seed_id)
+            if not map_seed:
+                return jsonify({
+                    "success": False,
+                    "error": f"第一步地图种子不存在: {map_seed_id}",
+                }), 404
+            seed_snapshot = map_seed.get("effort_snapshot")
+            if not isinstance(seed_snapshot, dict):
+                raise EffortContractError("第一步地图种子缺少已锁定的分析强度快照")
+            assert_effort_snapshot_consistency(
+                effort_snapshot,
+                seed_snapshot,
+                reference_name="项目",
+                candidate_name="第一步地图种子",
+            )
+        if data.get('effort_snapshot_id'):
+            assert_effort_reference(
+                effort_snapshot,
+                effort_snapshot_id=data.get('effort_snapshot_id'),
+                requested_level=data.get('effort_level'),
+            )
         
         manager = SimulationManager()
         time_plan = normalize_time_plan(
@@ -288,7 +802,13 @@ def create_simulation():
             reference_time=data.get('reference_time', ''),
             diffusion_provider=data.get('diffusion_provider', 'auto'),
             source_mode=data.get('source_mode', 'graph'),
-            map_seed_id=data.get('map_seed_id'),
+            map_seed_id=map_seed_id or None,
+            effort_snapshot=effort_snapshot,
+            semantic_artifact_ref=(
+                data.get('semantic_artifact_ref')
+                or getattr(project, 'semantic_artifact_ref', None)
+                or {}
+            ),
         )
         
         return jsonify({
@@ -296,12 +816,18 @@ def create_simulation():
             "data": state.to_dict()
         })
         
+    except EffortContractError as e:
+        return jsonify({
+            "success": False,
+            "error": str(e),
+            "code": "effort_snapshot_conflict",
+        }), 409
     except Exception as e:
         logger.error(f"创建模拟失败: {str(e)}")
         return jsonify({
             "success": False,
-            "error": str(e),
-            "traceback": traceback.format_exc()
+            "error": "创建模拟失败，请稍后重试。",
+            "code": "simulation_create_failed",
         }), 500
 
 
@@ -413,7 +939,7 @@ def _check_simulation_prepared(simulation_id: str) -> tuple:
         else:
             logger.warning(f"模拟 {simulation_id} 检测结果: 未准备完成 (status={status}, config_generated={config_generated})")
             return False, {
-                "reason": f"状态不在已准备列表中或config_generated为false: status={status}, config_generated={config_generated}",
+                "reason": "当前场景尚未完成准备，配置文件仍在生成或校验中。",
                 "status": status,
                 "config_generated": config_generated
             }
@@ -438,7 +964,7 @@ def prepare_simulation():
     步骤：
     1. 检查是否已有完成的准备工作
     2. 从Zep图谱读取并过滤实体
-    3. 为每个实体生成OASIS Agent Profile（带重试机制）
+    3. 为每个实体生成代理体画像（带重试机制）
     4. LLM智能生成模拟配置（带重试机制）
     5. 保存配置文件和预设脚本
     
@@ -464,7 +990,9 @@ def prepare_simulation():
         }
     """
     from ..models.task import TaskCancelledError, TaskManager, TaskStatus
-    
+
+    task_id = None
+    task_manager = None
     try:
         data = request.get_json() or {}
         
@@ -472,7 +1000,7 @@ def prepare_simulation():
         if not simulation_id:
             return jsonify({
                 "success": False,
-                "error": "请提供 simulation_id"
+                "error": "请提供模拟任务编号"
             }), 400
         
         manager = SimulationManager()
@@ -481,8 +1009,13 @@ def prepare_simulation():
         if not state:
             return jsonify({
                 "success": False,
-                "error": f"模拟不存在: {simulation_id}"
+                "error": "未找到对应的模拟任务。"
             }), 404
+
+        uses_new_scenario_contract = 'event_inputs' in data or 'policy_inputs' in data
+        uses_scenario_planner = uses_new_scenario_contract or 'injected_variables' in data
+        if uses_new_scenario_contract:
+            _validate_step2_planning_request(data)
         
         if state.is_replay_only:
             return jsonify({
@@ -490,7 +1023,7 @@ def prepare_simulation():
                 "data": {
                     "simulation_id": simulation_id,
                     "status": "ready",
-                    "message": "冻结演示案例已准备完成，无需调用 LLM 或 Zep。",
+                    "message": "冻结演示案例已准备完成，无需再次生成外部资料与代理体。",
                     "already_prepared": True,
                     "scenario_mode": state.scenario_mode,
                     "diffusion_template": state.diffusion_template,
@@ -501,56 +1034,75 @@ def prepare_simulation():
                     "configured_minutes_per_round": state.configured_minutes_per_round,
                     "reference_time": state.reference_time,
                     "is_replay_only": True,
+                    "effort_snapshot": state.effort_snapshot,
                 },
             })
-        
-        # 检查是否强制重新生成
-        force_regenerate = data.get('force_regenerate', False)
-        logger.info(f"开始处理 /prepare 请求: simulation_id={simulation_id}, force_regenerate={force_regenerate}")
-        
-        # 检查是否已经准备完成（避免重复生成）
-        if not force_regenerate:
-            logger.debug(f"检查模拟 {simulation_id} 是否已准备完成...")
-            is_prepared, prepare_info = _check_simulation_prepared(simulation_id)
-            logger.debug(f"检查结果: is_prepared={is_prepared}, prepare_info={prepare_info}")
-            if is_prepared:
-                logger.info(f"模拟 {simulation_id} 已准备完成，跳过重复生成")
-                return jsonify({
-                    "success": True,
-                    "data": {
-                        "simulation_id": simulation_id,
-                        "status": "ready",
-                        "message": "已有完成的准备工作，无需重复生成",
-                        "already_prepared": True,
-                        "prepare_info": prepare_info,
-                        "scenario_mode": state.scenario_mode,
-                        "diffusion_template": state.diffusion_template,
-                        "search_mode": state.search_mode,
-                        "temporal_preset": state.temporal_preset,
-                        "configured_total_rounds": state.configured_total_rounds,
-                        "configured_minutes_per_round": state.configured_minutes_per_round,
-                        "reference_time": state.reference_time,
-                        "diffusion_provider": state.diffusion_provider,
-                    }
-                })
-            else:
-                logger.info(f"模拟 {simulation_id} 未准备完成，将启动准备任务")
-        
-        # 从项目获取必要信息
+
         project = ProjectManager.get_project(state.project_id)
         if not project:
             return jsonify({
                 "success": False,
                 "error": f"项目不存在: {state.project_id}"
             }), 404
+
+        effort_snapshot = _assert_workflow_effort_consistency(project, state)
+        state.effort_snapshot = effort_snapshot
+        if uses_new_scenario_contract:
+            assert_effort_reference(
+                effort_snapshot,
+                effort_snapshot_id=data.get('effort_snapshot_id'),
+                requested_level=data.get('effort_level'),
+            )
+
+        scenario_artifact = None
+        scenario_planning_input: Dict[str, Any] = {}
+        if uses_scenario_planner:
+            foundation = _build_scenario_foundation(project, state)
+            if uses_new_scenario_contract:
+                semantic_event_inputs = data.get('event_inputs') or []
+                semantic_policy_inputs = data.get('policy_inputs') or []
+            else:
+                legacy_events, legacy_policies = ScenarioPlanner.convert_legacy_injected_variables(
+                    data.get('injected_variables') or []
+                )
+                semantic_event_inputs = [item.to_dict() for item in legacy_events]
+                semantic_policy_inputs = [item.to_dict() for item in legacy_policies]
+            semantic_artifact = SemanticInputNormalizer().normalize_scenario(
+                foundation=foundation,
+                event_inputs=semantic_event_inputs,
+                policy_inputs=semantic_policy_inputs,
+                previous_artifact_ref=(
+                    data.get('semantic_artifact_ref')
+                    or foundation.get('semantic_artifact_ref')
+                ),
+            )
+            normalized_payload = {
+                **data,
+                'event_inputs': [item.model_dump(mode='json') for item in semantic_artifact.events],
+                'policy_inputs': [item.model_dump(mode='json') for item in semantic_artifact.policies],
+                'semantic_artifact_ref': SemanticArtifactStore.public_ref(semantic_artifact),
+            }
+            scenario_artifact = ScenarioPlanner().build_from_payload(
+                foundation,
+                normalized_payload,
+                effort_snapshot_ref=effort_snapshot,
+            )
+            scenario_planning_input = scenario_artifact.to_dict()
+            state.semantic_artifact_ref = SemanticArtifactStore.public_ref(semantic_artifact)
+            manager._save_simulation_state(state)
+            if hasattr(project, 'semantic_artifact_ref'):
+                project.semantic_artifact_ref = dict(state.semantic_artifact_ref)
+                ProjectManager.save_project(project)
+
+        # 检查是否强制重新生成
+        force_regenerate = data.get('force_regenerate', False)
+        logger.info(f"开始处理 /prepare 请求: simulation_id={simulation_id}, force_regenerate={force_regenerate}")
         
         # 获取模拟需求
-        simulation_requirement = project.simulation_requirement or ""
-        if not simulation_requirement:
-            return jsonify({
-                "success": False,
-                "error": "项目缺少模拟需求描述 (simulation_requirement)"
-            }), 400
+        simulation_requirement = (
+            project.simulation_requirement
+            or f"围绕{project.name or '已确认背景'}进行场景推演。"
+        )
         
         # 获取文档文本
         document_text = ProjectManager.get_extracted_text(state.project_id) or ""
@@ -559,51 +1111,187 @@ def prepare_simulation():
         use_llm_for_profiles = data.get('use_llm_for_profiles', True)
         parallel_profile_count = data.get('parallel_profile_count', 5)
         scenario_mode = data.get('scenario_mode', state.scenario_mode or 'baseline_mode')
-        simulation_architecture = normalize_simulation_architecture(
-            data.get('simulation_architecture', state.simulation_architecture or LEGACY_SIMULATION_ARCHITECTURE)
-        )
-        diffusion_template = normalize_transport_family(data.get('diffusion_template', state.diffusion_template or 'marine'))
-        hazard_template_id = str(data.get('hazard_template_id') or state.hazard_template_id or '')
-        hazard_template_mode = str(data.get('hazard_template_mode') or state.hazard_template_mode or 'auto')
-        search_mode = normalize_search_mode(data.get('search_mode', state.search_mode or 'fast'))
-        temporal_profile = dict(data.get('temporal_profile') or {})
-        if data.get('temporal_preset') and not temporal_profile.get('preset'):
-            temporal_profile['preset'] = data.get('temporal_preset')
-        if data.get('max_rounds') and not temporal_profile.get('total_rounds'):
-            temporal_profile['total_rounds'] = data.get('max_rounds')
-        if data.get('minutes_per_round') and not temporal_profile.get('minutes_per_round'):
-            temporal_profile['minutes_per_round'] = data.get('minutes_per_round')
-        temporal_profile.setdefault('preset', state.temporal_preset or 'standard')
-        temporal_profile.setdefault('total_rounds', state.configured_total_rounds or 12)
-        temporal_profile.setdefault('minutes_per_round', state.configured_minutes_per_round or 60)
-        reference_time = str(data.get('reference_time') or state.reference_time or '')
-        time_plan_mode = str(data.get('time_plan_mode') or state.time_plan_mode or 'auto')
-        time_plan = normalize_time_plan(
-            data.get('time_plan'),
-            total_rounds=temporal_profile.get('total_rounds'),
-            minutes_per_round=temporal_profile.get('minutes_per_round'),
-            preset=temporal_profile.get('preset'),
-            reference_time=reference_time,
-            source=time_plan_mode,
-        )
-        diffusion_provider = str(data.get('diffusion_provider') or state.diffusion_provider or 'auto')
-        injected_variables = data.get('injected_variables') or []
-        target_agent_count = data.get('target_agent_count')
-        search_profile_overrides = data.get('search_profile_overrides') or None
+        agent_planning_request: Dict[str, Any] = {}
 
-        state.scenario_mode = scenario_mode
-        state.simulation_architecture = simulation_architecture
-        state.diffusion_template = diffusion_template
-        state.hazard_template_id = hazard_template_id or state.hazard_template_id
-        state.hazard_template_mode = hazard_template_mode
-        state.search_mode = search_mode
-        state.temporal_preset = str(time_plan.get('preset') or temporal_profile.get('preset') or 'standard')
-        state.configured_total_rounds = max(4, int(time_plan.get('total_rounds') or temporal_profile.get('total_rounds') or 12))
-        state.configured_minutes_per_round = max(10, int(time_plan.get('minutes_per_round') or temporal_profile.get('minutes_per_round') or 60))
-        state.time_plan_mode = time_plan_mode
-        state.time_plan = time_plan
-        state.reference_time = reference_time
-        state.diffusion_provider = diffusion_provider
+        if uses_scenario_planner:
+            if scenario_artifact is None:
+                raise ValueError("场景规划工件尚未生成")
+            agent_planning_request = plan_scenario_agents(scenario_artifact)
+            injected_variables = list(agent_planning_request.get('injected_variables') or [])
+            adapter_requirement = str(agent_planning_request.get('simulation_requirement') or '').strip()
+            if adapter_requirement:
+                simulation_requirement = (
+                    f"{simulation_requirement}\n\n"
+                    f"Step 2 场景规划补充：{adapter_requirement}"
+                )
+            simulation_architecture = LLM_MECHANISM_ARCHITECTURE
+            search_mode = 'deep_search'
+            diffusion_template = 'generic'
+            hazard_template_id = 'generic'
+            hazard_template_mode = 'auto'
+            time_plan, temporal_profile = _scenario_temporal_payload(scenario_planning_input)
+            time_plan_mode = 'scenario_planner'
+            reference_time = str(data.get('reference_time') or state.reference_time or '')
+            diffusion_provider = 'auto'
+            target_agent_count = None
+            search_profile_overrides = None
+        else:
+            simulation_architecture = normalize_simulation_architecture(
+                data.get('simulation_architecture', state.simulation_architecture or LEGACY_SIMULATION_ARCHITECTURE)
+            )
+            diffusion_template = normalize_transport_family(data.get('diffusion_template', state.diffusion_template or 'marine'))
+            hazard_template_id = str(data.get('hazard_template_id') or state.hazard_template_id or '')
+            hazard_template_mode = str(data.get('hazard_template_mode') or state.hazard_template_mode or 'auto')
+            search_mode = normalize_search_mode(data.get('search_mode', state.search_mode or 'fast'))
+            temporal_profile = dict(data.get('temporal_profile') or {})
+            if data.get('temporal_preset') and not temporal_profile.get('preset'):
+                temporal_profile['preset'] = data.get('temporal_preset')
+            if data.get('max_rounds') and not temporal_profile.get('total_rounds'):
+                temporal_profile['total_rounds'] = data.get('max_rounds')
+            if data.get('minutes_per_round') and not temporal_profile.get('minutes_per_round'):
+                temporal_profile['minutes_per_round'] = data.get('minutes_per_round')
+            temporal_profile.setdefault('preset', state.temporal_preset or 'standard')
+            temporal_profile.setdefault('total_rounds', state.configured_total_rounds or 12)
+            temporal_profile.setdefault('minutes_per_round', state.configured_minutes_per_round or 60)
+            reference_time = str(data.get('reference_time') or state.reference_time or '')
+            time_plan_mode = str(data.get('time_plan_mode') or state.time_plan_mode or 'auto')
+            time_plan = normalize_time_plan(
+                data.get('time_plan'),
+                total_rounds=temporal_profile.get('total_rounds'),
+                minutes_per_round=temporal_profile.get('minutes_per_round'),
+                preset=temporal_profile.get('preset'),
+                reference_time=reference_time,
+                source=time_plan_mode,
+            )
+            diffusion_provider = str(data.get('diffusion_provider') or state.diffusion_provider or 'auto')
+            injected_variables = data.get('injected_variables') or []
+            target_agent_count = data.get('target_agent_count')
+            search_profile_overrides = data.get('search_profile_overrides') or None
+
+        # Task reservation is the only boundary allowed to transition a simulation
+        # into PREPARING. Persist the input hash before any prepare artifact is
+        # written so retries cannot start a second writer for the same directory.
+        task_manager = TaskManager()
+        with _prepare_reservation_lock(manager, simulation_id):
+            fresh_manager = SimulationManager()
+            fresh_state = fresh_manager.get_simulation(simulation_id)
+            if not fresh_state:
+                return jsonify({
+                    "success": False,
+                    "error": "未找到对应的模拟任务。",
+                }), 404
+
+            active_task = _find_active_prepare_task(task_manager, fresh_state)
+            incoming_hash = str(scenario_planning_input.get("content_hash") or "")
+            if active_task:
+                active_hash = _active_prepare_hash(active_task, fresh_state)
+                if (incoming_hash or active_hash) and incoming_hash != active_hash:
+                    return jsonify({
+                        "success": False,
+                        "error": "当前场景正在按另一组输入生成，请等待完成后再明确重新生成。",
+                        "code": "scenario_input_changed",
+                        "stage": "场景输入校验",
+                        "data": {
+                            "simulation_id": simulation_id,
+                            "task_id": active_task.task_id,
+                            "status": "preparing",
+                        },
+                    }), 409
+                logger.info(
+                    "复用进行中的准备任务: simulation_id=%s, task_id=%s",
+                    simulation_id,
+                    active_task.task_id,
+                )
+                return jsonify({
+                    "success": True,
+                    "data": _active_prepare_response(
+                        task=active_task,
+                        state=fresh_state,
+                        scenario_planning_input=scenario_planning_input,
+                        uses_scenario_planner=uses_scenario_planner,
+                    ),
+                })
+
+            if not force_regenerate:
+                logger.debug(f"检查模拟 {simulation_id} 是否已准备完成...")
+                is_prepared, prepare_info = _check_simulation_prepared(simulation_id)
+                logger.debug(f"检查结果: is_prepared={is_prepared}, prepare_info={prepare_info}")
+                if is_prepared:
+                    if uses_scenario_planner and not _planning_input_matches_existing(
+                        fresh_manager,
+                        simulation_id,
+                        scenario_planning_input,
+                    ):
+                        return jsonify({
+                            "success": False,
+                            "error": "当前输入与已生成场景不一致；如需替换，请明确执行重新生成。",
+                            "code": "scenario_input_changed",
+                            "stage": "场景输入校验",
+                        }), 409
+                    logger.info(f"模拟 {simulation_id} 已准备完成，跳过重复生成")
+                    return jsonify({
+                        "success": True,
+                        "data": {
+                            "simulation_id": simulation_id,
+                            "status": "ready",
+                            "message": "已有完成的准备工作，无需重复生成",
+                            "already_prepared": True,
+                            "prepare_info": prepare_info,
+                            "scenario_mode": fresh_state.scenario_mode,
+                            "diffusion_template": fresh_state.diffusion_template,
+                            "search_mode": fresh_state.search_mode,
+                            "temporal_preset": fresh_state.temporal_preset,
+                            "configured_total_rounds": fresh_state.configured_total_rounds,
+                            "configured_minutes_per_round": fresh_state.configured_minutes_per_round,
+                            "reference_time": fresh_state.reference_time,
+                            "diffusion_provider": fresh_state.diffusion_provider,
+                            "effort_snapshot": fresh_state.effort_snapshot,
+                            **({
+                                "scenario_planning_input": scenario_planning_input,
+                                "agent_plan_source": fresh_state.agent_plan_source or "legacy_adapter",
+                            } if uses_scenario_planner else {}),
+                        },
+                    })
+
+            manager = fresh_manager
+            state = fresh_state
+            task_id = task_manager.create_task(
+                name=f"准备模拟: {simulation_id}",
+                task_type="simulation_prepare",
+                metadata={
+                    "simulation_id": simulation_id,
+                    "project_id": state.project_id,
+                    "planning_input_id": str(scenario_planning_input.get("planning_input_id") or ""),
+                    "planning_content_hash": incoming_hash,
+                },
+            )
+
+            state.scenario_mode = scenario_mode
+            state.simulation_architecture = simulation_architecture
+            state.diffusion_template = diffusion_template
+            state.hazard_template_id = hazard_template_id or state.hazard_template_id
+            state.hazard_template_mode = hazard_template_mode
+            state.search_mode = search_mode
+            state.temporal_preset = str(time_plan.get('preset') or temporal_profile.get('preset') or 'standard')
+            state.configured_total_rounds = max(4, int(time_plan.get('total_rounds') or temporal_profile.get('total_rounds') or 12))
+            state.configured_minutes_per_round = max(10, int(time_plan.get('minutes_per_round') or temporal_profile.get('minutes_per_round') or 60))
+            state.time_plan_mode = time_plan_mode
+            state.time_plan = time_plan
+            state.reference_time = reference_time
+            state.diffusion_provider = diffusion_provider
+            state.planning_input_id = str(scenario_planning_input.get("planning_input_id") or "")
+            state.planning_content_hash = incoming_hash
+            state.agent_plan_source = str(agent_planning_request.get("agent_plan_source") or "")
+            state.prepare_task_id = task_id
+            state.status = SimulationStatus.PREPARING
+            state.error = None
+            manager._save_simulation_state(state)
+
+        if uses_scenario_planner:
+            write_json_file(
+                os.path.join(manager._get_simulation_dir(simulation_id), 'agent_planning_request.json'),
+                agent_planning_request,
+            )
 
         # ========== 同步获取实体数量（在后台任务启动前） ==========
         # 这样前端在调用prepare后立即就能获取到预期Agent总数
@@ -623,20 +1311,8 @@ def prepare_simulation():
         except Exception as e:
             logger.warning(f"同步获取实体数量失败（将在后台任务中重试）: {e}")
             # 失败不影响后续流程，后台任务会重新获取
-        
-        # 创建异步任务
-        task_manager = TaskManager()
-        task_id = task_manager.create_task(
-            name=f"准备模拟: {simulation_id}",
-            task_type="simulation_prepare",
-            metadata={
-                "simulation_id": simulation_id,
-                "project_id": state.project_id
-            }
-        )
-        
-        # 更新模拟状态（包含预先获取的实体数量）
-        state.status = SimulationStatus.PREPARING
+
+        # 保存预览统计；任务已在原子预约阶段登记，随后才允许启动写入。
         manager._save_simulation_state(state)
         
         # 定义后台任务
@@ -648,8 +1324,12 @@ def prepare_simulation():
                 task_manager.update_task(
                     task_id,
                     status=TaskStatus.PROCESSING,
-                    progress=0,
-                    message="开始准备模拟环境..."
+                    progress=62 if uses_scenario_planner else 0,
+                    message=(
+                        "复合事件、机制图、时间空间计划与角色能力需求已生成，开始生成代理体与关系。"
+                        if uses_scenario_planner
+                        else "开始准备模拟环境..."
+                    )
                 )
                 ensure_running()
                 
@@ -662,29 +1342,24 @@ def prepare_simulation():
 
                     # 计算总进度
                     stage_weights = {
-                        "reading": (0, 20),           # 0-20%
-                        "generating_profiles": (20, 70),  # 20-70%
-                        "generating_config": (70, 90),    # 70-90%
-                        "copying_scripts": (90, 100)       # 90-100%
+                        "reading": ((62, 66) if uses_scenario_planner else (0, 20)),
+                        "generating_profiles": ((66, 85) if uses_scenario_planner else (20, 70)),
+                        "generating_config": ((85, 99) if uses_scenario_planner else (70, 90)),
+                        "copying_scripts": ((99, 100) if uses_scenario_planner else (90, 100)),
                     }
                     
                     start, end = stage_weights.get(stage, (0, 100))
                     current_progress = int(start + (end - start) * progress / 100)
                     
                     # 构建详细进度信息
-                    stage_names = {
-                        "reading": "读取图谱实体",
-                        "generating_profiles": "生成Agent人设",
-                        "generating_config": "生成模拟配置",
-                        "copying_scripts": "准备模拟脚本"
-                    }
+                    stage_names = PREPARE_STAGE_LABELS
                     
                     stage_index = list(stage_weights.keys()).index(stage) + 1 if stage in stage_weights else 1
                     total_stages = len(stage_weights)
                     
                     # 更新阶段详情
                     stage_details[stage] = {
-                        "stage_name": stage_names.get(stage, stage),
+                        "stage_name": _prepare_stage_label(stage),
                         "stage_progress": progress,
                         "current": kwargs.get("current", 0),
                         "total": kwargs.get("total", 0),
@@ -695,7 +1370,7 @@ def prepare_simulation():
                     detail = stage_details[stage]
                     progress_detail_data = {
                         "current_stage": stage,
-                        "current_stage_name": stage_names.get(stage, stage),
+                        "current_stage_name": _prepare_stage_label(stage),
                         "stage_index": stage_index,
                         "total_stages": total_stages,
                         "stage_progress": progress,
@@ -707,11 +1382,11 @@ def prepare_simulation():
                     # 构建简洁消息
                     if detail["total"] > 0:
                         detailed_message = (
-                            f"[{stage_index}/{total_stages}] {stage_names.get(stage, stage)}: "
+                            f"[{stage_index}/{total_stages}] {_prepare_stage_label(stage)}: "
                             f"{detail['current']}/{detail['total']} - {message}"
                         )
                     else:
-                        detailed_message = f"[{stage_index}/{total_stages}] {stage_names.get(stage, stage)}: {message}"
+                        detailed_message = f"[{stage_index}/{total_stages}] {_prepare_stage_label(stage)}: {message}"
                     
                     task_manager.update_task(
                         task_id,
@@ -743,6 +1418,8 @@ def prepare_simulation():
                     injected_variables=injected_variables,
                     target_agent_count=target_agent_count,
                     search_profile_overrides=search_profile_overrides,
+                    scenario_planning_input=scenario_planning_input or None,
+                    agent_plan_source=str(agent_planning_request.get('agent_plan_source') or ''),
                 )
                 ensure_running()
                 
@@ -774,44 +1451,84 @@ def prepare_simulation():
         
         TaskExecutor(task_manager).start(task_id=task_id, target=run_prepare)
         
-        return jsonify({
-            "success": True,
-            "data": {
+        response_data = {
                 "simulation_id": simulation_id,
                 "task_id": task_id,
                 "status": "preparing",
-                "message": "准备任务已启动，请通过 /api/simulation/prepare/status 查询进度",
+                "message": "准备任务已启动，可在当前页面查看生成进度。",
+                "progress": 62 if uses_scenario_planner else 0,
+                "generation_stage": "generating_profiles" if uses_scenario_planner else "reading",
+                "generation_stage_label": _prepare_stage_label(
+                    "generating_profiles" if uses_scenario_planner else "reading"
+                ),
                 "already_prepared": False,
-                "expected_entities_count": state.entities_count,  # 预期的Agent总数
-                "entity_types": state.entity_types,  # 实体类型列表
+                "expected_entities_count": state.entities_count,
+                "entity_types": state.entity_types,
                 "scenario_mode": scenario_mode,
                 "diffusion_template": diffusion_template,
                 "hazard_template_id": hazard_template_id,
                 "hazard_template_mode": hazard_template_mode,
-                    "search_mode": search_mode,
-                    "simulation_architecture": simulation_architecture,
+                "search_mode": search_mode,
+                "simulation_architecture": simulation_architecture,
                 "temporal_profile": temporal_profile,
                 "time_plan_mode": time_plan_mode,
                 "time_plan": time_plan,
                 "reference_time": reference_time,
                 "diffusion_provider": diffusion_provider,
                 "injected_variables_count": len(injected_variables),
-                "target_agent_count": target_agent_count,
+                "effort_snapshot": effort_snapshot,
             }
+        if uses_scenario_planner:
+            response_data.update({
+                "scenario_planning_input": scenario_planning_input,
+                "agent_plan_source": agent_planning_request.get('agent_plan_source'),
+                "projection_warnings": agent_planning_request.get('projection_warnings') or [],
+            })
+        if not uses_new_scenario_contract:
+            response_data["target_agent_count"] = data.get('target_agent_count')
+
+        return jsonify({
+            "success": True,
+            "data": response_data,
         })
         
+    except EffortContractError as e:
+        return jsonify({
+            "success": False,
+            "error": str(e),
+            "code": "effort_snapshot_conflict",
+        }), 409
+    except AgentPlanningPortError as e:
+        return jsonify({
+            "success": False,
+            "error": str(e),
+            "code": "agent_planning_failed",
+            "stage": "提取角色能力需求并生成代理体规划",
+        }), 502
     except ValueError as e:
         return jsonify({
             "success": False,
             "error": str(e)
-        }), 404
+        }), 400
         
     except Exception as e:
         logger.error(f"启动准备任务失败: {str(e)}")
+        if task_id and task_manager:
+            try:
+                task_manager.fail_task(task_id, "准备任务启动失败", message="准备任务启动失败，请重试。")
+                cleanup_manager = SimulationManager()
+                failed_state = cleanup_manager.get_simulation(simulation_id)
+                if failed_state and failed_state.prepare_task_id == task_id:
+                    failed_state.status = SimulationStatus.FAILED
+                    failed_state.error = "准备任务启动失败"
+                    cleanup_manager._save_simulation_state(failed_state)
+            except Exception as cleanup_error:
+                logger.warning(f"清理未启动的准备任务失败: {cleanup_error}")
         return jsonify({
             "success": False,
-            "error": str(e),
-            "traceback": traceback.format_exc()
+            "error": "启动场景准备任务失败，请稍后重试。",
+            "code": "prepare_start_failed",
+            "stage": "启动场景生成",
         }), 500
 
 
@@ -850,59 +1567,61 @@ def get_prepare_status():
         
         task_id = data.get('task_id')
         simulation_id = data.get('simulation_id')
+
+        # When a caller supplies the task created by a forced regeneration, that
+        # task is authoritative.  Looking at existing simulation artifacts first
+        # can otherwise return an older READY result while the new task is still
+        # generating profiles and risk definitions.
+        if task_id:
+            current_task = TaskManager().get_task(task_id)
+            if current_task:
+                task_dict = current_task.to_dict()
+                task_dict["already_prepared"] = False
+                return _public_runtime_success(task_dict)
         
         # 如果提供了simulation_id，先检查是否已准备完成
         if simulation_id:
             prepared_state = SimulationManager().get_simulation(simulation_id)
             if prepared_state and prepared_state.is_replay_only:
-                return jsonify({
-                    "success": True,
-                    "data": {
-                        "simulation_id": simulation_id,
-                        "status": "ready",
-                        "progress": 100,
-                        "message": "冻结演示案例已准备完成",
-                        "already_prepared": True,
-                        "scenario_mode": prepared_state.scenario_mode,
-                        "diffusion_template": prepared_state.diffusion_template,
-                        "search_mode": prepared_state.search_mode,
-                        "is_replay_only": True,
-                    }
+                return _public_runtime_success({
+                    "simulation_id": simulation_id,
+                    "status": "ready",
+                    "progress": 100,
+                    "message": "冻结演示案例已准备完成",
+                    "already_prepared": True,
+                    "scenario_mode": prepared_state.scenario_mode,
+                    "diffusion_template": prepared_state.diffusion_template,
+                    "search_mode": prepared_state.search_mode,
+                    "is_replay_only": True,
                 })
             is_prepared, prepare_info = _check_simulation_prepared(simulation_id)
             if is_prepared:
-                return jsonify({
-                    "success": True,
-                    "data": {
-                        "simulation_id": simulation_id,
-                        "status": "ready",
-                        "progress": 100,
-                        "message": "已有完成的准备工作",
-                        "already_prepared": True,
-                        "prepare_info": prepare_info,
-                        "scenario_mode": prepared_state.scenario_mode if prepared_state else None,
-                        "diffusion_template": prepared_state.diffusion_template if prepared_state else None,
-                        "search_mode": prepared_state.search_mode if prepared_state else None,
-                    }
+                return _public_runtime_success({
+                    "simulation_id": simulation_id,
+                    "status": "ready",
+                    "progress": 100,
+                    "message": "已有完成的准备工作",
+                    "already_prepared": True,
+                    "prepare_info": prepare_info,
+                    "scenario_mode": prepared_state.scenario_mode if prepared_state else None,
+                    "diffusion_template": prepared_state.diffusion_template if prepared_state else None,
+                    "search_mode": prepared_state.search_mode if prepared_state else None,
                 })
         
         # 如果没有task_id，返回错误
         if not task_id:
             if simulation_id:
                 # 有simulation_id但未准备完成
-                return jsonify({
-                    "success": True,
-                    "data": {
-                        "simulation_id": simulation_id,
-                        "status": "not_started",
-                        "progress": 0,
-                        "message": "尚未开始准备，请调用 /api/simulation/prepare 开始",
-                        "already_prepared": False
-                    }
+                return _public_runtime_success({
+                    "simulation_id": simulation_id,
+                    "status": "not_started",
+                    "progress": 0,
+                    "message": "尚未开始准备，请先启动场景准备。",
+                    "already_prepared": False,
                 })
             return jsonify({
                 "success": False,
-                "error": "请提供 task_id 或 simulation_id"
+                "error": "请提供准备任务编号或模拟任务编号"
             }), 400
         
         task_manager = TaskManager()
@@ -914,40 +1633,31 @@ def get_prepare_status():
                 is_prepared, prepare_info = _check_simulation_prepared(simulation_id)
                 if is_prepared:
                     prepared_state = SimulationManager().get_simulation(simulation_id)
-                    return jsonify({
-                        "success": True,
-                        "data": {
-                            "simulation_id": simulation_id,
-                            "task_id": task_id,
-                            "status": "ready",
-                            "progress": 100,
-                            "message": "任务已完成（准备工作已存在）",
-                            "already_prepared": True,
-                            "prepare_info": prepare_info,
-                            "scenario_mode": prepared_state.scenario_mode if prepared_state else None,
-                            "diffusion_template": prepared_state.diffusion_template if prepared_state else None,
-                            "search_mode": prepared_state.search_mode if prepared_state else None,
-                        }
+                    return _public_runtime_success({
+                        "simulation_id": simulation_id,
+                        "task_id": task_id,
+                        "status": "ready",
+                        "progress": 100,
+                        "message": "任务已完成（准备工作已存在）",
+                        "already_prepared": True,
+                        "prepare_info": prepare_info,
+                        "scenario_mode": prepared_state.scenario_mode if prepared_state else None,
+                        "diffusion_template": prepared_state.diffusion_template if prepared_state else None,
+                        "search_mode": prepared_state.search_mode if prepared_state else None,
                     })
             
-            return jsonify({
-                "success": False,
-                "error": f"任务不存在: {task_id}"
-            }), 404
+            return jsonify({"success": False, "error": "准备任务不存在"}), 404
         
         task_dict = task.to_dict()
         task_dict["already_prepared"] = False
         
-        return jsonify({
-            "success": True,
-            "data": task_dict
-        })
+        return _public_runtime_success(task_dict)
         
     except Exception as e:
         logger.error(f"查询任务状态失败: {str(e)}")
         return jsonify({
             "success": False,
-            "error": str(e)
+            "error": public_error_message(e, "查询准备状态失败，请稍后重试。"),
         }), 500
 
 
@@ -961,7 +1671,7 @@ def get_simulation(simulation_id: str):
         if not state:
             return jsonify({
                 "success": False,
-                "error": f"模拟不存在: {simulation_id}"
+                "error": "未找到对应的模拟任务。"
             }), 404
         
         result = state.to_dict()
@@ -972,6 +1682,8 @@ def get_simulation(simulation_id: str):
 
         sim_dir, risk_bundle = _load_risk_bundle(simulation_id)
         result["risk_definitions"] = risk_bundle.get("risk_definitions", [])
+        result["risk_contract_version"] = int(risk_bundle.get("risk_contract_version") or 1)
+        result["risk_generation_audit"] = risk_bundle.get("risk_generation_audit", {})
         result["latest_risk_runtime_state"] = risk_bundle.get("latest_risk_runtime_state", {})
         result["risk_events"] = risk_bundle.get("risk_events", [])
         result["risk_objects"] = risk_bundle.get("risk_objects", [])
@@ -996,17 +1708,13 @@ def get_simulation(simulation_id: str):
             if report_text:
                 result["map_report_text"] = report_text
         
-        return jsonify({
-            "success": True,
-            "data": result
-        })
+        return _public_runtime_success(result)
         
     except Exception as e:
         logger.error(f"获取模拟状态失败: {str(e)}")
         return jsonify({
             "success": False,
-            "error": str(e),
-            "traceback": traceback.format_exc()
+            "error": public_error_message(e, "获取模拟状态失败，请稍后重试。"),
         }), 500
 
 
@@ -1027,7 +1735,7 @@ def get_simulation_graph_realtime(simulation_id: str):
         if not state:
             return jsonify({
                 "success": False,
-                "error": f"模拟不存在: {simulation_id}"
+                "error": "模拟不存在",
             }), 404
 
         sim_dir = manager.resolve_artifact_dir(state, create_if_missing=False)
@@ -1078,41 +1786,87 @@ def get_simulation_graph_realtime(simulation_id: str):
                 key_edges_only=key_edges_only,
             )
 
-        return jsonify({
-            "success": True,
-            "data": {
-                "simulation_id": simulation_id,
-                "source": source,
-                "fallback_used": fallback_used,
-                "has_envfish_projection": has_envfish_projection,
-                "graph_data": realtime_graph,
-                "map_projection": map_projection,
-            }
+        return _public_runtime_success({
+            "simulation_id": simulation_id,
+            "source": source,
+            "fallback_used": fallback_used,
+            "has_envfish_projection": has_envfish_projection,
+            "graph_data": realtime_graph,
+            "map_projection": map_projection,
         })
 
     except Exception as e:
         logger.error(f"获取实时图谱失败: {str(e)}")
         return jsonify({
             "success": False,
-            "error": str(e),
-            "traceback": traceback.format_exc()
+            "error": public_error_message(e, "获取实时图谱失败，请稍后重试。"),
         }), 500
 
 
 @simulation_bp.route('/<simulation_id>/animation', methods=['GET'])
 def get_simulation_animation(simulation_id: str):
-    """Return the unified animation payload for live or frozen simulations."""
+    """Return live/frozen animation or an incremental playback window.
+
+    ``after_cursor`` (legacy alias ``since_cursor``) advances timeline events.
+    ``after_round`` (legacy-style alias ``since_round``) advances committed
+    frames, including completed rounds that contain no timeline event. Clients
+    may send both watermarks in one poll.
+    """
     try:
-        payload = SimulationAnimationService(simulation_id).get_animation()
-        return jsonify({"success": True, "data": payload})
+        raw_cursor = request.args.get("after_cursor")
+        if raw_cursor is None:
+            raw_cursor = request.args.get("since_cursor")
+        raw_round = request.args.get("after_round")
+        if raw_round is None:
+            raw_round = request.args.get("since_round")
+        after_cursor = None
+        after_round = None
+        if raw_cursor is not None:
+            try:
+                after_cursor = int(raw_cursor)
+            except (TypeError, ValueError):
+                return jsonify({
+                    "success": False,
+                    "error": "动画游标必须是非负整数。",
+                }), 400
+            if after_cursor < 0:
+                return jsonify({
+                    "success": False,
+                    "error": "动画游标必须是非负整数。",
+                }), 400
+        if raw_round is not None:
+            try:
+                after_round = int(raw_round)
+            except (TypeError, ValueError):
+                return jsonify({
+                    "success": False,
+                    "error": "动画轮次必须是非负整数。",
+                }), 400
+            if after_round < 0:
+                return jsonify({
+                    "success": False,
+                    "error": "动画轮次必须是非负整数。",
+                }), 400
+        animation_service = SimulationAnimationService(simulation_id)
+        payload = (
+            animation_service.get_animation()
+            if after_cursor is None and after_round is None
+            else animation_service.get_animation(
+                after_cursor=after_cursor,
+                after_round=after_round,
+            )
+        )
+        return _public_runtime_success(payload)
     except ValueError as exc:
-        return jsonify({"success": False, "error": str(exc)}), 404
+        return jsonify({
+            "success": False,
+            "error": public_error_message(exc, "推演动画不存在。"),
+        }), 404
     except Exception as exc:
         logger.error(f"获取推演动画失败: {exc}")
         return jsonify({
             "success": False,
-            "error": str(exc),
-            "traceback": traceback.format_exc()
+            "error": public_error_message(exc, "获取推演动画失败，请稍后重试。"),
         }), 500
 
 
@@ -1120,22 +1874,24 @@ def get_simulation_animation(simulation_id: str):
 def get_risk_definitions(simulation_id: str):
     try:
         _, risk_bundle = _load_risk_bundle(simulation_id)
-        return jsonify({
-            "success": True,
-            "data": {
-                "simulation_id": simulation_id,
-                "risk_definitions": risk_bundle.get("risk_definitions", []),
-                "count": len(risk_bundle.get("risk_definitions", [])),
-                "primary_risk_id": (
-                    risk_bundle.get("risk_objects_summary", {}).get("primary_risk_object_id")
-                    or risk_bundle.get("latest_risk_runtime_state", {}).get("primary_active_risk_id")
-                    or ""
-                ),
-            }
+        return _public_runtime_success({
+            "simulation_id": simulation_id,
+            "risk_definitions": risk_bundle.get("risk_definitions", []),
+            "count": len(risk_bundle.get("risk_definitions", [])),
+            "risk_contract_version": int(risk_bundle.get("risk_contract_version") or 1),
+            "risk_generation_audit": risk_bundle.get("risk_generation_audit", {}),
+            "primary_risk_id": (
+                risk_bundle.get("risk_objects_summary", {}).get("primary_risk_object_id")
+                or risk_bundle.get("latest_risk_runtime_state", {}).get("primary_active_risk_id")
+                or ""
+            ),
         })
     except Exception as e:
         logger.error(f"获取风险定义失败: {str(e)}")
-        return jsonify({"success": False, "error": str(e), "traceback": traceback.format_exc()}), 500
+        return jsonify({
+            "success": False,
+            "error": public_error_message(e, "获取风险定义失败，请稍后重试。"),
+        }), 500
 
 
 @simulation_bp.route('/<simulation_id>/risk/runtime', methods=['GET'])
@@ -1156,24 +1912,22 @@ def get_risk_runtime(simulation_id: str):
         if active_only:
             risk_states = [
                 item for item in risk_states
-                if float(item.get("severity_score") or 0) >= 35
-                or str(item.get("trend") or "") in {"rising", "falling"}
-                or len(item.get("active_step_ids") or []) > 0
+                if str(item.get("status") or "watch") not in {"dormant", "resolved"}
             ]
         if pinned_only:
             risk_states = [item for item in risk_states if str(item.get("risk_id") or "") in pinned_ids]
         latest_runtime["risk_states"] = risk_states
-        return jsonify({
-            "success": True,
-            "data": {
-                "simulation_id": simulation_id,
-                "latest_risk_runtime_state": latest_runtime,
-                "count": len(risk_states),
-            }
+        return _public_runtime_success({
+            "simulation_id": simulation_id,
+            "latest_risk_runtime_state": latest_runtime,
+            "count": len(risk_states),
         })
     except Exception as e:
         logger.error(f"获取风险运行态失败: {str(e)}")
-        return jsonify({"success": False, "error": str(e), "traceback": traceback.format_exc()}), 500
+        return jsonify({
+            "success": False,
+            "error": public_error_message(e, "获取风险运行态失败，请稍后重试。"),
+        }), 500
 
 
 @simulation_bp.route('/<simulation_id>/risk/events', methods=['GET'])
@@ -1187,17 +1941,17 @@ def get_risk_events(simulation_id: str):
             events = [item for item in events if str(item.get("risk_id") or "") == risk_id]
         if limit is not None and limit > 0 and len(events) > limit:
             events = events[-limit:]
-        return jsonify({
-            "success": True,
-            "data": {
-                "simulation_id": simulation_id,
-                "risk_events": events,
-                "count": len(events),
-            }
+        return _public_runtime_success({
+            "simulation_id": simulation_id,
+            "risk_events": events,
+            "count": len(events),
         })
     except Exception as e:
         logger.error(f"获取风险事件失败: {str(e)}")
-        return jsonify({"success": False, "error": str(e), "traceback": traceback.format_exc()}), 500
+        return jsonify({
+            "success": False,
+            "error": public_error_message(e, "获取风险事件失败，请稍后重试。"),
+        }), 500
 
 
 @simulation_bp.route('/<simulation_id>/risk/pin', methods=['POST'])
@@ -1205,6 +1959,12 @@ def update_risk_pin(simulation_id: str):
     try:
         data = request.get_json() or {}
         sim_dir, risk_bundle = _load_risk_bundle(simulation_id)
+        if int(risk_bundle.get("risk_contract_version") or 1) >= 2:
+            return jsonify({
+                "success": False,
+                "error": "新版风险对象由系统自动维护，当前为只读。",
+                "code": "risk_definitions_read_only",
+            }), 409
         latest_runtime = dict(risk_bundle.get("latest_risk_runtime_state") or {})
         pinned_risk_ids = []
         for item in data.get("pinned_risk_ids") or []:
@@ -1253,6 +2013,12 @@ def reframe_risks(simulation_id: str):
         manager = SimulationManager()
         config = manager.get_simulation_config(simulation_id) or {}
         sim_dir, risk_bundle = _load_risk_bundle(simulation_id)
+        if int(risk_bundle.get("risk_contract_version") or 1) >= 2:
+            return jsonify({
+                "success": False,
+                "error": "新版风险对象由系统自动维护，当前为只读。",
+                "code": "risk_definitions_read_only",
+            }), 409
         regions = []
         profiles = []
         region_graph_path = os.path.join(sim_dir, "region_graph_snapshot.json")
@@ -1567,7 +2333,7 @@ def get_simulation_history():
 @simulation_bp.route('/<simulation_id>/profiles', methods=['GET'])
 def get_simulation_profiles(simulation_id: str):
     """
-    获取模拟的Agent Profile
+    获取模拟的代理体画像
     
     Query参数：
         platform: 平台类型（reddit/twitter，默认reddit）
@@ -1594,7 +2360,7 @@ def get_simulation_profiles(simulation_id: str):
         }), 404
         
     except Exception as e:
-        logger.error(f"获取Profile失败: {str(e)}")
+        logger.error(f"获取代理体画像失败: {str(e)}")
         return jsonify({
             "success": False,
             "error": str(e),
@@ -1605,7 +2371,7 @@ def get_simulation_profiles(simulation_id: str):
 @simulation_bp.route('/<simulation_id>/profiles/realtime', methods=['GET'])
 def get_simulation_profiles_realtime(simulation_id: str):
     """
-    实时获取模拟的Agent Profile（用于在生成过程中实时查看进度）
+    实时获取模拟的代理体画像（用于在生成过程中实时查看进度）
     
     与 /profiles 接口的区别：
     - 直接读取文件，不经过 SimulationManager
@@ -1644,7 +2410,7 @@ def get_simulation_profiles_realtime(simulation_id: str):
         if not os.path.exists(sim_dir):
             return jsonify({
                 "success": False,
-                "error": f"模拟不存在: {simulation_id}"
+                "error": "未找到对应的模拟任务。"
             }), 404
         
         # 确定文件路径
@@ -1748,7 +2514,7 @@ def get_simulation_config_realtime(simulation_id: str):
         if not os.path.exists(sim_dir):
             return jsonify({
                 "success": False,
-                "error": f"模拟不存在: {simulation_id}"
+                "error": "未找到对应的模拟任务。"
             }), 404
         
         # 配置文件路径
@@ -1796,6 +2562,8 @@ def get_simulation_config_realtime(simulation_id: str):
             "file_modified_at": file_modified_at,
             "is_generating": is_generating,
             "generation_stage": generation_stage,
+            "generation_stage_label": _prepare_stage_label(generation_stage),
+            "current_stage_name": _prepare_stage_label(generation_stage),
             "config_generated": config_generated,
             "config": config
         }
@@ -1835,13 +2603,21 @@ def get_simulation_config_realtime(simulation_id: str):
             if isinstance(grounding_summary, dict):
                 successful_sources = grounding_summary.get("successful_sources") or grounding_summary.get("sources_attempted") or []
                 response_data["grounding_sources"] = successful_sources
+                source_labels = _grounding_source_labels(successful_sources)
+                response_data["grounding_source_labels"] = source_labels
                 note = grounding_summary.get("note")
                 if successful_sources:
-                    response_data["data_grounding_summary"] = f"Grounded with: {', '.join(successful_sources)}"
+                    response_data["data_grounding_summary"] = f"场景资料已由{'、'.join(source_labels)}提供依据。"
                 elif note:
-                    response_data["data_grounding_summary"] = note
+                    response_data["data_grounding_summary"] = _chinese_display_text(
+                        note,
+                        "场景基础资料已完成校验。",
+                    )
             elif grounding_summary:
-                response_data["data_grounding_summary"] = grounding_summary
+                response_data["data_grounding_summary"] = _chinese_display_text(
+                    grounding_summary,
+                    "场景基础资料已完成校验。",
+                )
 
         return jsonify({
             "success": True,
@@ -1876,7 +2652,7 @@ def get_simulation_config(simulation_id: str):
         if not config:
             return jsonify({
                 "success": False,
-                "error": f"模拟配置不存在，请先调用 /prepare 接口"
+                "error": "模拟配置不存在，请先启动场景准备。"
             }), 404
         
         return jsonify({
@@ -1906,7 +2682,7 @@ def download_simulation_config(simulation_id: str):
         if not os.path.exists(config_path):
             return jsonify({
                 "success": False,
-                "error": "配置文件不存在，请先调用 /prepare 接口"
+                "error": "配置文件不存在，请先启动场景准备。"
             }), 404
         
         return send_file(
@@ -1982,14 +2758,15 @@ def download_simulation_script(script_name: str):
 @simulation_bp.route('/generate-profiles', methods=['POST'])
 def generate_profiles():
     """
-    [已停用] OASIS 社交模拟已退役，此端点不再生成 Agent Profile。
+    [已停用] OASIS 社交模拟已退役，此端点不再生成代理体画像。
 
     返回 410 Gone，提示调用方该功能已被移除。
     """
     return jsonify({
         "success": False,
-        "error": "retired",
-        "message": "OASIS social simulation has been retired; profile generation via this endpoint is no longer supported.",
+        "error": "功能已退役",
+        "error_code": "retired",
+        "message": "旧版社交模拟已退役；该端点不再支持生成代理体画像。",
         "deprecated": True
     }), 410
 
@@ -2044,7 +2821,7 @@ def start_simulation():
         if not simulation_id:
             return jsonify({
                 "success": False,
-                "error": "请提供 simulation_id"
+                "error": "请提供模拟任务编号"
             }), 400
 
         platform = data.get('platform', 'parallel')
@@ -2059,18 +2836,18 @@ def start_simulation():
                 if max_rounds <= 0:
                     return jsonify({
                         "success": False,
-                        "error": "max_rounds 必须是正整数"
+                        "error": "最大轮数必须是正整数"
                     }), 400
             except (ValueError, TypeError):
                 return jsonify({
                     "success": False,
-                    "error": "max_rounds 必须是有效的整数"
+                    "error": "最大轮数必须是有效整数"
                 }), 400
 
         if platform not in ['twitter', 'reddit', 'parallel', 'envfish']:
             return jsonify({
                 "success": False,
-                "error": f"无效的平台类型: {platform}，可选: twitter/reddit/parallel/envfish"
+                "error": "平台类型无效，请选择单平台、双平台或环境推演模式。"
             }), 400
 
         # 检查模拟是否已准备好
@@ -2080,7 +2857,7 @@ def start_simulation():
         if not state:
             return jsonify({
                 "success": False,
-                "error": f"模拟不存在: {simulation_id}"
+                "error": "未找到对应的模拟任务。"
             }), 404
 
         if state.is_replay_only:
@@ -2118,6 +2895,28 @@ def start_simulation():
             enable_graph_memory_update = False
 
         force_restarted = False
+
+        if force:
+            logger.info(f"强制模式：关闭既有模拟环境 {simulation_id}")
+            try:
+                SimulationRunner.stop_existing_environment(simulation_id)
+            except Exception as e:
+                logger.warning(f"关闭既有模拟环境时出现警告: {str(e)}")
+                return jsonify({
+                    "success": False,
+                    "error": "现有推演仍在结束处理中，请稍后重试。",
+                }), 409
+
+        # A fresh prepare resets the simulation state to READY but intentionally
+        # leaves prior run artifacts available for history/report reads.  A
+        # forced start must still clear those artifacts, otherwise the runner can
+        # resume an old final-round checkpoint and report an instant completion.
+        if force and state.status == SimulationStatus.READY:
+            logger.info(f"强制模式：清理已准备模拟的旧运行日志 {simulation_id}")
+            cleanup_result = SimulationRunner.cleanup_simulation_logs(simulation_id)
+            if not cleanup_result.get("success"):
+                logger.warning(f"清理日志时出现警告: {cleanup_result.get('errors')}")
+            force_restarted = True
         
         # 智能处理状态：如果准备工作已完成，允许重新启动
         if state.status != SimulationStatus.READY:
@@ -2141,7 +2940,7 @@ def start_simulation():
                         else:
                             return jsonify({
                                 "success": False,
-                                "error": f"模拟正在运行中，请先调用 /stop 接口停止，或使用 force=true 强制重新开始"
+                                "error": "模拟正在运行中，请先停止当前推演，或启用强制重启选项。"
                             }), 400
 
                 # 如果是强制模式，清理运行日志
@@ -2160,7 +2959,7 @@ def start_simulation():
                 # 准备工作未完成
                 return jsonify({
                     "success": False,
-                    "error": f"模拟未准备好，当前状态: {state.status.value}，请先调用 /prepare 接口"
+                    "error": "模拟尚未准备完成，请先完成场景准备。"
                 }), 400
         
         # 获取图谱ID（用于图谱记忆更新）
@@ -2177,7 +2976,7 @@ def start_simulation():
             if not graph_id:
                 return jsonify({
                     "success": False,
-                    "error": "启用图谱记忆更新需要有效的 graph_id，请确保项目已构建图谱"
+                    "error": "启用图谱记忆更新需要有效的图谱编号，请确保项目已构建图谱。"
                 }), 400
             
             logger.info(f"启用图谱记忆更新: simulation_id={simulation_id}, graph_id={graph_id}")
@@ -2254,7 +3053,7 @@ def stop_simulation():
         if not simulation_id:
             return jsonify({
                 "success": False,
-                "error": "请提供 simulation_id"
+                "error": "请提供模拟任务编号"
             }), 400
         
         run_state = SimulationRunner.stop_simulation(simulation_id)
@@ -2297,33 +3096,99 @@ def inject_simulation_variable():
         if not simulation_id:
             return jsonify({
                 "success": False,
-                "error": "请提供 simulation_id"
+                "error": "请提供模拟任务编号"
             }), 400
 
-        variable = {
-            "variable_id": data.get("variable_id"),
-            "type": data.get("type", "disaster"),
-            "template": data.get("template"),
-            "name": data.get("name") or "Injected Variable",
-            "description": data.get("description", ""),
-            "target_regions": data.get("target_regions") or [],
-            "target_nodes": data.get("target_nodes") or [],
-            "start_round": data.get("start_round"),
-            "duration_rounds": data.get("duration_rounds", 1),
-            "intensity_0_100": data.get("intensity_0_100", data.get("intensity", 50)),
-            "policy_mode": data.get("policy_mode"),
-        }
-
-        result = SimulationRunner.inject_variable(
-            simulation_id=simulation_id,
-            variable=variable,
-            timeout=float(data.get("timeout", 30)),
+        manager = SimulationManager()
+        state = manager.get_simulation(simulation_id)
+        if not state:
+            return jsonify({
+                "success": False,
+                "error": "未找到对应的模拟任务。",
+            }), 404
+        idempotency_key = _normalize_injection_idempotency_key(
+            data.get("idempotency_key") or request.headers.get("Idempotency-Key")
         )
 
-        return jsonify({
-            "success": result.get("success", False),
-            "data": result
-        }), 200 if result.get("success") else 400
+        with _injection_request_lock(manager, simulation_id):
+            receipt = _read_injection_receipt(manager, simulation_id, idempotency_key)
+            if receipt:
+                artifact_ref = receipt.get("semantic_artifact_ref") or {}
+                logger.info(
+                    "semantic.inject_replay simulation_id=%s key=%s hash=%s",
+                    simulation_id,
+                    idempotency_key,
+                    artifact_ref.get("content_hash", ""),
+                )
+                return jsonify({"success": True, "data": receipt}), 200
+
+            project = ProjectManager.get_project(state.project_id)
+            if not project:
+                return jsonify({
+                    "success": False,
+                    "error": "未找到对应的场景项目。",
+                }), 404
+            foundation = _build_scenario_foundation(project, state)
+            semantic_artifact = SemanticInputNormalizer().normalize_intervention(
+                payload=data,
+                target_catalog=foundation.get("target_catalog") or [],
+                default_region_ids=foundation.get("region_ids") or [],
+                current_round=int(state.current_round or 0),
+                previous_artifact_ref=(
+                    data.get("semantic_artifact_ref")
+                    or state.semantic_artifact_ref
+                    or getattr(project, "semantic_artifact_ref", None)
+                ),
+            )
+            normalized = semantic_artifact.interventions[-1]
+            artifact_ref = SemanticArtifactStore.public_ref(semantic_artifact)
+
+            variable = {
+                "variable_id": normalized.input_id,
+                "type": normalized.type,
+                "template": data.get("template") or (normalized.atomic_keys[0] if normalized.atomic_keys else "generic"),
+                "name": normalized.name,
+                "description": normalized.description,
+                "target_regions": list(normalized.target_region_ids),
+                "target_nodes": list(normalized.target_entity_ids),
+                "start_round": normalized.time.start_round,
+                "duration_rounds": normalized.time.duration_rounds or 1,
+                "intensity_0_100": normalized.intensity.score if normalized.intensity.score is not None else 50,
+                "policy_mode": normalized.policy_mode or data.get("policy_mode"),
+                "atomic_keys": list(normalized.atomic_keys),
+                "action_primitives": list(normalized.action_primitives),
+                "semantic_artifact_ref": artifact_ref,
+            }
+
+            result = SimulationRunner.inject_variable(
+                simulation_id=simulation_id,
+                variable=variable,
+                timeout=float(data.get("timeout", 30)),
+            )
+            response_data = {
+                **result,
+                "normalized_intervention": variable,
+                "semantic_artifact_ref": artifact_ref,
+                "semantic_revision": semantic_artifact.revision,
+            }
+
+            if result.get("success"):
+                state.semantic_artifact_ref = artifact_ref
+                manager._save_simulation_state(state)
+                if hasattr(project, "semantic_artifact_ref"):
+                    project.semantic_artifact_ref = dict(state.semantic_artifact_ref)
+                    ProjectManager.save_project(project)
+                _write_injection_receipt(
+                    manager,
+                    simulation_id,
+                    idempotency_key,
+                    response_data,
+                )
+
+            return jsonify({
+                "success": result.get("success", False),
+                "data": response_data,
+            }), 200 if result.get("success") else 400
 
     except ValueError as e:
         return jsonify({
@@ -2376,34 +3241,29 @@ def get_run_status(simulation_id: str):
             if simulation_state and simulation_state.is_replay_only:
                 total_rounds = int(simulation_state.configured_total_rounds or simulation_state.current_round or 0)
                 total_hours = round(total_rounds * int(simulation_state.configured_minutes_per_round or 60) / 60, 1)
-                return jsonify({
-                    "success": True,
-                    "data": {
-                        "simulation_id": simulation_id,
-                        "runner_status": "completed",
-                        "current_round": total_rounds,
-                        "total_rounds": total_rounds,
-                        "progress_percent": 100,
-                        "simulated_hours": total_hours,
-                        "total_simulation_hours": total_hours,
-                        "twitter_running": False,
-                        "reddit_running": False,
-                        "twitter_actions_count": 0,
-                        "reddit_actions_count": 0,
-                        "total_actions_count": 0,
-                        "engine_mode": simulation_state.engine_mode,
-                        "scenario_mode": simulation_state.scenario_mode,
-                        "diffusion_template": simulation_state.diffusion_template,
-                        "search_mode": simulation_state.search_mode,
-                        "artifact_mode": simulation_state.artifact_mode,
-                        "golden_case_id": simulation_state.golden_case_id,
-                        "is_replay_only": True,
-                        "message": "冻结演示案例已完成，可直接播放。",
-                    }
+                return _public_runtime_success({
+                    "simulation_id": simulation_id,
+                    "runner_status": "completed",
+                    "current_round": total_rounds,
+                    "total_rounds": total_rounds,
+                    "progress_percent": 100,
+                    "simulated_hours": total_hours,
+                    "total_simulation_hours": total_hours,
+                    "twitter_running": False,
+                    "reddit_running": False,
+                    "twitter_actions_count": 0,
+                    "reddit_actions_count": 0,
+                    "total_actions_count": 0,
+                    "engine_mode": simulation_state.engine_mode,
+                    "scenario_mode": simulation_state.scenario_mode,
+                    "diffusion_template": simulation_state.diffusion_template,
+                    "search_mode": simulation_state.search_mode,
+                    "artifact_mode": simulation_state.artifact_mode,
+                    "golden_case_id": simulation_state.golden_case_id,
+                    "is_replay_only": True,
+                    "message": "冻结演示案例已完成，可直接播放。",
                 })
-            return jsonify({
-                "success": True,
-                "data": {
+            return _public_runtime_success({
                     "simulation_id": simulation_id,
                     "runner_status": "idle",
                     "current_round": 0,
@@ -2416,8 +3276,7 @@ def get_run_status(simulation_id: str):
                     "scenario_mode": simulation_state.scenario_mode if simulation_state else None,
                     "diffusion_template": simulation_state.diffusion_template if simulation_state else None,
                     "search_mode": simulation_state.search_mode if simulation_state else None,
-                }
-            })
+                })
         
         result = run_state.to_dict()
         manager = SimulationManager()
@@ -2427,17 +3286,13 @@ def get_run_status(simulation_id: str):
             result["scenario_mode"] = simulation_state.scenario_mode
             result["diffusion_template"] = simulation_state.diffusion_template
             result["search_mode"] = simulation_state.search_mode
-        return jsonify({
-            "success": True,
-            "data": result
-        })
+        return _public_runtime_success(result)
         
     except Exception as e:
         logger.error(f"获取运行状态失败: {str(e)}")
         return jsonify({
             "success": False,
-            "error": str(e),
-            "traceback": traceback.format_exc()
+            "error": public_error_message(e, "获取运行状态失败，请稍后重试。"),
         }), 500
 
 
@@ -2482,7 +3337,7 @@ def get_run_status_detail(simulation_id: str):
         run_state = SimulationRunner.get_run_state(simulation_id)
         platform_filter = request.args.get('platform')
         include_actions = request.args.get("include_actions", "true").lower() not in {"0", "false", "no", "off"}
-        include_envfish_raw = request.args.get("include_envfish_raw", "true").lower() not in {"0", "false", "no", "off"}
+        include_envfish_raw = request.args.get("include_envfish_raw", "false").lower() not in {"0", "false", "no", "off"}
         
         if not run_state:
             manager = SimulationManager()
@@ -2541,6 +3396,15 @@ def get_run_status_detail(simulation_id: str):
                 result["spread_events"] = envfish_artifacts.get("spread_events", [])
                 result["agent_interactions"] = envfish_artifacts.get("agent_interactions", [])
                 result["dynamic_edge_events"] = envfish_artifacts.get("dynamic_edge_events", [])
+                result["relationship_events"] = envfish_artifacts.get("relationship_events", [])
+                result["relationship_states"] = envfish_artifacts.get("relationship_states", [])
+                result["agent_action_decisions"] = envfish_artifacts.get("agent_action_decisions", [])
+                result["state_mutations"] = envfish_artifacts.get("state_mutations", [])
+                result["agent_emergence_events"] = envfish_artifacts.get("agent_emergence_events", [])
+                result["agent_lineage"] = envfish_artifacts.get("agent_lineage", [])
+                result["agent_candidate_events"] = envfish_artifacts.get("agent_candidate_events", [])
+                result["policy_execution_events"] = envfish_artifacts.get("policy_execution_events", [])
+                result["policy_execution_runtime_state"] = envfish_artifacts.get("policy_execution_runtime_state", {})
                 result["interventions"] = envfish_artifacts.get("interventions", [])
                 result["regional_scores"] = envfish_artifacts.get("regional_scores", [])
                 latest_snapshot = envfish_artifacts.get("latest_snapshot") or {}
@@ -2550,17 +3414,14 @@ def get_run_status_detail(simulation_id: str):
                     for item in feedback.get("feedback_propagation") or []
                     if item.get("loop")
                 ]
-                return jsonify({"success": True, "data": result})
-            return jsonify({
-                "success": True,
-                "data": {
+                return _public_runtime_success(result)
+            return _public_runtime_success({
                     "simulation_id": simulation_id,
                     "runner_status": "idle",
                     "all_actions": [],
                     "twitter_actions": [],
                     "reddit_actions": []
-                }
-            })
+                })
         
         manager = SimulationManager()
         simulation_state = manager.get_simulation(simulation_id)
@@ -2633,6 +3494,16 @@ def get_run_status_detail(simulation_id: str):
             result["latest_snapshot"] = envfish_artifacts.get("latest_snapshot")
             result["spread_events"] = envfish_artifacts.get("spread_events", [])
             result["agent_interactions"] = envfish_artifacts.get("agent_interactions", [])
+            result["dynamic_edge_events"] = envfish_artifacts.get("dynamic_edge_events", [])
+            result["relationship_events"] = envfish_artifacts.get("relationship_events", [])
+            result["relationship_states"] = envfish_artifacts.get("relationship_states", [])
+            result["agent_action_decisions"] = envfish_artifacts.get("agent_action_decisions", [])
+            result["state_mutations"] = envfish_artifacts.get("state_mutations", [])
+            result["agent_emergence_events"] = envfish_artifacts.get("agent_emergence_events", [])
+            result["agent_lineage"] = envfish_artifacts.get("agent_lineage", [])
+            result["agent_candidate_events"] = envfish_artifacts.get("agent_candidate_events", [])
+            result["policy_execution_events"] = envfish_artifacts.get("policy_execution_events", [])
+            result["policy_execution_runtime_state"] = envfish_artifacts.get("policy_execution_runtime_state", {})
             result["interventions"] = envfish_artifacts.get("interventions", [])
             result["regional_scores"] = envfish_artifacts.get("regional_scores", [])
             latest_snapshot = envfish_artifacts.get("latest_snapshot") or {}
@@ -2656,17 +3527,13 @@ def get_run_status_detail(simulation_id: str):
                 if confidences:
                     result["uncertainty_band"] = round(sum(confidences) / len(confidences), 2)
 
-        return jsonify({
-            "success": True,
-            "data": result
-        })
+        return _public_runtime_success(result)
         
     except Exception as e:
         logger.error(f"获取详细状态失败: {str(e)}")
         return jsonify({
             "success": False,
-            "error": str(e),
-            "traceback": traceback.format_exc()
+            "error": public_error_message(e, "获取详细状态失败，请稍后重试。"),
         }), 500
 
 
@@ -3011,26 +3878,26 @@ def interview_agent():
         if not simulation_id:
             return jsonify({
                 "success": False,
-                "error": "请提供 simulation_id"
+                "error": "请提供模拟任务编号"
             }), 400
         
         if agent_id is None:
             return jsonify({
                 "success": False,
-                "error": "请提供 agent_id"
+                "error": "请提供代理体编号"
             }), 400
         
         if not prompt:
             return jsonify({
                 "success": False,
-                "error": "请提供 prompt（采访问题）"
+                "error": "请提供采访问题"
             }), 400
         
         # 验证platform参数
         if platform and platform not in ("twitter", "reddit"):
             return jsonify({
                 "success": False,
-                "error": "platform 参数只能是 'twitter' 或 'reddit'"
+                "error": "平台参数无效，请选择已支持的单一社交平台。"
             }), 400
         
         # 检查环境状态
@@ -3065,7 +3932,7 @@ def interview_agent():
     except TimeoutError as e:
         return jsonify({
             "success": False,
-            "error": f"等待Interview响应超时: {str(e)}"
+            "error": "等待采访响应超时，请稍后重试。"
         }), 504
         
     except Exception as e:
@@ -3132,20 +3999,20 @@ def interview_agents_batch():
         if not simulation_id:
             return jsonify({
                 "success": False,
-                "error": "请提供 simulation_id"
+                "error": "请提供模拟任务编号"
             }), 400
 
         if not interviews or not isinstance(interviews, list):
             return jsonify({
                 "success": False,
-                "error": "请提供 interviews（采访列表）"
+                "error": "请提供采访列表"
             }), 400
 
         # 验证platform参数
         if platform and platform not in ("twitter", "reddit"):
             return jsonify({
                 "success": False,
-                "error": "platform 参数只能是 'twitter' 或 'reddit'"
+                "error": "平台参数无效，请选择已支持的单一社交平台。"
             }), 400
 
         # 验证每个采访项
@@ -3153,19 +4020,19 @@ def interview_agents_batch():
             if 'agent_id' not in interview:
                 return jsonify({
                     "success": False,
-                    "error": f"采访列表第{i+1}项缺少 agent_id"
+                    "error": f"采访列表第 {i + 1} 项缺少代理体编号"
                 }), 400
             if 'prompt' not in interview:
                 return jsonify({
                     "success": False,
-                    "error": f"采访列表第{i+1}项缺少 prompt"
+                    "error": f"采访列表第 {i + 1} 项缺少采访问题"
                 }), 400
             # 验证每项的platform（如果有）
             item_platform = interview.get('platform')
             if item_platform and item_platform not in ("twitter", "reddit"):
                 return jsonify({
                     "success": False,
-                    "error": f"采访列表第{i+1}项的platform只能是 'twitter' 或 'reddit'"
+                    "error": f"采访列表第 {i + 1} 项的平台参数无效"
                 }), 400
 
         # 检查环境状态
@@ -3203,7 +4070,7 @@ def interview_agents_batch():
     except TimeoutError as e:
         return jsonify({
             "success": False,
-            "error": f"等待批量Interview响应超时: {str(e)}"
+            "error": "等待批量采访响应超时，请稍后重试。"
         }), 504
 
     except Exception as e:
@@ -3259,20 +4126,20 @@ def interview_all_agents():
         if not simulation_id:
             return jsonify({
                 "success": False,
-                "error": "请提供 simulation_id"
+                "error": "请提供模拟任务编号"
             }), 400
 
         if not prompt:
             return jsonify({
                 "success": False,
-                "error": "请提供 prompt（采访问题）"
+                "error": "请提供采访问题"
             }), 400
 
         # 验证platform参数
         if platform and platform not in ("twitter", "reddit"):
             return jsonify({
                 "success": False,
-                "error": "platform 参数只能是 'twitter' 或 'reddit'"
+                "error": "平台参数无效，请选择已支持的单一社交平台。"
             }), 400
 
         # 检查环境状态
@@ -3306,7 +4173,7 @@ def interview_all_agents():
     except TimeoutError as e:
         return jsonify({
             "success": False,
-            "error": f"等待全局Interview响应超时: {str(e)}"
+            "error": "等待全局采访响应超时，请稍后重试。"
         }), 504
 
     except Exception as e:
@@ -3363,7 +4230,7 @@ def get_interview_history():
         if not simulation_id:
             return jsonify({
                 "success": False,
-                "error": "请提供 simulation_id"
+                "error": "请提供模拟任务编号"
             }), 400
 
         history = SimulationRunner.get_interview_history(
@@ -3395,7 +4262,7 @@ def get_env_status():
     """
     获取模拟环境状态
 
-    检查模拟环境是否存活（可以接收Interview命令）
+    检查模拟环境是否存活（可以接收访谈命令）
 
     请求（JSON）：
         {
@@ -3410,7 +4277,7 @@ def get_env_status():
                 "env_alive": true,
                 "twitter_available": true,
                 "reddit_available": true,
-                "message": "环境正在运行，可以接收Interview命令"
+                "message": "环境正在运行，可以接收访谈命令"
             }
         }
     """
@@ -3422,7 +4289,7 @@ def get_env_status():
         if not simulation_id:
             return jsonify({
                 "success": False,
-                "error": "请提供 simulation_id"
+                "error": "请提供模拟任务编号"
             }), 400
 
         env_alive = SimulationRunner.check_env_alive(simulation_id)
@@ -3431,27 +4298,23 @@ def get_env_status():
         env_status = SimulationRunner.get_env_status_detail(simulation_id)
 
         if env_alive:
-            message = "环境正在运行，可以接收Interview命令"
+            message = "环境正在运行，可以接收访谈命令"
         else:
             message = "环境未运行或已关闭"
 
-        return jsonify({
-            "success": True,
-            "data": {
-                "simulation_id": simulation_id,
-                "env_alive": env_alive,
-                "twitter_available": env_status.get("twitter_available", False),
-                "reddit_available": env_status.get("reddit_available", False),
-                "message": message
-            }
+        return _public_runtime_success({
+            "simulation_id": simulation_id,
+            "env_alive": env_alive,
+            "twitter_available": env_status.get("twitter_available", False),
+            "reddit_available": env_status.get("reddit_available", False),
+            "message": message,
         })
 
     except Exception as e:
         logger.error(f"获取环境状态失败: {str(e)}")
         return jsonify({
             "success": False,
-            "error": str(e),
-            "traceback": traceback.format_exc()
+            "error": public_error_message(e, "获取环境状态失败，请稍后重试。"),
         }), 500
 
 
@@ -3490,7 +4353,7 @@ def close_simulation_env():
         if not simulation_id:
             return jsonify({
                 "success": False,
-                "error": "请提供 simulation_id"
+                "error": "请提供模拟任务编号"
             }), 400
         
         result = SimulationRunner.close_simulation_env(

@@ -1,6 +1,18 @@
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Dict, List
+
+from ..config import Config
+from ..utils.llm_client import LLMClient
+from ..utils.logger import get_logger
+from .risk_candidate_extractor import (
+    RISK_CONTRACT_VERSION,
+    RISK_FAMILIES,
+    RiskCandidateExtractor,
+)
+
+
+logger = get_logger("envfish.risk_definition")
 
 
 @dataclass
@@ -8,6 +20,9 @@ class RiskBuildResult:
     risk_definitions: List[Dict[str, Any]]
     primary_risk_id: str
     generation_notes: List[str]
+    generation_audit: Dict[str, Any] = field(default_factory=dict)
+    candidate_ledger: List[Dict[str, Any]] = field(default_factory=list)
+    risk_contract_version: int = 1
 
 
 class RiskDefinitionBuilder:
@@ -70,7 +85,243 @@ class RiskDefinitionBuilder:
         },
     ]
 
+    INTERNAL_VARIABLE_NAMES = {"disaster_injection", "policy_injection"}
+
+    def __init__(self, llm_client: LLMClient | None = None):
+        self.llm_client = llm_client
+        if self.llm_client is None and Config.LLM_API_KEY:
+            try:
+                self.llm_client = LLMClient()
+            except Exception as exc:
+                logger.warning(f"风险对象命名模型初始化失败，将使用确定性中文标题: {exc}")
+
     def build(self, **kwargs) -> RiskBuildResult:
+        contract_version = self._contract_version(kwargs.get("risk_contract_version"))
+        if contract_version >= RISK_CONTRACT_VERSION:
+            return self._build_v2(**kwargs)
+        return self._build_v1(**kwargs)
+
+    def _build_v2(self, **kwargs) -> RiskBuildResult:
+        extraction = RiskCandidateExtractor().extract(**kwargs)
+        definitions = [dict(item) for item in extraction.definitions]
+        llm_applied = False
+        llm_fallback_reason = ""
+        if definitions and self.llm_client is not None:
+            try:
+                definitions = self._enrich_v2_with_llm(definitions, kwargs)
+                llm_applied = True
+            except Exception as exc:
+                llm_fallback_reason = str(exc)
+                logger.warning(f"风险对象中文归纳失败，将保留确定性结果: {exc}")
+
+        generation_mode = "mechanism_graph_hybrid" if llm_applied else "mechanism_graph_deterministic"
+        for index, definition in enumerate(definitions):
+            definition["generation_mode"] = generation_mode
+            definition["mode"] = "incident" if index == 0 else "watch"
+
+        if llm_applied:
+            llm_participation = "live"
+            llm_fallback_rate = 0.0
+        elif definitions and self.llm_client is None:
+            llm_participation = "not_configured"
+            llm_fallback_reason = "llm_client_unavailable"
+            llm_fallback_rate = 1.0
+        elif definitions:
+            llm_participation = "deterministic_fallback"
+            llm_fallback_rate = 1.0
+        else:
+            llm_participation = "not_needed"
+            llm_fallback_rate = 0.0
+
+        audit = {
+            **extraction.audit,
+            "generation_mode": generation_mode,
+            "llm_participation": llm_participation,
+            "llm_fallback_reason": llm_fallback_reason,
+            "llm_fallback_rate": llm_fallback_rate,
+            "zero_object_rate": 0.0 if definitions else 1.0,
+        }
+        if definitions and llm_fallback_reason:
+            audit["quality_flags"] = list(dict.fromkeys([*(audit.get("quality_flags") or []), "llm_naming_fallback"]))
+            for definition in definitions:
+                definition["quality_flags"] = list(dict.fromkeys([*(definition.get("quality_flags") or []), "llm_naming_fallback"]))
+        primary_id = str(definitions[0].get("risk_id") or "") if definitions else ""
+        notes = [
+            "风险对象由已校验的场景机制路径自动生成。",
+            "风险对象只用于监测、主风险切换、干预比较和报告组织，不直接改变推演结果。",
+        ]
+        if not definitions:
+            notes.append(f"未形成通过证据校验的风险对象：{audit.get('zero_reason') or '证据不足'}。")
+        return RiskBuildResult(
+            risk_definitions=definitions,
+            primary_risk_id=primary_id,
+            generation_notes=notes,
+            generation_audit=audit,
+            candidate_ledger=extraction.candidate_ledger,
+            risk_contract_version=RISK_CONTRACT_VERSION,
+        )
+
+    def _enrich_v2_with_llm(self, definitions: List[Dict[str, Any]], kwargs: Dict[str, Any]) -> List[Dict[str, Any]]:
+        allowed_ids = [str(item.get("risk_id") or "") for item in definitions]
+        prompt_candidates = []
+        for item in definitions:
+            statement = item.get("risk_statement") or {}
+            prompt_candidates.append({
+                "risk_id": item.get("risk_id"),
+                "current_title": item.get("title"),
+                "current_summary": item.get("summary"),
+                "allowed_primary_families": list(RISK_FAMILIES.keys()),
+                "primary_family": item.get("primary_family"),
+                "trigger_name": statement.get("trigger_name"),
+                "receptor_name": statement.get("receptor_name"),
+                "consequence": statement.get("consequence"),
+                "chain_steps": item.get("chain_steps") or [],
+                "mechanism_node_ids": item.get("mechanism_node_ids") or [],
+                "mechanism_edge_ids": item.get("mechanism_edge_ids") or [],
+            })
+        payload = self.llm_client.chat_json(
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "你是风险对象中文归纳器。所有 title、summary、consequence、reason 和 tags 必须使用简体中文。"
+                        "只能改写给定候选的表达，不得新增、删除或修改任何风险 ID、机制节点 ID、机制边 ID、区域、实体、Agent 或证据。"
+                        "primary_family 已由规则层确定，必须原样返回。"
+                        "标题必须保留给定的真实受体名称并说明具体损害或中断，不得只写地名加分类名，也不得把主分类“复合级联”直接当作风险内容。"
+                        "只返回 JSON。"
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": self._json_text({
+                        "task": "为已校验风险候选生成具体、现实、可读的中文标题和摘要。",
+                        "scenario_summary": str(kwargs.get("simulation_requirement") or "")[:1200],
+                        "output_schema": {
+                            "items": [{
+                                "risk_id": "必须原样返回",
+                                "title": "简体中文具体风险标题",
+                                "summary": "简体中文机制摘要",
+                                "consequence": "简体中文具体后果",
+                                "primary_family": "必须来自允许主分类",
+                                "tags": ["简体中文开放标签"],
+                                "reason": "简体中文归纳理由",
+                                "mechanism_node_ids": ["必须与输入完全一致"],
+                                "mechanism_edge_ids": ["必须与输入完全一致"],
+                            }]
+                        },
+                        "candidates": prompt_candidates,
+                    }),
+                },
+            ],
+            temperature=0.2,
+            max_tokens=3200,
+        )
+        items = payload.get("items") if isinstance(payload, dict) else None
+        if not isinstance(items, list):
+            raise ValueError("模型未返回有效的 items 数组")
+        returned_ids = [str(item.get("risk_id") or "") for item in items if isinstance(item, dict)]
+        if len(returned_ids) != len(allowed_ids) or set(returned_ids) != set(allowed_ids):
+            raise ValueError("模型返回的风险引用集合与候选不一致")
+        definitions_by_id = {str(item.get("risk_id") or ""): item for item in definitions}
+        updates = {}
+        allowed_output_fields = {
+            "risk_id",
+            "title",
+            "summary",
+            "consequence",
+            "primary_family",
+            "tags",
+            "reason",
+            "mechanism_node_ids",
+            "mechanism_edge_ids",
+        }
+        for item in items:
+            if not isinstance(item, dict):
+                raise ValueError("模型返回了无效风险条目")
+            if set(item) - allowed_output_fields:
+                raise ValueError("模型尝试返回未授权的实体、区域、关系或证据字段")
+            risk_id = str(item.get("risk_id") or "")
+            family = str(item.get("primary_family") or "")
+            if risk_id not in allowed_ids or family not in RISK_FAMILIES:
+                raise ValueError("模型返回了不允许的风险 ID 或主分类")
+            original = definitions_by_id[risk_id]
+            if family != str(original.get("primary_family") or ""):
+                raise ValueError("模型修改了规则层确定的风险主分类")
+            if list(item.get("mechanism_node_ids") or []) != list(original.get("mechanism_node_ids") or []):
+                raise ValueError("模型修改了机制节点引用")
+            if list(item.get("mechanism_edge_ids") or []) != list(original.get("mechanism_edge_ids") or []):
+                raise ValueError("模型修改了机制边引用")
+            title = self._chinese_display_text(item.get("title"), limit=80)
+            if title and not title.endswith("风险"):
+                title = f"{title.rstrip('。；;，, ')}风险"
+            summary = self._chinese_display_text(item.get("summary"), limit=500)
+            consequence = self._chinese_display_text(item.get("consequence"), limit=300)
+            reason = self._chinese_display_text(item.get("reason"), limit=240)
+            receptor_name = str((original.get("risk_statement") or {}).get("receptor_name") or "")
+            if receptor_name and (
+                not self._preserves_reference_name(title, receptor_name)
+                or not self._preserves_reference_name(summary, receptor_name)
+            ):
+                raise ValueError("模型归纳未保留真实受体引用")
+            tags = [
+                self._chinese_display_text(tag, limit=30)
+                for tag in (item.get("tags") or [])
+            ]
+            updates[risk_id] = {
+                "title": title,
+                "summary": summary,
+                "consequence": consequence,
+                "primary_family": family,
+                "tags": [tag for tag in tags if tag][:8],
+                "generation_reason": reason,
+            }
+        result = []
+        for definition in definitions:
+            updated = dict(definition)
+            llm_update = updates.get(str(definition.get("risk_id") or ""))
+            if llm_update and llm_update["title"] and llm_update["summary"]:
+                updated["title"] = llm_update["title"]
+                updated["summary"] = llm_update["summary"]
+                updated["primary_family"] = llm_update["primary_family"]
+                updated["primary_family_label"] = RISK_FAMILIES[llm_update["primary_family"]]["label"]
+                updated["risk_type"] = llm_update["primary_family"]
+                updated["tags"] = llm_update["tags"] or updated.get("tags") or []
+                updated["generation_reason"] = llm_update["generation_reason"]
+                statement = dict(updated.get("risk_statement") or {})
+                if llm_update["consequence"]:
+                    statement["consequence"] = llm_update["consequence"]
+                updated["risk_statement"] = statement
+            result.append(updated)
+        return result
+
+    def _contract_version(self, value: Any) -> int:
+        if value is None:
+            value = getattr(Config, "RISK_OBJECT_CONTRACT_VERSION", RISK_CONTRACT_VERSION)
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return RISK_CONTRACT_VERSION
+
+    def _chinese_display_text(self, value: Any, *, limit: int) -> str:
+        text = re.sub(r"\s+", " ", str(value or "").strip())[:limit]
+        if not re.search(r"[\u4e00-\u9fff]", text):
+            return ""
+        if any(token in text.lower() for token in self.INTERNAL_VARIABLE_NAMES):
+            return ""
+        return text
+
+    def _json_text(self, value: Any) -> str:
+        import json
+
+        return json.dumps(value, ensure_ascii=False, sort_keys=True)
+
+    def _preserves_reference_name(self, text: str, reference_name: str) -> bool:
+        if reference_name and reference_name in text:
+            return True
+        reduced = re.sub(r"(?:生态受体|环境受体|受影响对象|受体|系统|节点|主体)$", "", reference_name).strip()
+        return len(reduced) >= 2 and reduced in text
+
+    def _build_v1(self, **kwargs) -> RiskBuildResult:
         variables = [self._as_dict(item) for item in (kwargs.get("injected_variables") or [])]
         regions = [
             self._as_dict(item)
@@ -157,14 +408,36 @@ class RiskDefinitionBuilder:
 
     def reframe_runtime(self, existing_definitions=None, injected_variables=None, current_round=0, **kwargs) -> Dict[str, Any]:
         definitions = list(existing_definitions or [])
+        existing_version = next(
+            (
+                int(item.get("risk_contract_version") or 1)
+                for item in definitions
+                if isinstance(item, dict) and item.get("risk_contract_version") is not None
+            ),
+            self._contract_version(kwargs.get("risk_contract_version")),
+        )
+        if existing_version >= RISK_CONTRACT_VERSION:
+            return {
+                "risk_definitions": definitions,
+                "primary_risk_id": str(definitions[0].get("risk_id") or "") if definitions else "",
+                "created_risk_ids": [],
+                "updated_risk_ids": [],
+                "candidate_variable_ids": [
+                    str(self._as_dict(item).get("variable_id") or "")
+                    for item in (injected_variables or [])
+                    if self._as_dict(item).get("variable_id")
+                ],
+                "risk_contract_version": RISK_CONTRACT_VERSION,
+            }
         created = []
         for variable in injected_variables or []:
             variable_dict = self._as_dict(variable)
             risk_id = f"risk_variable_{len(definitions) + 1}"
             intensity = self._coerce_score(variable_dict.get("intensity_0_100", variable_dict.get("intensity", 50)), default=50)
+            variable_name = self._variable_display_name(variable_dict)
             definitions.append({
                 "risk_id": risk_id,
-                "title": variable_dict.get("name") or "注入变量风险",
+                "title": variable_name or "注入变量风险",
                 "summary": variable_dict.get("description") or "由运行时注入变量触发的新风险对象。",
                 "status": "watch",
                 "mode": "incident",
@@ -176,7 +449,7 @@ class RiskDefinitionBuilder:
                 "region_scope": variable_dict.get("target_regions") or [],
                 "chain_steps": ["变量注入", "局部状态变化", "风险链路刷新"],
                 "turning_points": ["注入变量强度或持续时间超过当前场景承载"],
-                "root_pressures": [variable_dict.get("name") or variable_dict.get("type") or "runtime_variable"],
+                "root_pressures": [variable_name or "运行时变量"],
                 "trigger_rules": {"source_variable_ids": [variable_dict.get("variable_id") or risk_id]},
                 "created_round": current_round,
             })
@@ -209,7 +482,11 @@ class RiskDefinitionBuilder:
             if actor_ref:
                 actor_refs.append(actor_ref)
         source_entities = self._source_entities(profiles[:8])
-        variable_names = [str(item.get("name") or item.get("type") or "").strip() for item in variables if item.get("name") or item.get("type")]
+        variable_names = [
+            name
+            for name in (self._variable_display_name(item) for item in variables)
+            if name
+        ]
         region_names = [item["region_name"] for item in region_refs]
         evidence_confidence = self._confidence_score(candidate, variables, regions, profiles)
         severity = self._severity_score(intensity, candidate, regions, profiles)
@@ -271,6 +548,23 @@ class RiskDefinitionBuilder:
         trigger = "、".join(variable_names[:2]) or "场景变量"
         scope = "、".join(region_names[:3]) or "已生成区域"
         return f"{trigger}已与{scope}等节点建立场景关联，当前需要把{template['title']}作为独立对象跟踪。"
+
+    def _variable_display_name(self, variable: Dict[str, Any]) -> str:
+        raw_name = str(variable.get("name") or variable.get("title") or "").strip()
+        if raw_name and raw_name not in self.INTERNAL_VARIABLE_NAMES:
+            return raw_name
+        description = re.sub(r"\s+", " ", str(variable.get("description") or "").strip())
+        if description:
+            return description[:28]
+        regions = [
+            str(item).strip()
+            for item in (variable.get("target_regions") or [])
+            if str(item).strip()
+        ]
+        type_label = "政策变量" if str(variable.get("type") or "").strip() == "policy" else "灾害变量"
+        if regions:
+            return f"{regions[0]}{type_label}"
+        return type_label
 
     def _cluster(self, template: Dict[str, Any], region_names: List[str], actor_refs: List[Dict[str, Any]], severity: float, actionability: float) -> Dict[str, Any]:
         return {

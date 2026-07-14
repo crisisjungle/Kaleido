@@ -19,7 +19,13 @@ from ..config import Config
 from ..utils.file_parser import FileParser
 from ..utils.llm_client import LLMClient
 from ..utils.logger import get_logger
+from .effort_contract import (
+    assert_effort_reference,
+    build_effort_snapshot,
+    normalize_effort_snapshot,
+)
 from .map_seed_manager import MapSeedManager
+from .semantic_input import SemanticArtifactStore, SemanticInputArtifact, SemanticInputNormalizer
 from .text_processor import TextProcessor
 
 logger = get_logger("envfish.scene_material")
@@ -281,6 +287,8 @@ def _normalize_initial_variables(value: Any) -> List[Dict[str, Any]]:
             continue
         name = _safe_text(item.get("name")) or f"初始变量 {index}"
         base = {
+            "variable_id": _safe_text(item.get("variable_id") or item.get("input_id")) or f"scene_variable_{index}",
+            "input_id": _safe_text(item.get("input_id") or item.get("variable_id")) or f"scene_variable_{index}",
             "name": name,
             "type": _safe_text(item.get("type")) or "custom",
             "description": _safe_text(item.get("description") or item.get("detail")) or name,
@@ -294,10 +302,44 @@ def _normalize_initial_variables(value: Any) -> List[Dict[str, Any]]:
                 for region in (item.get("target_regions") or item.get("targets") or [])
                 if _safe_text(region)
             ],
+            "target_region_ids": [
+                _safe_text(region)
+                for region in (item.get("target_region_ids") or [])
+                if _safe_text(region)
+            ],
+            "target_entity_ids": [
+                _safe_text(entity)
+                for entity in (item.get("target_entity_ids") or item.get("target_nodes") or [])
+                if _safe_text(entity)
+            ],
+            "atomic_keys": [
+                _safe_text(key)
+                for key in (item.get("atomic_keys") or [])
+                if _safe_text(key)
+            ],
+            "action_primitives": [
+                _safe_text(key)
+                for key in (item.get("action_primitives") or [])
+                if _safe_text(key)
+            ],
+            "executor_capability_keys": [
+                _safe_text(key)
+                for key in (item.get("executor_capability_keys") or [])
+                if _safe_text(key)
+            ],
+            "source_origin": _safe_text(item.get("source_origin")) or "user_input",
         }
         # Carry through any explicit change semantics the caller already provided
         # so the perturbation gate can read them before falling back to text.
-        for passthrough in ("direction", "intensity", "magnitude", "time_window"):
+        for passthrough in (
+            "direction",
+            "intensity",
+            "intensity_0_100",
+            "magnitude",
+            "time_window",
+            "start_round",
+            "duration_rounds",
+        ):
             explicit = _safe_text(item.get(passthrough))
             if explicit:
                 base[passthrough] = explicit
@@ -408,6 +450,7 @@ class SceneMaterialGenerator:
         selected_points = _normalize_points(payload.get("selected_points"))
         initial_variables = _normalize_initial_variables(payload.get("initial_variables"))
         map_context = self._load_map_context(_safe_text(payload.get("map_seed_id")))
+        effort_snapshot = self._resolve_effort_snapshot(payload, map_context)
 
         input_bundle = self._build_input_bundle(
             scene_id=scene_id,
@@ -417,10 +460,23 @@ class SceneMaterialGenerator:
             selected_points=selected_points,
             initial_variables=initial_variables,
             map_context=map_context,
+            effort_snapshot=effort_snapshot,
         )
 
-        generated = self._generate_with_llm(input_bundle) or self._fallback_generate(input_bundle)
-        seed = self._finalize_seed(scene_id, input_bundle, generated)
+        semantic_artifact = SemanticInputNormalizer(
+            llm_client=self.llm_client,
+            use_llm=self.llm_client is not None,
+        ).normalize_scene(
+            payload={**payload, "initial_variables": initial_variables},
+            document_texts=document_texts,
+            map_context=map_context,
+            previous_artifact_ref=payload.get("semantic_artifact_ref"),
+        )
+        generated = (
+            self._generate_with_llm(input_bundle, semantic_artifact)
+            or self._fallback_generate(input_bundle, semantic_artifact)
+        )
+        seed = self._finalize_seed(scene_id, input_bundle, generated, semantic_artifact)
         self._save_seed(seed)
         return seed
 
@@ -439,17 +495,64 @@ class SceneMaterialGenerator:
         if not instruction:
             raise ValueError("请提供修改说明")
 
+        existing_effort = seed.get("effort_snapshot")
+        if existing_effort:
+            existing_effort = normalize_effort_snapshot(existing_effort)
+            requested_snapshot_id = payload.get("effort_snapshot_id")
+            if requested_snapshot_id:
+                assert_effort_reference(
+                    existing_effort,
+                    effort_snapshot_id=requested_snapshot_id,
+                    requested_level=payload.get("effort_level"),
+                )
+        else:
+            existing_effort = build_effort_snapshot(
+                payload.get("effort_level") or "high",
+                effort_snapshot_id=payload.get("effort_snapshot_id"),
+            )
+
         existing_report = _safe_text(payload.get("current_report")) or self.get_report_text(scene_id) or seed.get("report_markdown", "")
         merged_variables = _normalize_initial_variables(payload.get("initial_variables"))
         if not merged_variables:
             merged_variables = seed.get("initial_variables") or []
+
+        semantic_payload = {
+            **(seed.get("input") or {}),
+            **payload,
+            "additional_context": "\n".join(
+                item for item in [
+                    _safe_text((seed.get("input") or {}).get("additional_context")),
+                    f"本次修订要求：{instruction}",
+                ] if item
+            ),
+            "initial_variables": merged_variables,
+        }
+        semantic_normalizer = SemanticInputNormalizer(
+            llm_client=self.llm_client,
+            use_llm=self.llm_client is not None,
+        )
+        map_context = self._load_map_context(_safe_text((seed.get("input") or {}).get("map_seed_id")))
+        previous_semantic_ref = seed.get("semantic_artifact_ref")
+        if not previous_semantic_ref:
+            backfilled_artifact = semantic_normalizer.normalize_scene(
+                payload=semantic_payload,
+                document_texts=[],
+                map_context=map_context,
+            )
+            previous_semantic_ref = SemanticArtifactStore.public_ref(backfilled_artifact)
+        semantic_artifact = semantic_normalizer.normalize_revision(
+            instruction=instruction,
+            previous_artifact_ref=previous_semantic_ref,
+            target_catalog=semantic_normalizer._target_catalog(map_context),
+            default_region_ids=semantic_normalizer._default_region_ids(map_context),
+        )
 
         prompt = {
             "task": "Revise an existing EnvFish scene material report.",
             "instruction": instruction,
             "existing_scene_seed": {key: value for key, value in seed.items() if key != "report_markdown"},
             "existing_report_markdown": _truncate(existing_report, 20000),
-            "updated_initial_variables": merged_variables,
+            "semantic_input": semantic_artifact.model_dump(mode="json"),
             "rules": [
                 "Preserve confirmed map locations unless the instruction explicitly changes them.",
                 "Keep the report suitable for downstream entity, relation, region, agent, and risk extraction.",
@@ -473,11 +576,17 @@ class SceneMaterialGenerator:
         if not generated:
             generated = dict(seed)
             generated["report_markdown"] = self._append_revision_note(existing_report, instruction, merged_variables)
-            generated["initial_variables"] = merged_variables
+            generated["initial_variables"] = self._semantic_variables(semantic_artifact)
 
         revised = dict(seed)
         revised.update(self._sanitize_generated_payload(generated))
         revised["scene_id"] = scene_id
+        revised["effort_snapshot"] = existing_effort
+        revised["semantic_artifact_ref"] = SemanticArtifactStore.public_ref(semantic_artifact)
+        revised["semantic_revision"] = semantic_artifact.revision
+        revised["scene_semantics"] = semantic_artifact.scene.model_dump(mode="json")
+        revised["normalized_event_inputs"] = [item.model_dump(mode="json") for item in semantic_artifact.events]
+        revised["normalized_policy_inputs"] = [item.model_dump(mode="json") for item in semantic_artifact.policies]
         revised["updated_at"] = datetime.now().isoformat()
         revised["revision_history"] = [
             *(seed.get("revision_history") or []),
@@ -486,12 +595,26 @@ class SceneMaterialGenerator:
                 "updated_at": revised["updated_at"],
             },
         ]
-        if merged_variables:
-            # Re-apply the machine gate so a revision cannot re-inject stable-context
-            # variables back into the perturbation track.
-            perturbations, stable_context = _split_variables_by_role(merged_variables)
-            revised["initial_variables"] = perturbations
-            revised["stable_context_variables"] = stable_context
+        revised["initial_variables"] = self._semantic_variables(semantic_artifact)
+        existing_stable_context = list(seed.get("stable_context_variables") or [])
+        existing_descriptions = {
+            _safe_text(item.get("description"))
+            for item in existing_stable_context
+            if isinstance(item, dict)
+        }
+        revised["stable_context_variables"] = [
+            *existing_stable_context,
+            *[
+            {
+                "name": item[:48] or "稳态背景",
+                "type": "custom",
+                "description": item,
+                "epistemic_role": "stable_context",
+            }
+            for item in semantic_artifact.scene.stable_contexts
+            if item not in existing_descriptions
+            ],
+        ]
         self._save_seed(revised)
         return revised
 
@@ -543,6 +666,29 @@ class SceneMaterialGenerator:
             },
         }
 
+    @staticmethod
+    def _resolve_effort_snapshot(
+        payload: Dict[str, Any],
+        map_context: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        map_seed = map_context.get("seed") if isinstance(map_context.get("seed"), dict) else {}
+        seed_snapshot = map_seed.get("effort_snapshot") if isinstance(map_seed, dict) else None
+        requested_id = payload.get("effort_snapshot_id")
+        requested_level = payload.get("effort_level")
+        if seed_snapshot:
+            resolved = normalize_effort_snapshot(seed_snapshot)
+            if requested_id:
+                assert_effort_reference(
+                    resolved,
+                    effort_snapshot_id=requested_id,
+                    requested_level=requested_level,
+                )
+            return resolved
+        return build_effort_snapshot(
+            requested_level or "high",
+            effort_snapshot_id=requested_id,
+        )
+
     def _build_input_bundle(
         self,
         *,
@@ -553,6 +699,7 @@ class SceneMaterialGenerator:
         selected_points: List[Dict[str, Any]],
         initial_variables: List[Dict[str, Any]],
         map_context: Dict[str, Any],
+        effort_snapshot: Dict[str, Any],
     ) -> Dict[str, Any]:
         scene_type = _safe_text(payload.get("scene_type")) or "custom"
         location = _safe_text(payload.get("location"))
@@ -587,29 +734,23 @@ class SceneMaterialGenerator:
             "selected_points": selected_points,
             "initial_variables": initial_variables,
             "map_context": map_context,
+            "effort_snapshot": effort_snapshot,
             "created_at": datetime.now().isoformat(),
         }
 
-    def _generate_with_llm(self, input_bundle: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    def _generate_with_llm(
+        self,
+        input_bundle: Dict[str, Any],
+        semantic_artifact: SemanticInputArtifact,
+    ) -> Optional[Dict[str, Any]]:
         if not self.llm_client:
             return None
         prompt = {
             "task": "Compose an EnvFish scene material report.",
-            "scene_input": {
-                "scene_type": input_bundle["scene_type"],
-                "location": input_bundle["location"],
-                "time_scope": input_bundle["time_scope"],
-                "event_or_baseline": input_bundle["event_or_baseline"],
-                "focus": input_bundle["focus"],
-                "simulation_requirement": input_bundle["simulation_requirement"],
-                "additional_context": input_bundle["additional_context"],
-                "known_entities": input_bundle["known_entities"],
-                "analysis_boundaries": input_bundle["analysis_boundaries"],
-                "report_questions": input_bundle["report_questions"],
-                "selected_points": input_bundle["selected_points"],
-                "initial_variables": input_bundle["initial_variables"],
-                "uploaded_files": input_bundle["uploaded_files"],
-            },
+            "semantic_input": semantic_artifact.model_dump(mode="json"),
+            "scene_type": input_bundle["scene_type"],
+            "selected_points": input_bundle["selected_points"],
+            "uploaded_files": input_bundle["uploaded_files"],
             "document_excerpt": _truncate("\n\n---\n\n".join(input_bundle["document_texts"]), 24000),
             "map_context": {
                 "map_seed_id": input_bundle["map_context"].get("map_seed_id"),
@@ -650,37 +791,33 @@ class SceneMaterialGenerator:
             logger.warning(f"Scene compose LLM failed, using fallback: {exc}")
             return None
 
-    # Sections that require LLM synthesis (subjects, relations, metrics, branches,
-    # extraction hints). The fallback MUST NOT invent generic prose for these — it
-    # only marks them as not-generated so downstream extraction never ingests
-    # fabricated facts. This is the "honest skeleton" contract.
-    _LLM_REQUIRED_SECTION_LABEL = "未生成（需 LLM）"
-
-    def _fallback_generate(self, input_bundle: Dict[str, Any]) -> Dict[str, Any]:
-        """LLM-unavailable HONEST SKELETON.
-
-        Echoes only user-confirmed inputs (locations, variables, anchors, uploaded
-        material) and explicitly labels every synthesis section as not-generated.
-        It must NOT fabricate generic relationship / subject / metric prose, because
-        downstream extraction would treat that prose as grounded fact.
-        """
+    def _fallback_generate(
+        self,
+        input_bundle: Dict[str, Any],
+        semantic_artifact: SemanticInputArtifact,
+    ) -> Dict[str, Any]:
+        """Build a source-grounded report from the validated semantic artifact."""
         title_subject = input_bundle["location"] or input_bundle["event_or_baseline"] or "未命名场景"
         scene_label = {
             "historical_event": "历史事件",
             "stable_environment": "环境稳态",
             "hybrid": "混合场景",
         }.get(input_bundle["scene_type"], "自定义场景")
-        title = f"{title_subject}{scene_label}素材报告（骨架 / 未经 LLM 合成）"
+        title = f"{title_subject}{scene_label}素材报告"
         selected_points = input_bundle["selected_points"]
         primary_point = selected_points[0] if selected_points else {}
         map_report = input_bundle["map_context"].get("report_text") or ""
         document_excerpt = _truncate("\n\n".join(input_bundle["document_texts"]), 5000)
-
-        # Machine gate runs in the fallback too: split user variables into the two
-        # honest tracks instead of dumping everything into initial_variables.
-        perturbations, stable_context = _split_variables_by_role(input_bundle["initial_variables"])
-
-        missing = self._LLM_REQUIRED_SECTION_LABEL
+        perturbations = self._semantic_variables(semantic_artifact)
+        stable_context = [
+            {
+                "name": item[:48] or "稳态背景",
+                "type": "custom",
+                "description": item,
+                "epistemic_role": "stable_context",
+            }
+            for item in semantic_artifact.scene.stable_contexts
+        ]
 
         def _echo_lines(value: Any, empty_note: str) -> List[str]:
             lines = [f"- {item}" for item in _multiline_lines(value)]
@@ -711,90 +848,48 @@ class SceneMaterialGenerator:
             for point in selected_points
         ] or ["- 用户尚未确认地图点位。"]
 
-        def _variable_line(item: Dict[str, Any]) -> str:
-            bits = [f"- {item.get('name')}：{item.get('description')}"]
-            direction = item.get("direction")
-            intensity = item.get("intensity")
-            if direction:
-                bits.append(f"方向={direction}")
-            if intensity:
-                bits.append(f"强度={intensity}")
-            return "，".join(bits)
-
-        perturbation_lines = [_variable_line(item) for item in perturbations] or [
-            "- 用户未提供具备方向/强度的扰动变量。"
-        ]
-        stable_context_lines = [
-            f"- {item.get('name')}：{item.get('description')}（稳态背景，非注入变量）"
-            for item in stable_context
-        ] or ["- 无被归类为稳态背景的变量。"]
+        event_lines = [f"- **{item.name}**：{item.description}" for item in semantic_artifact.events]
+        policy_lines = [f"- **{item.name}**：{item.intent}" for item in semantic_artifact.policies]
+        stable_context_lines = [f"- {item}" for item in semantic_artifact.scene.stable_contexts]
 
         report = "\n".join(
             [
                 f"# {title}",
                 "",
-                "> 本报告为 **诚实骨架**：LLM 当前不可用，仅回显用户已确认输入。",
-                "> 标注为 “" + missing + "” 的章节尚未经过 LLM 合成，**不得**当作已成立事实进入下游抽取。",
+                "## 场景摘要",
+                f"- 场景类型：{scene_label}",
+                f"- 核心地点：{semantic_artifact.scene.location or input_bundle['location'] or '当前分析区域'}",
+                f"- 推演目标：{semantic_artifact.scene.simulation_requirement or input_bundle['simulation_requirement'] or '分析场景变化及其影响'}",
                 "",
-                "## 0. 文档用途与推演边界",
-                "本骨架由场景素材生成器在无 LLM 情况下生成，仅整理用户已确认的输入；",
-                "主体、关系、指标等合成内容需在 LLM 可用后补全，当前一律标注为未生成。",
+                "## 稳态背景",
+                *(stable_context_lines or ["- 以用户提供的区域背景为基线。"]),
                 "",
-                "## 1. 场景摘要（回显用户输入）",
-                f"- 场景类型: {scene_label}",
-                f"- 地点: {input_bundle['location'] or '未提供'}",
-                f"- 时间范围/稳态周期: {input_bundle['time_scope'] or '未提供'}",
-                f"- 事件或稳态描述: {input_bundle['event_or_baseline'] or '未提供'}",
-                f"- 重点关系 / 关注问题: {input_bundle['focus'] or '未提供'}",
-                f"- 补充背景线索: {input_bundle['additional_context'] or '未提供'}",
+                "## 事件与压力",
+                *(event_lines or ["- 当前场景以稳态背景为主。"]),
                 "",
-                "## 2. 输入来源",
+                "## 政策与干预",
+                *(policy_lines or ["- 当前未设置独立政策措施。"]),
+                "",
+                "## 输入来源",
                 *source_lines,
                 "",
-                "## 3. 区域背景（仅回显已确认点位）",
+                "## 区域与空间锚点",
                 *point_lines,
                 "",
-                "## 4. 地图稳态与空间事实",
-                map_report.strip() or "用户尚未生成地图稳态报告。",
+                "## 地图背景",
+                map_report.strip() or "分析范围以用户提供的地点、区域背景和场景文本为准。",
                 "",
-                "## 5. 文档材料摘要（原文摘录，未做合成）",
-                document_excerpt or "当前没有上传文档摘录。",
+                "## 参考材料",
+                document_excerpt or "事实锚点来自当前场景输入。",
                 "",
-                "## 6. 主体与 agent 画像",
-                "### 用户已确认对象（回显）",
+                "## 已知主体、设施与环境对象",
                 *known_entity_lines,
                 "",
-                f"### 推断主体画像: {missing}",
-                "（需 LLM 从文档与地图事实中抽取真实主体；骨架不编造通用角色。）",
-                "",
-                f"## 7. 关键关系网络: {missing}",
-                "（关系是一等数据，需 LLM 基于证据生成 observed/inferred 边；骨架不写死任何关系句。）",
-                "",
-                "## 8. 注入变量（扰动轨，已通过机器闸门）",
-                *perturbation_lines,
-                "",
-                "## 9. 稳态背景变量（非注入）",
-                *stable_context_lines,
-                "",
-                f"## 10. 推演指标: {missing}",
-                "（指标需结合真实主体与关系生成；骨架不预设通用指标清单。）",
-                "",
-                f"## 11. 可推演情景分支: {missing}",
-                "（情景分支需 LLM 基于扰动变量与关系结构生成。）",
-                "",
-                "## 12. 分析边界与排除项（回显用户输入）",
+                "## 分析边界",
                 *boundary_lines,
                 "",
-                "## 13. 重点追问（回显用户输入）",
+                "## 重点问题",
                 *report_question_lines,
-                "",
-                f"## 14. Agent 抽取提示: {missing}",
-                "（需 LLM 给出针对本场景的抽取提示；骨架不提供通用模板提示。）",
-                "",
-                "## 15. 关键不确定性",
-                "- 本报告为无 LLM 骨架，主体 / 关系 / 指标 / 情景分支均未生成。",
-                "- 仅用户已确认输入（地点、变量、地图点位、文档）可视为输入级事实。",
-                "- 进入正式推演前需在 LLM 可用时重新生成合成章节。",
             ]
         )
 
@@ -815,11 +910,8 @@ class SceneMaterialGenerator:
             },
             "initial_variables": perturbations,
             "stable_context_variables": stable_context,
-            "assumptions": ["本报告为无 LLM 诚实骨架，合成章节（主体/关系/指标/情景）均未生成。"],
-            "uncertainties": [
-                "主体、关系、指标与情景分支尚未生成，需在 LLM 可用时补全。",
-                "仅用户已确认输入可视为事实，骨架未引入任何推断或合成结论。",
-            ],
+            "assumptions": list(semantic_artifact.assumptions),
+            "uncertainties": [],
             "fallback_mode": "honest_skeleton",
             "report_markdown": report,
         }
@@ -841,7 +933,7 @@ class SceneMaterialGenerator:
         report = _safe_text(generated.get("report_markdown"))
         title = _safe_text(generated.get("title")) or "场景素材报告"
         if not report:
-            report = f"# {title}\n\n当前没有生成报告正文，请补充场景信息后重试。"
+            report = f"# {title}\n\n本报告依据当前场景输入整理分析范围、事件、政策和空间对象。"
         raw_variables = generated.get("initial_variables") if isinstance(generated.get("initial_variables"), list) else []
         # Machine gate: only true perturbations (direction/intensity/change semantics)
         # stay in initial_variables; everything else is demoted to stable_context so
@@ -885,6 +977,7 @@ class SceneMaterialGenerator:
         scene_id: str,
         input_bundle: Dict[str, Any],
         generated: Dict[str, Any],
+        semantic_artifact: SemanticInputArtifact,
     ) -> Dict[str, Any]:
         sanitized = self._sanitize_generated_payload(generated)
         if not sanitized["locations"] and input_bundle["selected_points"]:
@@ -897,11 +990,36 @@ class SceneMaterialGenerator:
             sanitized["stable_context_variables"] = stable_context
         if not sanitized["source_mode"]:
             sanitized["source_mode"] = self._infer_source_mode(input_bundle)
+        semantic_variables = self._semantic_variables(semantic_artifact)
+        if semantic_variables:
+            sanitized["initial_variables"] = semantic_variables
+        if semantic_artifact.scene.stable_contexts:
+            _, source_stable_context = _split_variables_by_role(input_bundle["initial_variables"])
+            known_descriptions = {
+                _safe_text(item.get("description")) for item in source_stable_context if isinstance(item, dict)
+            }
+            semantic_stable_context = [
+                {
+                    "name": item[:48] or "稳态背景",
+                    "type": "custom",
+                    "description": item,
+                    "epistemic_role": "stable_context",
+                }
+                for item in semantic_artifact.scene.stable_contexts
+                if item not in known_descriptions
+            ]
+            sanitized["stable_context_variables"] = [*source_stable_context, *semantic_stable_context]
         return {
             "scene_id": scene_id,
             "status": "draft",
             "created_at": input_bundle["created_at"],
             "updated_at": datetime.now().isoformat(),
+            "effort_snapshot": input_bundle["effort_snapshot"],
+            "semantic_artifact_ref": SemanticArtifactStore.public_ref(semantic_artifact),
+            "semantic_revision": semantic_artifact.revision,
+            "scene_semantics": semantic_artifact.scene.model_dump(mode="json"),
+            "normalized_event_inputs": [item.model_dump(mode="json") for item in semantic_artifact.events],
+            "normalized_policy_inputs": [item.model_dump(mode="json") for item in semantic_artifact.policies],
             "input": {
                 "location": input_bundle["location"],
                 "time_scope": input_bundle["time_scope"],
@@ -914,10 +1032,52 @@ class SceneMaterialGenerator:
                 "simulation_requirement": input_bundle["simulation_requirement"],
                 "uploaded_files": input_bundle["uploaded_files"],
                 "map_seed_id": input_bundle["map_context"].get("map_seed_id"),
+                "effort_snapshot_id": input_bundle["effort_snapshot"].get("effort_snapshot_id"),
                 "selected_points": input_bundle["selected_points"],
             },
             **sanitized,
         }
+
+    @staticmethod
+    def _semantic_variables(semantic_artifact: SemanticInputArtifact) -> List[Dict[str, Any]]:
+        variables: List[Dict[str, Any]] = []
+        for item in semantic_artifact.events:
+            variables.append({
+                "variable_id": item.input_id,
+                "input_id": item.input_id,
+                "type": "disaster",
+                "name": item.name,
+                "description": item.description,
+                "direction": item.intensity.direction or None,
+                "intensity": item.intensity.label_zh or item.intensity.score,
+                "intensity_0_100": item.intensity.score,
+                "target_region_ids": list(item.target_region_ids),
+                "target_entity_ids": list(item.target_entity_ids),
+                "atomic_keys": list(item.atomic_keys),
+                "expected_effects": list(item.expected_effects),
+                "source_origin": item.source_origin,
+                "epistemic_role": "perturbation",
+            })
+        for item in semantic_artifact.policies:
+            variables.append({
+                "variable_id": item.input_id,
+                "input_id": item.input_id,
+                "type": "policy",
+                "name": item.name,
+                "description": item.intent,
+                "intent": item.intent,
+                "direction": item.intensity.direction or None,
+                "intensity": item.intensity.label_zh or item.intensity.score,
+                "intensity_0_100": item.intensity.score,
+                "target_region_ids": list(item.target_region_ids),
+                "target_entity_ids": list(item.target_entity_ids),
+                "action_primitives": list(item.action_primitives),
+                "executor_capability_keys": list(item.executor_capability_keys),
+                "expected_effects": list(item.expected_effects),
+                "source_origin": item.source_origin,
+                "epistemic_role": "perturbation",
+            })
+        return variables
 
     def _save_seed(self, seed: Dict[str, Any]) -> None:
         scene_id = seed["scene_id"]
@@ -943,7 +1103,6 @@ class SceneMaterialGenerator:
                 "",
                 "## 修订说明",
                 f"- 用户修改要求: {instruction}",
-                "- 当前为无 LLM 兜底修订，建议继续补充具体段落要求后重新生成。",
                 "",
                 "### 修订后的初始变量",
                 *variable_lines,

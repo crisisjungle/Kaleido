@@ -54,7 +54,7 @@ class RiskProjectionDeepeningTest(unittest.TestCase):
         objects = project_legacy_risk_objects(self._definitions(), self._bundle())
         band = objects[0]["uncertainty_band"]
         self.assertTrue(band["derived"])
-        self.assertIn("not a measurement", band["label"])
+        self.assertIn("非实测值", band["label"])
         # Band is centered on the live runtime tension.
         self.assertEqual(band["center"], 63.0)
         # Width has a strictly positive epistemic + volatility contribution.

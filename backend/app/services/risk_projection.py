@@ -15,8 +15,14 @@ def project_legacy_risk_objects(risk_definitions: List[Dict[str, Any]], runtime_
         risk_id = str(item.get("risk_id") or item.get("risk_object_id") or f"risk_{index + 1}")
         state = risk_states.get(risk_id) or {}
         confidence_score = state.get("confidence_score") or item.get("confidence_score") or item.get("confidence") or 0
+        confidence_number = _coerce_float(confidence_score) or 0.0
         obj = {
             "risk_object_id": risk_id,
+            "risk_contract_version": int(item.get("risk_contract_version") or 1),
+            "generation_mode": item.get("generation_mode") or ("legacy_template_v1" if not item.get("risk_contract_version") else ""),
+            "primary_family": item.get("primary_family") or item.get("risk_type") or "",
+            "primary_family_label": item.get("primary_family_label") or "",
+            "tags": item.get("tags") or [],
             "title": item.get("title") or item.get("name") or risk_id,
             "summary": item.get("summary") or item.get("description") or "",
             "status": state.get("status") or item.get("status") or "watch",
@@ -25,6 +31,19 @@ def project_legacy_risk_objects(risk_definitions: List[Dict[str, Any]], runtime_
             "severity_score": state.get("severity_score") or item.get("severity_score") or item.get("severity") or 0,
             "confidence_score": confidence_score,
             "actionability_score": item.get("actionability_score") or 0,
+            "priority_score": item.get("priority_score") or 0,
+            "impact_score": item.get("impact_score") or item.get("severity_score") or 0,
+            "evidence_strength_score": item.get("evidence_strength_score") or confidence_number * (1 if confidence_number > 1 else 100),
+            "propagation_score": item.get("propagation_score") or 0,
+            "risk_statement": item.get("risk_statement") or {},
+            "mechanism_node_ids": item.get("mechanism_node_ids") or [],
+            "mechanism_edge_ids": item.get("mechanism_edge_ids") or item.get("edge_ids") or [],
+            "edge_ids": item.get("edge_ids") or item.get("mechanism_edge_ids") or [],
+            "monitoring_metrics": item.get("monitoring_metrics") or [],
+            "quality_flags": item.get("quality_flags") or [],
+            "source_signature": item.get("source_signature") or "",
+            "created_round": int(item.get("created_round") or 0),
+            "lifecycle_status": item.get("lifecycle_status") or item.get("runtime_status") or "",
             "region_scope": item.get("region_scope") or item.get("regions") or [],
             "primary_regions": item.get("primary_regions") or [],
             "source_entity_uuids": item.get("source_entity_uuids") or [],
@@ -123,7 +142,7 @@ def _derive_uncertainty_band(
     center = runtime_tension
     band: Dict[str, Any] = {
         "derived": True,
-        "label": "derived uncertainty band (not a measurement)",
+        "label": "派生不确定性区间（非实测值）",
         "confidence_score": confidence_score,
         "confidence_unit": round(confidence_unit, 3),
         "epistemic_half_width": epistemic_half_width,

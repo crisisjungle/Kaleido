@@ -32,7 +32,7 @@
 
       <section class="intro-section">
         <div class="section-copy">
-          <span class="section-kicker">01 / Process</span>
+          <span class="section-kicker">01 / 推演流程</span>
           <h2>标准化的生态推演流程</h2>
           <p>图谱构建、环境搭建、模拟、报告和互动能力仍然沿用现有工作台；每一部分都为您提供深度的生态洞察。</p>
         </div>
@@ -47,7 +47,7 @@
 
       <section class="intro-section alt-bg">
         <div class="section-copy">
-          <span class="section-kicker">02 / Templates</span>
+          <span class="section-kicker">02 / 场景模板</span>
           <h2>先选一个生态切口，再把变量写进系统。</h2>
           <p>下方模板只负责起笔。真正的输入仍然是你的材料与约束条件，系统会引导您逐步细化推演规则。</p>
         </div>
@@ -62,9 +62,9 @@
 
       <section id="launch-composer" class="launch-section">
         <div class="section-copy launch-section-copy">
-          <span class="section-kicker">03 / Launch</span>
+          <span class="section-kicker">03 / 开始搭建</span>
           <h2>场景生成流程，一眼看完。</h2>
-          <p>先把场景素材整理完整，再进入正式推演。step1 会围绕地图锚点、稳态背景、参考资料和素材报告四个环节逐步完成场景搭建。</p>
+          <p>先把场景素材整理完整，再进入正式推演。第一步会围绕地图锚点、稳态背景、参考资料和素材报告四个环节逐步完成场景搭建。</p>
         </div>
         <div class="process-grid showcase-grid">
           <article v-for="item in launchSteps" :key="item.id" class="process-card">
@@ -88,16 +88,16 @@ const router = useRouter()
 const restoringDemo = ref(false)
 
 const prompts = [
-  { type: 'Wetland', title: '湿地修复推演', desc: '评估治理计划、极端天气和游客密度叠加后的生态走向。' },
-  { type: 'River', title: '流域协同治理', desc: '观察上游排污、工业调整和公共传播如何共同影响系统。' },
-  { type: 'Coastline', title: '海岸带风险联动', desc: '把产业、灾害和资源调度放进同一张生态沙盘。' }
+  { type: '湿地', title: '湿地修复推演', desc: '评估治理计划、极端天气和游客密度叠加后的生态走向。' },
+  { type: '流域', title: '流域协同治理', desc: '观察上游排污、工业调整和公共传播如何共同影响系统。' },
+  { type: '海岸带', title: '海岸带风险联动', desc: '把产业、灾害和资源调度放进同一张生态沙盘。' }
 ]
 
 const workflow = [
-  { id: '01', title: '背景生成', desc: '基于地图锚点、稳态背景和参考资料，自动生成场景素材报告。' },
-  { id: '02', title: '场景设计', desc: '抽取角色、场景与资源约束，把变量真正注入环境。' },
-  { id: '03', title: '开始模拟', desc: '按轮次推进系统演化，持续记录冲突、扩散和反馈。' },
-  { id: '04', title: '报告互动', desc: '自动归纳演化路径，并与报告智能体或模拟角色深度对话。' }
+  { id: '01', title: '背景定义', desc: '基于地图锚点、稳态背景和参考资料，自动生成场景素材报告。' },
+  { id: '02', title: '场景生成', desc: '抽取角色、场景与资源约束，把变量真正注入环境。' },
+  { id: '03', title: '推演运行', desc: '按轮次推进系统演化，持续记录冲突、扩散和反馈。' },
+  { id: '04', title: '分析与报告', desc: '自动归纳演化路径，并与报告智能体或模拟角色深度对话。' }
 ]
 
 const launchSteps = [

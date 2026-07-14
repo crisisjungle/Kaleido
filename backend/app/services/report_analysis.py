@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from collections import defaultdict, deque
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
@@ -17,10 +18,12 @@ from ..models.project import ProjectManager
 from ..utils.llm_client import LLMClient
 from ..utils.logger import get_logger
 from .graph_builder import GraphBuilderService
+from .display_localization import sanitize_public_dto
 from .risk_projection import build_legacy_risk_summary, project_legacy_risk_objects
 from .report_agent import ReportManager, ReportStatus
 from .simulation_manager import SimulationManager
 from .simulation_runner import SimulationRunner
+from .semantic_input import SemanticArtifactStore, SemanticInputNormalizer
 
 logger = get_logger("envfish.report_analysis")
 
@@ -66,6 +69,62 @@ def _normalize_text(value: Any) -> str:
     return str(value or "").strip()
 
 
+def _looks_english_sentence(value: Any) -> bool:
+    text = _normalize_text(value)
+    if not text:
+        return False
+    latin = len(re.findall(r"[A-Za-z]", text))
+    cjk = len(re.findall(r"[\u4e00-\u9fff]", text))
+    return latin >= 8 and latin > cjk
+
+
+ENGLISH_TEXT_MAP: Dict[str, str] = {
+    "Negative feedback from restricted access reduces economic activity but increases trust.": "限制通行带来的负反馈压低了经济活动，但也在一定程度上提高了信任。",
+    "Moderate spillover from adjacent restrictions.": "相邻区域的限制措施产生了中等强度的外溢影响。",
+    "Similar negative economic loop due to restrictions.": "限制措施触发了相似的负向经济反馈环。",
+    "Minor propagation from southern corridor.": "南侧廊道出现轻微传播。",
+    "High exposure and ongoing pressure from adjacent regions.": "相邻区域的高暴露与持续压力正在传导至本区域。",
+    "Urban runoff and habitat fragmentation continue.": "城市径流与栖息地破碎化影响仍在持续。",
+    "Pollution and disturbance from transport corridor.": "交通廊道带来的污染与扰动正在影响本区域。",
+    "Moderate impact from nearby activities.": "周边活动对本区域形成中等影响。",
+    "Exposure degrades ecological integrity and nearby livelihoods.": "暴露压力削弱了生态完整性，并影响周边生计稳定。",
+    "environment -> ecology -> livelihood -> panic/media -> market behavior": "环境压力 → 生态退化 → 生计波动 → 恐慌/媒体传播 → 市场行为变化",
+}
+
+
+RELATION_LABELS_ZH: Dict[str, str] = {
+    "reports_to": "上报给",
+    "depends_on": "依赖",
+    "coordinates_with": "协同",
+    "governance": "治理",
+    "organization": "组织",
+    "human": "个体",
+    "governance_coordination": "治理协调",
+    "response_bridge": "响应桥接",
+    "ecology_corridor_signal": "生态廊道信号",
+    "media_link": "媒体触达",
+    "community_link": "社区联系",
+    "impacts_or_observes": "影响/观测",
+    "cross_region_mechanism_bridge": "跨区域机制桥接",
+    "local_mechanism_coupling": "局部机制耦合",
+    "local": "局部",
+    "global": "全局",
+    "systemic": "系统性",
+    "fallback_explicit": "显式降级",
+    "fallback_explicit_low_confidence": "低置信显式降级",
+    "fallback_relations_present": "存在降级补全关系",
+    "round_reasoning_llm_unavailable_or_failed": "本轮机制推理使用显式降级结果",
+}
+
+
+def _translate_known_english_text(value: Any) -> str:
+    text = _normalize_text(value)
+    text = ENGLISH_TEXT_MAP.get(text, text)
+    for token, label in sorted(RELATION_LABELS_ZH.items(), key=lambda item: len(item[0]), reverse=True):
+        text = text.replace(token, label)
+    return text
+
+
 def _safe_float(value: Any) -> Optional[float]:
     try:
         if value is None or value == "":
@@ -83,10 +142,74 @@ def _merge_state_vector(item: Dict[str, Any]) -> Dict[str, Any]:
     return merged
 
 
+def _feedback_loop_fallback(region_name: str, delta: Dict[str, Any]) -> str:
+    panic = _safe_float(delta.get("panic_level")) or 0
+    trust = _safe_float(delta.get("public_trust")) or 0
+    economic = _safe_float(delta.get("economic_stress")) or 0
+    livelihood = _safe_float(delta.get("livelihood_stability")) or 0
+    service = _safe_float(delta.get("service_capacity")) or 0
+    shifts: List[str] = []
+    if economic:
+        shifts.append("经济压力上升" if economic > 0 else "经济压力缓和")
+    if livelihood:
+        shifts.append("生计稳定性改善" if livelihood > 0 else "生计稳定性下降")
+    if panic:
+        shifts.append("恐慌水平上升" if panic > 0 else "恐慌水平回落")
+    if trust:
+        shifts.append("公众信任增强" if trust > 0 else "公众信任走弱")
+    if service:
+        shifts.append("服务能力提升" if service > 0 else "服务能力承压")
+    if not shifts:
+        shifts.append("区域状态出现联动变化")
+    return f"{region_name or '该区域'} 出现{'、'.join(shifts[:3])}，形成反馈传播。"
+
+
+def _ecological_note_fallback(region_name: str, delta: Dict[str, Any]) -> str:
+    eco = _safe_float(delta.get("ecosystem_integrity")) or 0
+    vulnerability = _safe_float(delta.get("vulnerability_score")) or 0
+    livelihood = _safe_float(delta.get("livelihood_stability")) or 0
+    shifts: List[str] = []
+    if eco:
+        shifts.append("生态完整性改善" if eco > 0 else "生态完整性下降")
+    if vulnerability:
+        shifts.append("脆弱性上升" if vulnerability > 0 else "脆弱性下降")
+    if livelihood:
+        shifts.append("生计稳定性改善" if livelihood > 0 else "生计稳定性下降")
+    if not shifts:
+        shifts.append("生态压力仍需继续观察")
+    return f"{region_name or '该区域'} 的{'、'.join(shifts[:3])}。"
+
+
+def _relation_label_zh(value: Any) -> str:
+    text = _normalize_text(value)
+    if not text:
+        return "关系"
+    if text in RELATION_LABELS_ZH:
+        return RELATION_LABELS_ZH[text]
+    normalized = text.replace("_", " ").lower()
+    if "fallback" in normalized:
+        return "降级补全关系"
+    if "cross scale" in normalized:
+        return "跨尺度关系"
+    if "cross region" in normalized:
+        return "跨区域关系"
+    translated = normalized
+    for token, label in sorted(RELATION_LABELS_ZH.items(), key=lambda item: len(item[0]), reverse=True):
+        translated = re.sub(rf"\b{re.escape(token.replace('_', ' '))}\b", label, translated)
+        translated = translated.replace(token, label)
+    return translated if re.search(r"[\u4e00-\u9fff]", translated) else text.replace("_", " ")
+
+
 class ReportAnalysisService:
     """统一结果分析数据服务。"""
 
     _node_explore_cache: Dict[str, Dict[str, Any]] = {}
+
+    @staticmethod
+    def _public_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
+        """Project one final analysis DTO through the display boundary."""
+
+        return sanitize_public_dto(payload)
 
     def __init__(self, report_id: str):
         self.report_id = report_id
@@ -312,7 +435,7 @@ class ReportAnalysisService:
                     merged[key] = value
             merged["agent_id"] = agent_id
             if not merged.get("name"):
-                merged["name"] = merged.get("agent_name") or merged.get("username") or f"Agent {agent_id}"
+                merged["name"] = merged.get("agent_name") or merged.get("username") or f"代理体 {agent_id}"
             if not merged.get("agent_name"):
                 merged["agent_name"] = merged.get("username") or merged.get("name")
             if not merged.get("username"):
@@ -434,9 +557,9 @@ class ReportAnalysisService:
             region_uuid = f"region::{region_id}"
             add_node({
                 "uuid": region_uuid,
-                "name": merged.get("name") or merged.get("region_id") or region_id,
+                "name": merged.get("name") or "未命名区域",
                 "labels": ["Entity", "Region"],
-                "summary": combined.get("description") or f"{merged.get('name') or region_id} 的结果分析区域节点。",
+                "summary": combined.get("description") or f"{merged.get('name') or '该区域'}的结果分析节点。",
                 "attributes": {
                     "scope": "region",
                     "region_id": merged.get("region_id") or region_id,
@@ -456,9 +579,9 @@ class ReportAnalysisService:
             subregion_uuid = f"subregion::{subregion_id}"
             add_node({
                 "uuid": subregion_uuid,
-                "name": merged.get("name") or merged.get("region_id") or subregion_id,
+                "name": merged.get("name") or "未命名子区域",
                 "labels": ["Entity", "Subregion"],
-                "summary": combined.get("description") or f"{merged.get('name') or subregion_id} 的细分区域节点。",
+                "summary": combined.get("description") or f"{merged.get('name') or '该子区域'}的细分区域节点。",
                 "attributes": {
                     "scope": "subregion",
                     "region_id": merged.get("region_id") or subregion_id,
@@ -486,9 +609,9 @@ class ReportAnalysisService:
             merged = _merge_state_vector(agent)
             add_node({
                 "uuid": f"agent::{agent_id}",
-                "name": agent.get("name") or agent.get("agent_name") or agent.get("username") or f"Agent {agent_id}",
+                "name": agent.get("name") or agent.get("agent_name") or agent.get("username") or f"代理体 {agent_id}",
                 "labels": ["Entity", label_by_type.get(agent_type, "Agent")],
-                "summary": agent.get("bio") or agent.get("persona") or f"{agent.get('primary_region') or '未知区域'} 的 agent 节点。",
+                "summary": agent.get("bio") or agent.get("persona") or f"{agent.get('primary_region') or '未知区域'}的代理体节点。",
                 "attributes": {
                     "scope": "agent",
                     "agent_id": agent_id,
@@ -516,7 +639,7 @@ class ReportAnalysisService:
                 continue
             add_node({
                 "uuid": f"risk::{risk_id}",
-                "name": risk.get("title") or risk_id,
+                "name": risk.get("title") or "未命名风险对象",
                 "labels": ["Entity", "RiskObject"],
                 "summary": risk.get("summary") or risk.get("why_now") or "风险对象节点。",
                 "attributes": {
@@ -831,7 +954,7 @@ class ReportAnalysisService:
             return graph_data
 
     def get_graph_data(self) -> Dict[str, Any]:
-        return self._load_graph_data()
+        return self._public_payload(self._load_graph_data())
 
     def _normalize_round_range(self, raw_range: Any) -> Tuple[int, int]:
         default_end = self._get_default_round() or self.max_round or 0
@@ -927,6 +1050,74 @@ class ReportAnalysisService:
             return "livelihood"
         return "resident"
 
+    def _is_environment_state_node(self, item: Dict[str, Any]) -> bool:
+        land_use = _normalize_text(item.get("land_use_class")).lower()
+        region_type = _normalize_text(item.get("region_type")).lower()
+        name = _normalize_text(item.get("name") or item.get("region_name")).lower()
+        family = _normalize_text(item.get("node_family")).lower()
+        ecological_types = {
+            "ecology",
+            "water",
+            "wetland",
+            "forest",
+            "shore",
+            "coastal",
+            "reservoir",
+            "river",
+            "lake",
+        }
+        if family in {"ecologicalreceptor", "environmentalcarrier"}:
+            return True
+        if land_use in ecological_types:
+            return True
+        if any(token in region_type for token in ["ecology", "water", "wetland", "shore", "coastal", "river", "lake"]):
+            return True
+        if any(token in name for token in ["生态", "湿地", "水域", "水体", "近岸", "滨海", "河", "湖", "林"]):
+            return True
+        return False
+
+    def _append_environment_state_nodes(self, ecology_group: Dict[str, Any]) -> None:
+        """Surface region/subregion ecological state when no ecology agent was materialized."""
+        seen = {
+            _normalize_text(item.get("name") or item.get("agent_id"))
+            for item in ecology_group.get("sample_nodes", [])
+            if isinstance(item, dict)
+        }
+        candidates: List[Dict[str, Any]] = []
+        for raw in [*(self.latest_snapshot.get("regions") or []), *(self.latest_snapshot.get("subregions") or [])]:
+            if not isinstance(raw, dict) or not self._is_environment_state_node(raw):
+                continue
+            merged = _merge_state_vector(raw)
+            name = _normalize_text(merged.get("name") or merged.get("region_name") or merged.get("region_id") or merged.get("subregion_id"))
+            if not name or name in seen:
+                continue
+            seen.add(name)
+            primary_region = _normalize_text(
+                merged.get("primary_region") or merged.get("parent_region_id") or merged.get("region_id") or name
+            )
+            candidates.append({
+                **merged,
+                "name": name,
+                "agent_id": merged.get("agent_id") or merged.get("subregion_id") or merged.get("region_id") or name,
+                "agent_type": "ecology",
+                "agent_subtype": merged.get("land_use_class") or merged.get("region_type") or "environment_state",
+                "primary_region": primary_region,
+                "source_type": "environment_state",
+            })
+
+        for node in candidates:
+            ecology_group["node_count"] += 1
+            if len(ecology_group["sample_nodes"]) < 8:
+                ecology_group["sample_nodes"].append({
+                    "agent_id": node.get("agent_id"),
+                    "name": node.get("name"),
+                    "agent_type": node.get("agent_type"),
+                    "agent_subtype": node.get("agent_subtype"),
+                    "primary_region": node.get("primary_region"),
+                    "source_type": node.get("source_type"),
+                })
+            ecology_group["latest_agents"].append(node)
+
     def _build_regions_tab(self) -> Dict[str, Any]:
         rounds_payload: List[Dict[str, Any]] = []
         snapshots = self.round_snapshots or ([self.latest_snapshot] if self.latest_snapshot else [])
@@ -1005,7 +1196,7 @@ class ReportAnalysisService:
                 "round": self._get_default_round(),
                 "region_id": item.get("region_id"),
                 "region_name": item.get("region_name") or item.get("region_id"),
-                "loop": item.get("loop"),
+                "loop": self._feedback_loop_text(item),
                 "delta": item.get("delta") or {},
                 "source": "latest_snapshot.feedback.feedback_propagation",
                 "source_type": "直接观测",
@@ -1022,7 +1213,7 @@ class ReportAnalysisService:
                 "round": self._get_default_round(),
                 "region_id": item.get("region_id"),
                 "region_name": item.get("region_name") or item.get("region_id"),
-                "note": item.get("note"),
+                "note": self._ecological_note_text(item),
                 "delta": item.get("delta") or {},
                 "source": "latest_snapshot.feedback.ecological_impacts",
                 "source_type": "直接观测",
@@ -1034,7 +1225,7 @@ class ReportAnalysisService:
             "chain_template": ["生态/环境", "生计/社会", "市场/信任", "治理响应", "生态/环境"],
             "items": items,
             "ecological_impacts": ecological_impacts,
-            "turning_points": feedback.get("turning_points") or [],
+            "turning_points": self._localized_text_list(feedback.get("turning_points") or []),
         }
 
     def _build_roles_tab(self) -> Dict[str, Any]:
@@ -1065,6 +1256,8 @@ class ReportAnalysisService:
                 })
             merged = _merge_state_vector(agent)
             group["latest_agents"].append(merged)
+
+        self._append_environment_state_nodes(groups["ecology"])
 
         payload = []
         for key, meta in groups.items():
@@ -1112,20 +1305,47 @@ class ReportAnalysisService:
         absent so the caller can fall back to the deterministic template.
         """
         reasoning = snapshot.get("reasoning") if isinstance(snapshot.get("reasoning"), dict) else {}
-        return _normalize_text(reasoning.get("summary"))
+        text = _translate_known_english_text(reasoning.get("summary"))
+        if _looks_english_sentence(text):
+            return ""
+        return text
+
+    def _feedback_loop_text(self, item: Dict[str, Any]) -> str:
+        text = _translate_known_english_text(item.get("loop"))
+        if text and not _looks_english_sentence(text):
+            return text
+        return _feedback_loop_fallback(
+            _normalize_text(item.get("region_name") or item.get("region_id")),
+            item.get("delta") if isinstance(item.get("delta"), dict) else {},
+        )
+
+    def _ecological_note_text(self, item: Dict[str, Any]) -> str:
+        text = _translate_known_english_text(item.get("note"))
+        if text and not _looks_english_sentence(text):
+            return text
+        return _ecological_note_fallback(
+            _normalize_text(item.get("region_name") or item.get("region_id")),
+            item.get("delta") if isinstance(item.get("delta"), dict) else {},
+        )
+
+    def _localized_text_list(self, raw: Any) -> List[str]:
+        values: List[str] = []
+        for item in raw if isinstance(raw, list) else []:
+            if isinstance(item, dict):
+                text = _normalize_text(
+                    item.get("description") or item.get("note") or item.get("label") or item.get("summary")
+                )
+            else:
+                text = _normalize_text(item)
+            text = _translate_known_english_text(text)
+            if text and not _looks_english_sentence(text):
+                values.append(text)
+        return values
 
     def _turning_points(self, snapshot: Dict[str, Any]) -> List[str]:
         reasoning = snapshot.get("reasoning") if isinstance(snapshot.get("reasoning"), dict) else {}
         raw = reasoning.get("turning_points") or snapshot.get("turning_points") or []
-        points: List[str] = []
-        for item in raw if isinstance(raw, list) else []:
-            if isinstance(item, dict):
-                text = _normalize_text(item.get("description") or item.get("note") or item.get("label"))
-            else:
-                text = _normalize_text(item)
-            if text:
-                points.append(text)
-        return points
+        return self._localized_text_list(raw)
 
     def _detected_feedback_loops(self, snapshot: Dict[str, Any]) -> List[str]:
         feedback = snapshot.get("feedback") if isinstance(snapshot.get("feedback"), dict) else {}
@@ -1138,6 +1358,9 @@ class ReportAnalysisService:
                 )
             else:
                 text = _normalize_text(item)
+            text = _translate_known_english_text(text)
+            if _looks_english_sentence(text):
+                continue
             if text:
                 loops.append(text)
         return loops
@@ -1164,7 +1387,7 @@ class ReportAnalysisService:
             else:
                 propagation = feedback.get("feedback_propagation") or []
                 if propagation and isinstance(propagation[0], dict):
-                    feedback_loop = _normalize_text(propagation[0].get("loop"))
+                    feedback_loop = self._feedback_loop_text(propagation[0])
 
             diffusion_ranking = diffusion.get("region_ranking") or []
             diffusion_name = ""
@@ -1222,11 +1445,119 @@ class ReportAnalysisService:
             "generated_sections": ReportManager.get_generated_sections(self.report_id),
         }
 
+    def _decorated_mechanism_graph(self, mechanism_graph: Dict[str, Any]) -> Dict[str, Any]:
+        nodes = list(mechanism_graph.get("nodes") or [])
+        node_labels: Dict[str, str] = {}
+        for node in nodes:
+            if not isinstance(node, dict):
+                continue
+            node_id = _normalize_text(node.get("id"))
+            label = _normalize_text(node.get("name") or node.get("label") or node.get("title"))
+            if node_id and label:
+                node_labels[node_id] = label
+
+        decorated_edges: List[Dict[str, Any]] = []
+        for edge in mechanism_graph.get("edges") or []:
+            if not isinstance(edge, dict):
+                continue
+            item = dict(edge)
+            source = _normalize_text(edge.get("source"))
+            target = _normalize_text(edge.get("target"))
+            item["source_label"] = node_labels.get(source) or ("上游机制" if source.startswith("mech_") else source)
+            item["target_label"] = node_labels.get(target) or ("下游机制" if target.startswith("mech_") else target)
+            item["relation_label"] = _relation_label_zh(edge.get("relation_label"))
+            item["scope_label"] = _relation_label_zh(edge.get("scope"))
+            decorated_edges.append(item)
+
+        graph = dict(mechanism_graph)
+        graph["nodes"] = nodes
+        graph["edges"] = decorated_edges
+        return graph
+
+    def _first_chinese_reasoning_text(self, item: Dict[str, Any]) -> str:
+        candidates: List[Any] = [
+            item.get("summary"),
+            item.get("reasoning_summary"),
+        ]
+        for collection_key in (
+            "state_change_reasons",
+            "relation_change_reasons",
+            "activated_mechanisms",
+            "feedback_turning_points",
+            "uncertainty_notes",
+        ):
+            raw = item.get(collection_key)
+            if not isinstance(raw, list):
+                continue
+            for entry in raw:
+                if isinstance(entry, dict):
+                    candidates.extend([entry.get("reason"), entry.get("description"), entry.get("summary")])
+                else:
+                    candidates.append(entry)
+
+        for candidate in candidates:
+            text = _translate_known_english_text(candidate)
+            if text and not _looks_english_sentence(text):
+                return text
+        round_num = item.get("round") or "当前"
+        return f"第 {round_num} 轮已记录机制推理；原始英文摘要已隐藏。"
+
+    def _sanitize_round_reasoning_item(self, item: Dict[str, Any]) -> Dict[str, Any]:
+        sanitized = dict(item)
+        sanitized["summary"] = self._first_chinese_reasoning_text(item)
+        if sanitized.get("fallback_reason"):
+            sanitized["fallback_reason"] = _relation_label_zh(sanitized.get("fallback_reason"))
+        sanitized["uncertainty_notes"] = self._localized_text_list(item.get("uncertainty_notes") or [])
+        sanitized["feedback_turning_points"] = self._localized_text_list(item.get("feedback_turning_points") or [])
+        return sanitized
+
+    def _sanitize_relation_sample(self, item: Dict[str, Any]) -> Dict[str, Any]:
+        sanitized = dict(item)
+        candidate = dict(item.get("candidate") or {}) if isinstance(item.get("candidate"), dict) else {}
+        label = _relation_label_zh(item.get("relation_label") or candidate.get("relation_label"))
+        sanitized["relation_label"] = label
+        if candidate:
+            candidate["relation_label"] = label
+            candidate["scope_label"] = _relation_label_zh(candidate.get("scope"))
+            candidate["interaction_channel_label"] = _relation_label_zh(candidate.get("interaction_channel"))
+            sanitized["candidate"] = candidate
+        return sanitized
+
+    def _decorated_validated_relation_graph(self, graph: Dict[str, Any]) -> Dict[str, Any]:
+        decorated = dict(graph or {})
+        edges: List[Dict[str, Any]] = []
+        for edge in decorated.get("edges") or []:
+            if not isinstance(edge, dict):
+                continue
+            item = dict(edge)
+            item["relation_label"] = _relation_label_zh(edge.get("relation_label") or edge.get("relation_type"))
+            item["scope_label"] = _relation_label_zh(edge.get("scope"))
+            item["interaction_channel_label"] = _relation_label_zh(edge.get("interaction_channel"))
+            if isinstance(edge.get("trigger_conditions"), list):
+                item["trigger_conditions"] = [
+                    _translate_known_english_text(condition)
+                    for condition in edge.get("trigger_conditions")
+                    if _normalize_text(condition)
+                ]
+            edges.append(item)
+        decorated["edges"] = edges
+        return decorated
+
+    def _decorated_simulation_audit(self, audit: Dict[str, Any]) -> Dict[str, Any]:
+        decorated = dict(audit or {})
+        if isinstance(decorated.get("relation_labels"), list):
+            decorated["relation_labels"] = [_relation_label_zh(item) for item in decorated.get("relation_labels") or []]
+        if isinstance(decorated.get("quality_flags"), list):
+            decorated["quality_flags"] = [_relation_label_zh(item) for item in decorated.get("quality_flags") or []]
+        return decorated
+
     def _build_mechanisms_tab(self) -> Dict[str, Any]:
         scenario_model = self.mechanism_artifacts.get("scenario_model") or {}
-        mechanism_graph = self.mechanism_artifacts.get("mechanism_graph") or {}
-        validated_relation_graph = self.mechanism_artifacts.get("validated_relation_graph") or {}
-        audit = self.mechanism_artifacts.get("simulation_audit") or {}
+        mechanism_graph = self._decorated_mechanism_graph(self.mechanism_artifacts.get("mechanism_graph") or {})
+        validated_relation_graph = self._decorated_validated_relation_graph(
+            self.mechanism_artifacts.get("validated_relation_graph") or {}
+        )
+        audit = self._decorated_simulation_audit(self.mechanism_artifacts.get("simulation_audit") or {})
         round_reasoning = self.mechanism_artifacts.get("round_reasoning") or []
         relation_ledger = self.mechanism_artifacts.get("relation_ledger") or []
         accepted_relations = [
@@ -1248,9 +1579,9 @@ class ReportAnalysisService:
             "agent_blueprints": self.mechanism_artifacts.get("agent_blueprints") or [],
             "validated_relation_graph": validated_relation_graph,
             "simulation_audit": audit,
-            "relation_samples": accepted_relations[:18],
-            "round_reasoning": round_reasoning[-12:],
-            "latest_reasoning": latest_reasoning,
+            "relation_samples": [self._sanitize_relation_sample(item) for item in accepted_relations[:18]],
+            "round_reasoning": [self._sanitize_round_reasoning_item(item) for item in round_reasoning[-12:] if isinstance(item, dict)],
+            "latest_reasoning": self._sanitize_round_reasoning_item(latest_reasoning) if latest_reasoning else {},
             "counts": {
                 "mechanism_nodes": len(mechanism_graph.get("nodes") or []),
                 "mechanism_edges": len(mechanism_graph.get("edges") or []),
@@ -1272,7 +1603,7 @@ class ReportAnalysisService:
             or self._preferred_risk_objects()
             or self._preferred_risk_definitions()
         )
-        return {
+        payload = {
             "report_id": self.report_id,
             "simulation_id": self.simulation_id,
             "graph_id": self.graph_id,
@@ -1302,21 +1633,24 @@ class ReportAnalysisService:
                 "graph_edge_count": analysis_graph.get("edge_count", 0),
             },
         }
+        return self._public_payload(payload)
 
     def get_tab_data(self, tab_id: str) -> Dict[str, Any]:
         if tab_id == "regions":
-            return self._build_regions_tab()
-        if tab_id == "feedback":
-            return self._build_feedback_tab()
-        if tab_id == "mechanisms":
-            return self._build_mechanisms_tab()
-        if tab_id == "roles":
-            return self._build_roles_tab()
-        if tab_id == "narrative":
-            return self._build_narrative_tab()
-        if tab_id == "report":
-            return self._build_report_tab()
-        raise ValueError(f"不支持的 tab: {tab_id}")
+            payload = self._build_regions_tab()
+        elif tab_id == "feedback":
+            payload = self._build_feedback_tab()
+        elif tab_id == "mechanisms":
+            payload = self._build_mechanisms_tab()
+        elif tab_id == "roles":
+            payload = self._build_roles_tab()
+        elif tab_id == "narrative":
+            payload = self._build_narrative_tab()
+        elif tab_id == "report":
+            payload = self._build_report_tab()
+        else:
+            raise ValueError(f"不支持的 tab: {tab_id}")
+        return self._public_payload(payload)
 
     def _node_by_id(self, graph_data: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
         return {
@@ -1749,7 +2083,7 @@ class ReportAnalysisService:
             missing_data.append("缺少该节点的关系子图数据")
 
         exploration_mode = "full" if series else "static_relation"
-        return {
+        payload = {
             "report_id": self.report_id,
             "simulation_id": self.simulation_id,
             "node": {
@@ -1776,6 +2110,7 @@ class ReportAnalysisService:
                 "exploration_mode": exploration_mode,
             },
         }
+        return self._public_payload(payload)
 
     def _build_deterministic_sections(self, context: Dict[str, Any]) -> List[Dict[str, Any]]:
         node = context.get("node") or {}
@@ -1965,7 +2300,7 @@ class ReportAnalysisService:
         start, end = self._normalize_round_range(round_range)
         cache_key = f"{self.report_id}:{node_id}:{start}:{end}"
         if cache_key in self._node_explore_cache:
-            return self._node_explore_cache[cache_key]
+            return self._public_payload(self._node_explore_cache[cache_key])
 
         context = self.get_node_context(node_id=node_id, round_range=round_range)
         deterministic_sections = self._build_deterministic_sections(context)
@@ -1981,8 +2316,9 @@ class ReportAnalysisService:
             "missing_data": context.get("missing_data") or [],
             "generated_at": datetime.now().isoformat(),
         }
-        self._node_explore_cache[cache_key] = result
-        return result
+        public_result = self._public_payload(result)
+        self._node_explore_cache[cache_key] = public_result
+        return public_result
 
     def chat_on_node(
         self,
@@ -1992,29 +2328,29 @@ class ReportAnalysisService:
         round_range: Any = None,
     ) -> Dict[str, Any]:
         context = self.get_node_context(node_id=node_id, round_range=round_range)
-        explore_result = self.explore_node(node_id=node_id, round_range=round_range)
+        deterministic_sections = self._build_deterministic_sections(context)
         chat_history = chat_history or []
 
-        if not Config.LLM_API_KEY:
-            summary = f"{context.get('node', {}).get('name')} 当前可用的直接观测记录有 {len(context.get('time_series') or [])} 条，"
-            summary += f"关系边 {len((context.get('subgraph') or {}).get('edges') or [])} 条。"
-            if context.get("missing_data"):
-                summary += " 数据缺口：" + "；".join(context.get("missing_data")[:3])
-            return {
-                "response": summary,
-                "analysis_mode": context.get("supported_modes", {}).get("exploration_mode"),
-                "missing_data": context.get("missing_data") or [],
-            }
+        summary = f"{context.get('node', {}).get('name')} 当前可用的直接观测记录有 {len(context.get('time_series') or [])} 条，"
+        summary += f"关系边 {len((context.get('subgraph') or {}).get('edges') or [])} 条。"
+        if context.get("missing_data"):
+            summary += " 数据缺口：" + "；".join(context.get("missing_data")[:3])
 
         sections_text: List[str] = []
-        for section in explore_result.get("sections") or []:
+        deterministic_evidence: List[str] = []
+        for section in deterministic_sections:
             section_title = section.get("title") or section.get("id")
             section_items = []
             for item in section.get("items") or []:
-                section_items.append(
-                    f"- [{item.get('source_type') or '多轮推断'}] {item.get('label')}: {item.get('content')}"
+                evidence_line = (
+                    f"- [{item.get('source_type') or '多轮推断'}] "
+                    f"{item.get('label')}: {item.get('content')}"
                 )
+                section_items.append(evidence_line)
+                if len(deterministic_evidence) < 4:
+                    deterministic_evidence.append(evidence_line)
             sections_text.append(section_title + "\n" + "\n".join(section_items))
+        deterministic_response = "\n".join([summary, *deterministic_evidence])
 
         system_prompt = (
             "你是 EnvFish 节点探索对话助手。"
@@ -2038,12 +2374,21 @@ class ReportAnalysisService:
             content = item.get("content")
             if role in {"user", "assistant"} and content:
                 messages.append({"role": role, "content": content})
-        messages.append({"role": "user", "content": message})
-
-        llm = LLMClient()
-        response = llm.chat(messages=messages, temperature=0.2, max_tokens=1200)
-        return {
+        response, semantic_artifact = SemanticInputNormalizer().answer_question(
+            question=message,
+            messages=messages,
+            context_ref={
+                "report_id": self.report_id,
+                "simulation_id": self.simulation_id,
+                "node_id": node_id,
+                "round_range": context.get("round_range"),
+            },
+            deterministic_response=deterministic_response,
+        )
+        return self._public_payload({
             "response": response,
             "analysis_mode": context.get("supported_modes", {}).get("exploration_mode"),
             "missing_data": context.get("missing_data") or [],
-        }
+            "semantic_artifact_ref": SemanticArtifactStore.public_ref(semantic_artifact),
+            "semantic_revision": semantic_artifact.revision,
+        })

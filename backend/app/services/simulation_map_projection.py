@@ -13,6 +13,7 @@ import math
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from .map_seed_manager import MapSeedManager
+from .map_spatial_selection import PUBLIC_PROVIDERS
 
 
 class SimulationMapProjectionBuilder:
@@ -80,7 +81,7 @@ class SimulationMapProjectionBuilder:
         # instead of dressing a hash layout as real geography.
         geographic_node_count = sum(1 for node in projected_nodes if node.get("is_geographic"))
         synthetic_node_count = len(projected_nodes) - geographic_node_count
-        has_anchor_context = bool(context.get("anchor_points"))
+        has_anchor_context = bool(context.get("formal_anchor_points"))
         if geographic_node_count > 0 and has_anchor_context:
             geographic_grounding = "map_seed"
         else:
@@ -95,6 +96,8 @@ class SimulationMapProjectionBuilder:
             "zoom_hint": self._zoom_hint_from_radius(radius_m),
             "analysis_polygon": context.get("analysis_polygon"),
             "layers": list(context.get("layers") or []),
+            "data_quality": dict(context.get("data_quality") or {}),
+            "selection_summary": dict(context.get("selection_summary") or {}),
             # Additive top-level honesty flag.
             "geographic_grounding": geographic_grounding,
             "nodes": projected_nodes,
@@ -108,11 +111,13 @@ class SimulationMapProjectionBuilder:
                 "key_edge_count": key_edge_count,
                 "has_map_seed_context": bool(self.map_seed_id and map_layers_payload),
                 "water_polygon_count": len(context.get("water_geometries") or []),
-                "anchor_point_count": len(context.get("anchor_points") or []),
+                "anchor_point_count": len(context.get("formal_anchor_points") or []),
                 # Additive: per-node grounding breakdown.
                 "geographic_node_count": geographic_node_count,
                 "synthetic_node_count": synthetic_node_count,
                 "geographic_grounding": geographic_grounding,
+                "data_quality_status": str((context.get("data_quality") or {}).get("status") or ""),
+                "formal_spatial_ready": bool((context.get("data_quality") or {}).get("formal_ready")),
             },
         }
 
@@ -125,23 +130,35 @@ class SimulationMapProjectionBuilder:
         }
         center_source = "explicit" if has_explicit_center else "default"
 
+        quality = dict(map_layers_payload.get("data_quality") or {})
+        if quality.get("formal_ready") is not True:
+            quality["formal_ready"] = False
+            quality["status"] = str(quality.get("status") or "unknown")
         anchor_points = self._collect_anchor_points(map_layers_payload)
-        if anchor_points:
+        formal_anchor_points = [
+            point
+            for point in anchor_points
+            if self._is_formal_anchor(point, data_quality=quality)
+        ]
+        if formal_anchor_points:
             if not has_explicit_center:
-                lat_avg = sum(point["lat"] for point in anchor_points) / len(anchor_points)
-                lon_avg = sum(point["lon"] for point in anchor_points) / len(anchor_points)
+                lat_avg = sum(point["lat"] for point in formal_anchor_points) / len(formal_anchor_points)
+                lon_avg = sum(point["lon"] for point in formal_anchor_points) / len(formal_anchor_points)
                 center = {"lat": round(lat_avg, 6), "lon": round(lon_avg, 6)}
                 center_source = "anchors"
 
         water_geometries = self._collect_water_geometries(map_layers_payload)
-        water_zones = self._collect_water_zones(anchor_points, water_geometries)
+        water_zones = self._collect_water_zones(formal_anchor_points, water_geometries)
         return {
             "center": center,
             "center_source": center_source,
             "radius_m": int(map_layers_payload.get("radius_m") or 0),
             "analysis_polygon": map_layers_payload.get("analysis_polygon"),
             "layers": list(map_layers_payload.get("layers") or []),
+            "data_quality": quality,
+            "selection_summary": dict(map_layers_payload.get("selection_summary") or {}),
             "anchor_points": anchor_points,
+            "formal_anchor_points": formal_anchor_points,
             "water_geometries": water_geometries,
             "water_zones": water_zones,
         }
@@ -161,6 +178,8 @@ class SimulationMapProjectionBuilder:
                     "category": str(item.get("category") or ""),
                     "subtype": str(item.get("subtype") or ""),
                     "source_kind": str(item.get("source_kind") or ""),
+                    "source_provider": str(item.get("source_provider") or ""),
+                    "spatial_level": str(item.get("spatial_level") or ""),
                 }
             )
 
@@ -177,40 +196,14 @@ class SimulationMapProjectionBuilder:
                     "category": str(item.get("category") or ""),
                     "subtype": str(item.get("subtype") or ""),
                     "source_kind": str(item.get("source_kind") or ""),
+                    "source_provider": str(item.get("source_provider") or ""),
+                    "spatial_precision": str(item.get("spatial_precision") or ""),
                 }
             )
 
-        for layer in list(map_layers_payload.get("layers") or []):
-            if str(layer.get("type") or "").lower() != "geojson":
-                continue
-            geojson = layer.get("data") or {}
-            for feature in list(geojson.get("features") or []):
-                geometry = feature.get("geometry") or {}
-                props = feature.get("properties") or {}
-                lat = None
-                lon = None
-                geometry_type = str(geometry.get("type") or "")
-                if geometry_type in {"Polygon", "MultiPolygon"}:
-                    centroid = self._geometry_centroid(geometry)
-                    if centroid:
-                        lon, lat = centroid
-                elif geometry_type == "Point":
-                    coords = list(geometry.get("coordinates") or [])
-                    if len(coords) >= 2:
-                        lon = self._to_float(coords[0])
-                        lat = self._to_float(coords[1])
-                if lat is None or lon is None:
-                    continue
-                points.append(
-                    {
-                        "lat": lat,
-                        "lon": lon,
-                        "name": str(props.get("name") or layer.get("name") or ""),
-                        "category": str(props.get("class_name") or layer.get("name") or ""),
-                        "subtype": str(props.get("class_code") or layer.get("id") or ""),
-                        "source_kind": "detected",
-                    }
-                )
+        # Layer polygons describe coverage/extent.  Their centroids are not
+        # point observations and must never become Agent anchors (the analysis
+        # circle itself used to collapse many Agents onto its center).
 
         deduped: List[Dict[str, Any]] = []
         for point in points:
@@ -227,6 +220,12 @@ class SimulationMapProjectionBuilder:
         geometries: List[Dict[str, Any]] = []
         for layer in list(map_layers_payload.get("layers") or []):
             if str(layer.get("type") or "").lower() != "geojson":
+                continue
+            provider = str(layer.get("source_provider") or "").strip().lower()
+            analysis_grade = str(layer.get("analysis_grade") or "").strip().lower()
+            if analysis_grade in {"contextual_only", "visualization_only"}:
+                continue
+            if str(layer.get("id") or "").startswith("worldcover_") and provider != "worldcover_cog":
                 continue
             geojson = layer.get("data") or {}
             features = list(geojson.get("features") or [])
@@ -286,6 +285,8 @@ class SimulationMapProjectionBuilder:
         for index, node in enumerate(nodes):
             node_id = str(node.get("uuid") or node.get("id") or f"node_{index}")
             attributes = dict(node.get("attributes") or {})
+            if attributes.get("map_hidden") is True:
+                continue
             lat = self._to_float(attributes.get("lat") or attributes.get("latitude"))
             lon = self._to_float(attributes.get("lon") or attributes.get("lng") or attributes.get("longitude"))
             kind = self._node_kind(node_id=node_id, labels=node.get("labels"))
@@ -376,13 +377,35 @@ class SimulationMapProjectionBuilder:
             attributes["lat"] = round(lat, 6)
             attributes["lon"] = round(lon, 6)
             attributes["map_kind"] = item["kind"]
-            had_real_coords = bool(item["attributes"].get("lat") and item["attributes"].get("lon"))
+            had_real_coords = (
+                item["attributes"].get("lat") is not None
+                and item["attributes"].get("lon") is not None
+            )
             attributes["map_projected"] = not had_real_coords
             # Additive honesty flag: when the node had no real lat/lon and we fell
             # back to radial/hash synthetic placement, this is NOT geographically
             # grounded. The frontend uses this to label "非地理示意" instead of
             # pretending the dot is a real location.
-            is_geographic = had_real_coords or bool(item.get("anchored_to_real_feature"))
+            is_area_only = str(item["attributes"].get("spatial_precision") or "").lower() == "area_only"
+            is_declared_aoi = (
+                item["kind"] == "region"
+                and (
+                    str(item["attributes"].get("region_type") or "").lower() == "analysis_area"
+                    or "map_seed_scope" in {
+                        str(tag or "").lower() for tag in list(item["attributes"].get("tags") or [])
+                    }
+                )
+            )
+            coordinates_are_formal = (
+                self.source_mode.strip().lower() != "map_seed"
+                or (context.get("data_quality") or {}).get("formal_ready") is True
+                or is_declared_aoi
+            )
+            is_geographic = (
+                had_real_coords
+                and not is_area_only
+                and coordinates_are_formal
+            ) or bool(item.get("anchored_to_real_feature"))
             attributes["is_geographic"] = is_geographic
             attributes["placement"] = "geographic" if is_geographic else "synthetic"
             projected_nodes.append(
@@ -499,10 +522,15 @@ class SimulationMapProjectionBuilder:
         home_region = str(attributes.get("home_region_id") or attributes.get("primary_region") or "").strip()
 
         anchor_id = None
+        anchor_scope = ""
         if home_subregion:
             anchor_id = subregion_by_key.get(home_subregion)
+            if anchor_id:
+                anchor_scope = "subregion"
         if not anchor_id and home_region:
             anchor_id = region_by_key.get(home_region)
+            if anchor_id:
+                anchor_scope = "region"
 
         if anchor_id and anchor_id in position_by_id:
             base_lat, base_lon = position_by_id[anchor_id]
@@ -523,25 +551,38 @@ class SimulationMapProjectionBuilder:
             )
 
         require_water = self._agent_prefers_water(node)
-        if not require_water:
-            dry_candidates = self._select_anchor_candidates(
+        neighborhood_radius_m = self._agent_anchor_neighborhood_radius(
+            context=context,
+            anchor_scope=anchor_scope,
+        )
+        desired_tags = [*self._desired_tags_for_agent(node), *self._desired_tags_for_region(anchor_token)]
+        candidates = self._select_agent_anchor_candidates(
+            context=context,
+            desired_tags=desired_tags,
+            require_water=require_water,
+            center_lat=base_lat,
+            center_lon=base_lon,
+            max_distance_m=neighborhood_radius_m,
+        )
+        if candidates:
+            # Prefer the nearest few real features, while spreading multiple
+            # agents deterministically instead of snapping all of them to one dot.
+            candidate_pool = candidates[: min(3, len(candidates))]
+            index = self._stable_hash_mod(f"agent-home-anchor::{node['uuid']}", len(candidate_pool))
+            candidate = candidate_pool[index]
+            resolved = self._resolve_conflict(
+                lat=candidate["lat"],
+                lon=candidate["lon"],
+                used_points=used_points,
+                min_distance_m=90.0,
                 context=context,
-                desired_tags=self._desired_tags_for_agent(node),
-                require_water=False,
+                require_water=require_water,
+                stable_key=f"agent-home::{node['uuid']}",
             )
-            if dry_candidates:
-                index = self._stable_hash_mod(f"agent-dry-anchor::{node['uuid']}", len(dry_candidates))
-                candidate = dry_candidates[index]
-                resolved = self._resolve_conflict(
-                    lat=candidate["lat"],
-                    lon=candidate["lon"],
-                    used_points=used_points,
-                    min_distance_m=90.0,
-                    context=context,
-                    require_water=False,
-                    stable_key=f"agent-dry::{node['uuid']}",
-                )
-                # Anchored to a real map-seed feature -> geographically grounded.
+            allowed_distance = neighborhood_radius_m + max(450.0, neighborhood_radius_m * 0.12)
+            if self._haversine_m(base_lat, base_lon, resolved[0], resolved[1]) <= allowed_distance:
+                # A real feature is geographically honest only when it belongs
+                # to the Agent's declared home-region/subregion neighborhood.
                 return resolved[0], resolved[1], True
 
         region_radius = max(float(context.get("radius_m") or 0), 3000.0)
@@ -557,6 +598,53 @@ class SimulationMapProjectionBuilder:
         )
         # Synthetic radial/hash placement around a base center -> not grounded.
         return fallback[0], fallback[1], False
+
+    def _agent_anchor_neighborhood_radius(self, *, context: Dict[str, Any], anchor_scope: str) -> float:
+        """Bound real Agent anchors to their declared home-area neighborhood."""
+        analysis_radius = max(float(context.get("radius_m") or 0), 3000.0)
+        if anchor_scope == "subregion":
+            return max(800.0, min(analysis_radius * 0.1, 3000.0))
+        if anchor_scope == "region":
+            return max(1500.0, min(analysis_radius * 0.18, 6000.0))
+        # Without a resolved home node, no map feature can honestly be claimed
+        # as this Agent's geographic anchor.
+        return 0.0
+
+    def _select_agent_anchor_candidates(
+        self,
+        *,
+        context: Dict[str, Any],
+        desired_tags: Sequence[str],
+        require_water: bool,
+        center_lat: float,
+        center_lon: float,
+        max_distance_m: float,
+    ) -> List[Dict[str, Any]]:
+        if max_distance_m <= 0:
+            return []
+
+        desired_set = {str(tag).strip().lower() for tag in desired_tags if str(tag).strip()}
+        candidates: List[Dict[str, Any]] = []
+        for point in list(context.get("anchor_points") or []):
+            if not self._is_formal_anchor(
+                point,
+                data_quality=dict(context.get("data_quality") or {}),
+            ):
+                continue
+            tags = self._tags_from_anchor(point)
+            in_water = "water" in tags
+            if require_water != in_water:
+                continue
+            if not require_water and desired_set and not tags.intersection(desired_set):
+                continue
+            distance_m = self._haversine_m(center_lat, center_lon, point["lat"], point["lon"])
+            if distance_m > max_distance_m:
+                continue
+            candidate = dict(point)
+            candidate["distance_from_home_m"] = distance_m
+            candidates.append(candidate)
+
+        return sorted(candidates, key=lambda item: item["distance_from_home_m"])
 
     def _desired_tags_for_agent(self, node: Dict[str, Any]) -> List[str]:
         attributes = node.get("attributes") or {}
@@ -711,7 +799,14 @@ class SimulationMapProjectionBuilder:
         desired_tags: Sequence[str],
         require_water: bool,
     ) -> List[Dict[str, Any]]:
-        anchor_points = list(context.get("anchor_points") or [])
+        anchor_points = [
+            point
+            for point in list(context.get("anchor_points") or [])
+            if self._is_formal_anchor(
+                point,
+                data_quality=dict(context.get("data_quality") or {}),
+            )
+        ]
         if not anchor_points:
             return []
 
@@ -749,6 +844,18 @@ class SimulationMapProjectionBuilder:
         if dry_points:
             return dry_points
         return wet_fallback or anchor_points
+
+    def _is_formal_anchor(
+        self,
+        point: Dict[str, Any],
+        *,
+        data_quality: Dict[str, Any],
+    ) -> bool:
+        if data_quality.get("formal_ready") is not True:
+            return False
+        source_kind = str(point.get("source_kind") or "").strip().lower()
+        provider = str(point.get("source_provider") or "").strip().lower()
+        return source_kind in {"observed", "detected"} and provider in PUBLIC_PROVIDERS
 
     def _desired_tags_for_region(self, token: str) -> List[str]:
         text = str(token or "").lower()

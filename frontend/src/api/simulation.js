@@ -33,7 +33,7 @@ export const getSimulation = (simulationId) => {
 }
 
 /**
- * 获取模拟的 Agent Profiles
+ * 获取模拟的代理体画像
  * @param {string} simulationId
  * @param {string} platform - 'reddit' | 'twitter' | 'envfish'
  */
@@ -42,7 +42,7 @@ export const getSimulationProfiles = (simulationId, platform = 'reddit') => {
 }
 
 /**
- * 实时获取生成中的 Agent Profiles
+ * 实时获取生成中的代理体画像
  * @param {string} simulationId
  * @param {string} platform - 'reddit' | 'twitter' | 'envfish'
  */
@@ -79,9 +79,10 @@ export const getSimulationGraphRealtime = (simulationId, params = {}) => {
 /**
  * 获取推演动画数据
  * @param {string} simulationId
+ * @param {Object} params - { after_cursor?, since_cursor? }
  */
-export const getSimulationAnimation = (simulationId) => {
-  return service.get(`/api/simulation/${simulationId}/animation`)
+export const getSimulationAnimation = (simulationId, params = {}) => {
+  return service.get(`/api/simulation/${simulationId}/animation`, { params })
 }
 
 /**
@@ -127,7 +128,7 @@ export const getRunStatusDetail = (simulationId, params = {}) => {
 
 /**
  * 中途注入变量
- * @param {Object} data - { simulation_id, type, name, description, target_regions, target_nodes, start_round, duration_rounds, intensity, policy_mode }
+ * @param {Object} data - { simulation_id, type, name, description, target_text, start_round, duration_rounds, intensity, policy_mode, idempotency_key }
  */
 export const injectSimulationVariable = (data) => {
   return service.post('/api/simulation/inject', data)

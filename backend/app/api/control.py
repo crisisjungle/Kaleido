@@ -13,6 +13,7 @@ from . import control_bp
 from ..models.project import ProjectManager, ProjectStatus
 from ..models.task import TaskManager
 from ..services.map_seed_manager import MapSeedManager
+from ..services.display_localization import public_error_message, sanitize_public_dto
 from ..services.report_agent import ReportManager, ReportStatus
 from ..services.simulation_manager import SimulationManager, SimulationStatus
 from ..services.simulation_runner import SimulationRunner
@@ -147,17 +148,16 @@ def force_stop_all():
         return jsonify(
             {
                 "success": True,
-                "data": {
+                "data": sanitize_public_dto({
                     "message": "强制停止指令已执行",
                     "reason": reason,
                     "cancelled_tasks": cancelled_tasks,
                     "cancelled_task_count": len(cancelled_tasks),
                     "stopped_runs": stopped_runs,
                     "updated": updated,
-                },
+                }),
             }
         )
     except Exception as exc:
         logger.exception("强制停止失败")
-        return jsonify({"success": False, "error": str(exc)}), 500
-
+        return jsonify({"success": False, "error": public_error_message(exc, "强制停止失败，请稍后重试。")}), 500

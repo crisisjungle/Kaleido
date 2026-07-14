@@ -82,7 +82,7 @@ function createHardLimitEvent(state) {
     year: state.currentYear,
     monthIndex: state.currentMonthIndex,
     elapsedMonths: state.monthsElapsed,
-    title: 'Simulation reached hard limit',
+    title: '模拟达到运行上限',
     collisionRatePerYear: riskiestShell?.collisionRatePerYear ?? 0,
     debrisDelta: { large: 0, medium: 0, small: 0 }
   }

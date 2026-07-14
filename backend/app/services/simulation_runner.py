@@ -335,6 +335,8 @@ class SimulationRunner:
         existing = cls.get_run_state(simulation_id)
         if existing and existing.runner_status in [RunnerStatus.RUNNING, RunnerStatus.STARTING]:
             raise ValueError(f"模拟已在运行中: {simulation_id}")
+        if cls.check_env_alive(simulation_id):
+            raise ValueError(f"模拟环境仍在运行，请先关闭或强制重启: {simulation_id}")
         
         # 加载模拟配置
         sim_dir = os.path.join(cls.RUN_STATE_DIR, simulation_id)
@@ -561,23 +563,25 @@ class SimulationRunner:
                     logger.error(f"停止图谱记忆更新器失败: {e}")
                 cls._graph_memory_enabled.pop(simulation_id, None)
             
-            # 清理进程资源
-            cls._processes.pop(simulation_id, None)
-            cls._action_queues.pop(simulation_id, None)
-            
-            # 关闭日志文件句柄
-            if simulation_id in cls._stdout_files:
-                try:
-                    cls._stdout_files[simulation_id].close()
-                except Exception:
-                    pass
-                cls._stdout_files.pop(simulation_id, None)
-            if simulation_id in cls._stderr_files and cls._stderr_files[simulation_id]:
-                try:
-                    cls._stderr_files[simulation_id].close()
-                except Exception:
-                    pass
-                cls._stderr_files.pop(simulation_id, None)
+            # A forced restart can replace the registry entry before the old
+            # monitor exits. Only the monitor that still owns the entry may
+            # release it or close its associated handles.
+            if cls._processes.get(simulation_id) is process:
+                cls._processes.pop(simulation_id, None)
+                cls._action_queues.pop(simulation_id, None)
+
+                if simulation_id in cls._stdout_files:
+                    try:
+                        cls._stdout_files[simulation_id].close()
+                    except Exception:
+                        pass
+                    cls._stdout_files.pop(simulation_id, None)
+                if simulation_id in cls._stderr_files and cls._stderr_files[simulation_id]:
+                    try:
+                        cls._stderr_files[simulation_id].close()
+                    except Exception:
+                        pass
+                    cls._stderr_files.pop(simulation_id, None)
     
     @classmethod
     def _read_action_log(
@@ -715,6 +719,15 @@ class SimulationRunner:
         
         # 至少有一个平台被启用且已完成
         return twitter_enabled or reddit_enabled
+
+    @classmethod
+    def _has_completed_output(cls, state: Optional[SimulationRunState]) -> bool:
+        """Return whether a run already produced a terminal successful result."""
+        if not state:
+            return False
+        if state.runner_status == RunnerStatus.COMPLETED:
+            return True
+        return cls._check_all_platforms_completed(state)
     
     @classmethod
     def _terminate_process(cls, process: subprocess.Popen, simulation_id: str, timeout: int = 10):
@@ -821,6 +834,45 @@ class SimulationRunner:
         
         logger.info(f"模拟已停止: {simulation_id}")
         return state
+
+    @classmethod
+    def stop_existing_environment(
+        cls,
+        simulation_id: str,
+        timeout: float = 5.0,
+    ) -> Dict[str, Any]:
+        """Stop a retained command environment before a forced rerun."""
+
+        process = cls._processes.get(simulation_id)
+        if process and process.poll() is None:
+            state = cls.stop_simulation(simulation_id)
+            return {
+                "stopped": True,
+                "mode": "tracked_process",
+                "runner_status": state.runner_status.value,
+            }
+
+        if not cls.check_env_alive(simulation_id):
+            return {"stopped": False, "mode": "not_running"}
+
+        response = cls.close_simulation_env(simulation_id, timeout=timeout)
+        deadline = time.time() + max(0.5, timeout)
+        while cls.check_env_alive(simulation_id) and time.time() < deadline:
+            time.sleep(0.1)
+        if cls.check_env_alive(simulation_id):
+            raise RuntimeError(f"旧模拟环境未能在限定时间内关闭: {simulation_id}")
+
+        state = cls.get_run_state(simulation_id)
+        if state:
+            state.runner_status = RunnerStatus.STOPPED
+            state.twitter_running = False
+            state.reddit_running = False
+            cls._save_run_state(state)
+        return {
+            "stopped": True,
+            "mode": "ipc_close",
+            "response": response,
+        }
 
     @classmethod
     def force_stop_all(cls, reason: str = "用户强制停止") -> List[Dict[str, Any]]:
@@ -1109,6 +1161,15 @@ class SimulationRunner:
             "spread_events": [],
             "agent_interactions": [],
             "dynamic_edge_events": [],
+            "relationship_events": [],
+            "relationship_states": [],
+            "agent_action_decisions": [],
+            "state_mutations": [],
+            "agent_emergence_events": [],
+            "agent_lineage": [],
+            "agent_candidate_events": [],
+            "policy_execution_events": [],
+            "policy_execution_runtime_state": {},
             "interventions": [],
             "interviews": [],
         }
@@ -1159,6 +1220,41 @@ class SimulationRunner:
         artifacts["dynamic_edge_events"] = cls._read_jsonl_file(
             os.path.join(sim_dir, "dynamic_edge_ledger.jsonl"), limit=160
         )
+        artifacts["relationship_events"] = cls._read_jsonl_file(
+            os.path.join(sim_dir, "relationship_event_ledger.jsonl"), limit=160
+        )
+        relationship_state_path = os.path.join(sim_dir, "latest_relationship_states.json")
+        if os.path.exists(relationship_state_path):
+            try:
+                with open(relationship_state_path, "r", encoding="utf-8") as handle:
+                    artifacts["relationship_states"] = json.load(handle)
+            except Exception:
+                pass
+        artifacts["agent_action_decisions"] = cls._read_jsonl_file(
+            os.path.join(sim_dir, "agent_action_decision_ledger.jsonl"), limit=160
+        )
+        artifacts["state_mutations"] = cls._read_jsonl_file(
+            os.path.join(sim_dir, "state_mutation_ledger.jsonl"), limit=240
+        )
+        artifacts["agent_emergence_events"] = cls._read_jsonl_file(
+            os.path.join(sim_dir, "agent_emergence_ledger.jsonl"), limit=120
+        )
+        artifacts["agent_lineage"] = cls._read_jsonl_file(
+            os.path.join(sim_dir, "agent_lineage_ledger.jsonl"), limit=120
+        )
+        artifacts["agent_candidate_events"] = cls._read_jsonl_file(
+            os.path.join(sim_dir, "agent_candidate_ledger.jsonl"), limit=160
+        )
+        artifacts["policy_execution_events"] = cls._read_jsonl_file(
+            os.path.join(sim_dir, "policy_execution_ledger.jsonl"), limit=160
+        )
+        policy_state_path = os.path.join(sim_dir, "latest_policy_execution_state.json")
+        if os.path.exists(policy_state_path):
+            try:
+                with open(policy_state_path, "r", encoding="utf-8") as handle:
+                    artifacts["policy_execution_runtime_state"] = json.load(handle)
+            except Exception:
+                pass
         artifacts["interventions"] = cls._read_jsonl_file(
             os.path.join(sim_dir, "intervention_log.jsonl"), limit=32
         )
@@ -1343,8 +1439,23 @@ class SimulationRunner:
             "spread_event_ledger.jsonl",
             "round_state_matrix.jsonl",
             "intervention_log.jsonl",
+            "injection_receipts.json",
             "interviews.jsonl",
             "latest_round_snapshot.json",
+            "agent_interaction_ledger.jsonl",
+            "dynamic_edge_ledger.jsonl",
+            "relationship_event_ledger.jsonl",
+            "latest_relationship_states.json",
+            "round_reasoning_ledger.jsonl",
+            "agent_emergence_ledger.jsonl",
+            "agent_lineage_ledger.jsonl",
+            "agent_candidate_ledger.jsonl",
+            "agent_action_decision_ledger.jsonl",
+            "state_mutation_ledger.jsonl",
+            "policy_execution_ledger.jsonl",
+            "latest_policy_execution_state.json",
+            "agent_emergence_state.json",
+            "profiles_full.json",
         ]
         
         # 要删除的目录列表（包含动作日志）
@@ -1422,6 +1533,8 @@ class SimulationRunner:
             try:
                 if process.poll() is None:  # 进程仍在运行
                     logger.info(f"终止模拟进程: {simulation_id}, pid={process.pid}")
+                    state = cls.get_run_state(simulation_id)
+                    preserve_completed = cls._has_completed_output(state)
                     
                     try:
                         # 使用跨平台的进程终止方法
@@ -1435,13 +1548,18 @@ class SimulationRunner:
                             process.kill()
                     
                     # 更新 run_state.json
-                    state = cls.get_run_state(simulation_id)
+                    state = cls.get_run_state(simulation_id) or state
                     if state:
-                        state.runner_status = RunnerStatus.STOPPED
                         state.twitter_running = False
                         state.reddit_running = False
-                        state.completed_at = datetime.now().isoformat()
-                        state.error = "服务器关闭，模拟被终止"
+                        if preserve_completed:
+                            state.runner_status = RunnerStatus.COMPLETED
+                            state.completed_at = state.completed_at or datetime.now().isoformat()
+                            state.error = None
+                        else:
+                            state.runner_status = RunnerStatus.STOPPED
+                            state.completed_at = datetime.now().isoformat()
+                            state.error = "服务器关闭，模拟被终止"
                         cls._save_run_state(state)
                     
                     # 同时更新 state.json，将状态设为 stopped
@@ -1452,7 +1570,13 @@ class SimulationRunner:
                         if os.path.exists(state_file):
                             with open(state_file, 'r', encoding='utf-8') as f:
                                 state_data = json.load(f)
-                            state_data['status'] = 'stopped'
+                            state_data['status'] = 'completed' if preserve_completed else 'stopped'
+                            if preserve_completed and state:
+                                state_data['current_round'] = state.current_round
+                                if state.twitter_completed:
+                                    state_data['twitter_status'] = 'completed'
+                                if state.reddit_completed:
+                                    state_data['reddit_status'] = 'completed'
                             state_data['updated_at'] = datetime.now().isoformat()
                             with open(state_file, 'w', encoding='utf-8') as f:
                                 json.dump(state_data, f, indent=2, ensure_ascii=False)
@@ -1623,7 +1747,8 @@ class SimulationRunner:
                 "status": status.get("status", "stopped"),
                 "twitter_available": status.get("twitter_available", False),
                 "reddit_available": status.get("reddit_available", False),
-                "timestamp": status.get("timestamp")
+                "timestamp": status.get("timestamp"),
+                "process_pid": status.get("process_pid"),
             }
         except (json.JSONDecodeError, OSError):
             return default_status

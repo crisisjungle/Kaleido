@@ -10,7 +10,7 @@
 
     <main class="history-shell">
       <section class="history-hero">
-        <span>Simulation Archive</span>
+        <span>推演档案</span>
         <h1>推演记录</h1>
         <p>这里直接读取当前项目后端保存的历史模拟。数据还在，本页只是把入口重新接回来。</p>
       </section>
@@ -30,7 +30,7 @@
         <div v-else class="history-grid">
           <article v-for="item in simulations" :key="item.simulation_id" class="project-card" @click="selected = item">
             <div class="card-header">
-              <span class="card-id">{{ shortSimulationId(item.simulation_id) }}</span>
+              <span class="card-id">已保存推演</span>
               <span class="card-progress" :class="progressState(item)">
                 <span class="status-dot">●</span>
                 {{ progressText(item) }}
@@ -46,10 +46,10 @@
               <div v-else class="files-empty">暂无文件</div>
             </div>
             <h3>{{ titleFor(item) }}</h3>
-            <p>{{ item.simulation_requirement || '这个推演没有记录描述。' }}</p>
+            <p>{{ descriptionFor(item) }}</p>
             <div class="card-footer">
               <span>{{ dateText(item.created_at) }}</span>
-              <span>{{ item.status || item.runner_status || 'idle' }}</span>
+              <span>{{ statusLabel(item) }}</span>
             </div>
           </article>
         </div>
@@ -60,7 +60,7 @@
       <section class="modal-content">
         <header class="modal-header">
           <div>
-            <span class="modal-id">{{ shortSimulationId(selected.simulation_id) }}</span>
+            <span class="modal-id">已保存推演</span>
             <h2>{{ titleFor(selected) }}</h2>
             <p>{{ dateText(selected.created_at) }}</p>
           </div>
@@ -68,7 +68,7 @@
         </header>
         <div class="modal-body">
           <h3>推演说明</h3>
-          <p>{{ selected.simulation_requirement || '这个推演没有记录描述。' }}</p>
+          <p>{{ descriptionFor(selected) }}</p>
           <h3>关联文件</h3>
           <div v-if="selected.files?.length" class="modal-files">
             <div v-for="file in selected.files" :key="file.filename" class="modal-file-item">
@@ -93,6 +93,7 @@ import { onMounted, ref } from 'vue'
 import { RouterLink, useRouter } from 'vue-router'
 import KaleidoNavBrand from '../components/KaleidoNavBrand.vue'
 import { getSimulationHistory } from '../api/simulation'
+import { safeDisplayText, sanitizeDisplayCopy } from '../utils/displayText'
 
 const router = useRouter()
 const simulations = ref([])
@@ -115,19 +116,35 @@ async function loadHistory() {
   }
 }
 
-function shortSimulationId(value) {
-  return value ? `SIM_${value.replace('sim_', '').slice(0, 6).toUpperCase()}` : 'SIM_UNKNOWN'
+function titleFor(item) {
+  const text = safeDisplayText(item.simulation_requirement || item.project_name, '未命名推演')
+  return text.length > 24 ? `${text.slice(0, 24)}...` : text
 }
 
-function titleFor(item) {
-  const text = item.simulation_requirement || item.project_name || item.simulation_id || '未命名模拟'
-  return text.length > 24 ? `${text.slice(0, 24)}...` : text
+function descriptionFor(item) {
+  return sanitizeDisplayCopy(item?.simulation_requirement || '', '').trim() || '这个推演没有记录描述。'
+}
+
+function statusLabel(item) {
+  const status = String(item?.status || item?.runner_status || '').trim().toLowerCase()
+  const labels = {
+    created: '待配置',
+    preparing: '配置中',
+    ready: '配置就绪',
+    running: '运行中',
+    paused: '已暂停',
+    stopped: '已停止',
+    completed: '已完成',
+    failed: '运行失败',
+    cancelled: '已取消',
+  }
+  return labels[status] || '未开始'
 }
 
 function dateText(value) {
   if (!value) return '未知时间'
   const date = new Date(value)
-  if (Number.isNaN(date.getTime())) return String(value).slice(0, 16)
+  if (Number.isNaN(date.getTime())) return '未知时间'
   const y = date.getFullYear()
   const m = String(date.getMonth() + 1).padStart(2, '0')
   const d = String(date.getDate()).padStart(2, '0')
@@ -152,7 +169,7 @@ function progressText(item) {
 
 function fileExt(filename = '') {
   const ext = filename.split('.').pop()
-  return ext ? ext.toUpperCase().slice(0, 4) : 'FILE'
+  return ext ? ext.toUpperCase().slice(0, 4) : '文件'
 }
 
 function openProject(item) {

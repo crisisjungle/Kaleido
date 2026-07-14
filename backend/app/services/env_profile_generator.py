@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
@@ -28,10 +29,87 @@ from .envfish_models import (
     normalize_state_vector,
     normalize_transport_family,
 )
+from .map_spatial_selection import CONTEXTUAL_PROVIDERS, FALLBACK_PROVIDERS, PUBLIC_PROVIDERS
 from .transport_context_resolver import TransportContextResolver
 from .zep_entity_reader import EntityNode
 
 logger = get_logger("envfish.envfish_profile")
+
+
+_CJK_PATTERN = re.compile(r"[\u3400-\u9fff]")
+_INTERNAL_DISPLAY_PATTERN = re.compile(
+    r"(?:(?:agent|entity|region|snapshot|fallback|unknown|unnamed)(?![A-Za-z0-9])|"
+    r"[a-z][a-z0-9]*(?:_[a-z0-9]+)+|"
+    r"[A-Z][a-z0-9]+(?:[A-Z][A-Za-z0-9]+)+|"
+    r"[0-9a-f]{8}-[0-9a-f-]{20,})",
+    re.IGNORECASE,
+)
+
+
+def _chinese_display_text(value: Any, fallback: str) -> str:
+    """Keep generated display copy Chinese without altering machine enums/IDs."""
+
+    text = str(value or "").strip()
+    if (
+        not text
+        or not _CJK_PATTERN.search(text)
+        or re.search(r"[A-Za-z]", text)
+        or _INTERNAL_DISPLAY_PATTERN.search(text)
+    ):
+        return fallback
+    return text
+
+
+def _chinese_display_list(value: Any, fallback: List[str], *, limit: int = 6) -> List[str]:
+    raw_items = value if isinstance(value, list) else []
+    localized = [
+        _chinese_display_text(item, "")
+        for item in raw_items[:limit]
+    ]
+    localized = [item for item in localized if item]
+    return localized or list(fallback[:limit])
+
+
+_AGENT_ROLE_LABELS = {
+    "resident": "居民代表",
+    "activist": "环保志愿者",
+    "white_collar": "社区从业者",
+    "worker": "现场工作人员",
+    "scientist": "科研人员",
+    "journalist": "新闻记者",
+    "community_committee": "社区委员会",
+    "market_association": "行业协会",
+    "plant_operator": "设施运营方",
+    "environment_bureau": "环境治理部门",
+    "emergency_office": "应急协调部门",
+    "safety_inspector": "安全监察人员",
+    "conservation_station": "生态保育机构",
+    "urban_ecology": "城市生态受体",
+    "urban_birds": "城市鸟群",
+    "soil_biome": "土壤微生境",
+    "habitat_species": "栖息地物种",
+    "transport_node": "交通设施节点",
+    "field_observer": "现场观察者",
+    "unspecified": "待核实主体",
+}
+
+
+def _agent_role_label(agent_subtype: Any, node_family: Any) -> str:
+    subtype = str(agent_subtype or "").strip().lower()
+    if subtype in _AGENT_ROLE_LABELS:
+        return _AGENT_ROLE_LABELS[subtype]
+    return {
+        "EnvironmentalCarrier": "环境传播载体",
+        "EcologicalReceptor": "生态受体",
+        "GovernmentActor": "治理主体",
+        "OrganizationActor": "组织主体",
+        "Infrastructure": "基础设施节点",
+        "HumanActor": "社会主体",
+    }.get(str(node_family or ""), "场景主体")
+
+
+def _display_enum_label(value: Any, mapping: Dict[str, str], fallback: str) -> str:
+    return mapping.get(str(value or "").strip().lower(), fallback)
 
 
 @dataclass
@@ -116,6 +194,8 @@ class MapEvidenceContext:
     environment_archetype: str
     target_count_range: Tuple[int, int]
     target_agent_count: int
+    formal_spatial_ready: bool = True
+    data_quality_status: str = "unknown"
     allowed_roles: List[str] = field(default_factory=list)
     forbidden_roles: List[str] = field(default_factory=list)
     evidence_refs_by_role: Dict[str, List[str]] = field(default_factory=dict)
@@ -138,6 +218,8 @@ class MapEvidenceContext:
             "environment_archetype": self.environment_archetype,
             "target_count_range": list(self.target_count_range),
             "target_agent_count": self.target_agent_count,
+            "formal_spatial_ready": self.formal_spatial_ready,
+            "data_quality_status": self.data_quality_status,
             "allowed_roles": list(self.allowed_roles),
             "forbidden_roles": list(self.forbidden_roles),
             "evidence_refs_by_role": {key: list(value) for key, value in self.evidence_refs_by_role.items()},
@@ -218,6 +300,8 @@ class EnvProfileGenerator:
         profile_created_callback: Optional[Callable[[EnvAgentProfile, int, int, str], None]] = None,
         parallel_count: int = 3,
         target_agent_count: Optional[int] = None,
+        max_agent_count: Optional[int] = None,
+        relationship_candidates_per_agent: Optional[int] = None,
         map_seed_id: Optional[str] = None,
         seed_dir: Optional[str] = None,
     ) -> EnvProfileGenerationResult:
@@ -278,6 +362,7 @@ class EnvProfileGenerator:
                 subregions=subregions,
                 diffusion_template=diffusion_template,
                 search_mode=search_mode,
+                max_agent_count=max_agent_count,
             )
             if is_map_seed
             else None
@@ -292,6 +377,7 @@ class EnvProfileGenerator:
             subregions=subregions,
             map_evidence_context=map_evidence_context,
             override_target_agent_count=target_agent_count,
+            max_agent_count=max_agent_count,
         )
         generated_count = 0
 
@@ -302,7 +388,7 @@ class EnvProfileGenerator:
                 profile_created_callback(profile, generated_count, target_count, stage)
 
         if progress_callback:
-            progress_callback(0, max(total, 1), "开始生成 EnvFish 基础角色")
+            progress_callback(0, max(total, 1), "开始生成基础角色")
 
         if map_evidence_context is not None:
             profiles, synthesized_profiles, map_generation_summary = self._generate_map_seed_agent_profiles(
@@ -369,6 +455,7 @@ class EnvProfileGenerator:
             regions=regions,
             subregions=subregions,
             profiles=profiles,
+            per_agent_limit=relationship_candidates_per_agent,
         )
         self._attach_agents_to_regions(regions=regions, subregions=subregions, profiles=profiles)
         region_agent_index = self._compose_region_agent_index(
@@ -377,20 +464,90 @@ class EnvProfileGenerator:
             profiles=profiles,
         )
 
+        generation_mode_label = "地图证据驱动" if map_evidence_context else "实体模板推导"
+        diffusion_label = _display_enum_label(
+            diffusion_template,
+            {
+                "marine": "海洋传播",
+                "marine_current": "海流传播",
+                "coastal_inundation": "沿海淹没",
+                "inland_water": "内陆水系传播",
+                "inland_water_network": "内陆水网传播",
+                "surface_flood_flow": "地表洪水传播",
+                "air": "大气传播",
+                "atmospheric_plume": "大气羽流传播",
+                "ash_plume": "火山灰羽流传播",
+                "ecological_mobility": "生态迁移",
+                "bio_ecological_transmission": "生物生态传播",
+                "infrastructure_failure": "基础设施失效传播",
+                "impact_blast": "冲击波传播",
+                "slow_ecosystem_decline": "生态系统缓慢退化",
+                "terrestrial_surface": "陆地表面传播",
+                "generic": "通用环境传播",
+            },
+            "通用环境传播",
+        )
+        scenario_label = _display_enum_label(
+            scenario_mode,
+            {
+                "baseline_mode": "基线推演",
+                "crisis_mode": "危机推演",
+                "disaster_mode": "灾害推演",
+                "policy_mode": "政策推演",
+            },
+            "场景推演",
+        )
+        provider_label = _display_enum_label(
+            diffusion_context.get("provider"),
+            {
+                "heuristic": "规则推导",
+                "open_meteo": "公开气象资料",
+                "noaa": "海洋与大气资料",
+                "usgs": "地质与水文资料",
+                "manual": "人工配置",
+            },
+            "规则推导",
+        )
         notes = [
-            f"Generated {len(regions)} macro regions, {len(subregions)} subregions, and {len(profiles)} agent profiles.",
-            f"Anchor entities preserved: {len(anchor_profiles)}; synthesized agents added: {len(synthesized_profiles)}.",
-            f"Agent generation mode: {'map_evidence_driven' if map_evidence_context else 'entity_template'}.",
-            f"Diffusion template: {diffusion_template}",
-            f"Scenario mode: {scenario_mode}",
-            f"Transport edges: {len(transport_edges)} via {diffusion_context.get('provider') or 'heuristic'}",
+            f"已生成 {len(regions)} 个宏观区域、{len(subregions)} 个子区域和 {len(profiles)} 个代理体画像。",
+            f"保留 {len(anchor_profiles)} 个来源实体锚点，并补充 {len(synthesized_profiles)} 个合成代理体。",
+            f"代理体生成方式：{generation_mode_label}。",
+            f"扩散方式：{diffusion_label}。",
+            f"场景模式：{scenario_label}。",
+            f"已生成 {len(transport_edges)} 条传播路径，依据：{provider_label}。",
         ]
         if injected_variables:
-            notes.append(f"Injected variables available during region/agent generation: {', '.join(item.name for item in injected_variables[:4])}")
+            variable_names = [
+                _chinese_display_text(item.name, "注入变量")
+                for item in injected_variables[:4]
+            ]
+            notes.append(f"区域与代理体生成已纳入变量：{'、'.join(variable_names)}。")
         if grounding_summary.get("successful_sources"):
-            notes.append(f"Grounding sources: {', '.join(grounding_summary['successful_sources'])}")
+            source_names = [
+                _display_enum_label(
+                    source,
+                    {
+                        "osm": "开放地图",
+                        "openstreetmap": "开放地图",
+                        "overpass": "开放地图要素",
+                        "worldcover": "全球地表覆盖资料",
+                        "esa_worldcover": "全球地表覆盖资料",
+                        "open_meteo": "公开气象资料",
+                        "noaa": "海洋与大气资料",
+                        "usgs": "地质与水文资料",
+                    },
+                    "外部资料",
+                )
+                for source in grounding_summary["successful_sources"][:6]
+            ]
+            notes.append(f"场景依据来源：{'、'.join(dict.fromkeys(source_names))}。")
         if diffusion_context.get("note"):
-            notes.append(diffusion_context["note"])
+            notes.append(
+                _chinese_display_text(
+                    diffusion_context["note"],
+                    "传播上下文已完成校验，缺失项将使用保守规则补全。",
+                )
+            )
 
         return EnvProfileGenerationResult(
             regions=regions,
@@ -411,9 +568,35 @@ class EnvProfileGenerator:
                 "relationship_count": len(relationships),
                 "transport_edge_count": len(transport_edges),
                 "target_agent_count": target_count,
+                "planned_agent_limit": max_agent_count,
+                "relationship_candidates_per_agent": relationship_candidates_per_agent,
                 "generation_mode": "map_evidence_driven" if map_evidence_context else "entity_template",
                 **map_generation_summary,
             },
+        )
+
+    def rebuild_region_agent_index(
+        self,
+        *,
+        regions: List[RegionNode],
+        subregions: List[RegionNode],
+        profiles: List[EnvAgentProfile],
+    ) -> Dict[str, Any]:
+        """Rebuild region membership after Agent V2 filters or adds profiles."""
+
+        for region in [*regions, *subregions]:
+            region.resident_agent_ids = []
+            region.organization_agent_ids = []
+            region.ecology_agent_ids = []
+        self._attach_agents_to_regions(
+            regions=regions,
+            subregions=subregions,
+            profiles=profiles,
+        )
+        return self._compose_region_agent_index(
+            regions=regions,
+            subregions=subregions,
+            profiles=profiles,
         )
 
     def _prepare_entity(self, entity: EntityNode) -> PreparedEntityContext:
@@ -497,8 +680,8 @@ class EnvProfileGenerator:
                 {
                     "name": first.entity.attributes.get("location")
                     or first.entity.attributes.get("region")
-                    or "Core Region",
-                    "description": "Fallback region synthesized from the seed report.",
+                    or "核心区域",
+                    "description": "基于场景素材报告补全的兜底区域。",
                     "entity_type": "Region",
                     "tags": ["fallback"],
                     "lat": self._coerce_float(first.entity.attributes.get("lat")),
@@ -520,18 +703,19 @@ class EnvProfileGenerator:
         return 16 if normalized == "deep_search" else 8
 
     def _looks_like_map_seed_context(self, prepared_entities: List[PreparedEntityContext]) -> bool:
-        has_seed_root = False
-        physical_count = 0
         for prepared in prepared_entities:
             attrs = prepared.entity.attributes or {}
-            if prepared.node_family == "Region" and isinstance(attrs.get("admin_context"), dict):
-                has_seed_root = True
-                continue
-            if self._coerce_float(attrs.get("lat")) is None or self._coerce_float(attrs.get("lon")) is None:
-                continue
-            if str(attrs.get("source_kind") or "").lower() in {"observed", "detected"}:
-                physical_count += 1
-        return has_seed_root and physical_count >= 3
+            if (
+                prepared.node_family == "Region"
+                and isinstance(attrs.get("admin_context"), dict)
+                and (
+                    attrs.get("radius_m") is not None
+                    or isinstance(attrs.get("data_quality"), dict)
+                    or isinstance(attrs.get("selection_summary"), dict)
+                )
+            ):
+                return True
+        return False
 
     def _build_regions_from_map_seed(
         self,
@@ -553,6 +737,8 @@ class EnvProfileGenerator:
             return []
 
         root_attrs = root.entity.attributes or {}
+        data_quality = root_attrs.get("data_quality") if isinstance(root_attrs.get("data_quality"), dict) else {}
+        formal_spatial_ready = data_quality.get("formal_ready") is True
         admin_context = root_attrs.get("admin_context") or {}
         center_lat = self._coerce_float(root_attrs.get("lat")) or self._coerce_float(admin_context.get("lat"))
         center_lon = self._coerce_float(root_attrs.get("lon")) or self._coerce_float(admin_context.get("lon"))
@@ -572,8 +758,19 @@ class EnvProfileGenerator:
             if lat is None or lon is None:
                 continue
             source_kind = str(attrs.get("source_kind") or "").lower()
-            if source_kind not in {"observed", "detected"}:
+            if source_kind not in {"observed", "detected", "reference"}:
                 continue
+            provider = self._map_feature_provider(attrs)
+            if not formal_spatial_ready:
+                # A degraded seed may still describe its selected AOI, but
+                # cached/static reference points must not create a detailed
+                # downstream geography that looks formally observed.
+                is_admin_context = (
+                    provider == "reverse_geocode"
+                    and str(attrs.get("category") or "").lower() == "region"
+                )
+                if not is_admin_context:
+                    continue
             class_info = self._classify_map_seed_feature(prepared)
             if not class_info:
                 continue
@@ -589,15 +786,41 @@ class EnvProfileGenerator:
                 "lon": lon,
                 "weight": weight,
                 "macro_class": class_info["macro_class"],
+                "cluster_class": class_info.get("cluster_class") or class_info["macro_class"],
+                "water_class": class_info.get("water_class"),
                 "label": class_info["label"],
                 "region_type": class_info["region_type"],
                 "carriers": class_info["carriers"],
-                "evidence_tags": class_info["evidence_tags"],
+                "evidence_tags": [*class_info["evidence_tags"], f"source_{source_kind}"],
             }
             weighted_features.append(feature_payload)
             class_totals[class_info["macro_class"]] += weight
 
         if not weighted_features:
+            if not formal_spatial_ready:
+                place_name = str(
+                    admin_context.get("district")
+                    or admin_context.get("city")
+                    or admin_context.get("display_name")
+                    or root.entity.name
+                    or "选定分析区域"
+                ).strip()
+                return [
+                    RegionNode(
+                        region_id=ensure_unique_slug(place_name, set()),
+                        name=place_name,
+                        region_type="analysis_area",
+                        description="公网空间证据不足时保留的 AOI 范围节点；不代表已识别出具体城市功能分区。",
+                        layer="macro",
+                        land_use_class="unknown",
+                        carriers=[normalize_transport_family(diffusion_template)],
+                        tags=["map_seed_scope", "spatial_evidence_degraded"],
+                        region_constraints=["requires_spatial_evidence_review"],
+                        lat=center_lat,
+                        lon=center_lon,
+                        state_vector=normalize_state_vector(default_state_vector(scenario_mode, "Region")),
+                    )
+                ]
             return []
 
         weighted_features.sort(key=lambda item: item["weight"], reverse=True)
@@ -614,7 +837,7 @@ class EnvProfileGenerator:
             )
             target_cluster = None
             for cluster in clusters:
-                if cluster["macro_class"] != feature["macro_class"]:
+                if cluster["cluster_class"] != feature["cluster_class"]:
                     continue
                 distance = self._haversine_m(
                     feature["lat"],
@@ -629,6 +852,8 @@ class EnvProfileGenerator:
                 clusters.append(
                     {
                         "macro_class": feature["macro_class"],
+                        "cluster_class": feature["cluster_class"],
+                        "water_class": feature.get("water_class"),
                         "label": feature["label"],
                         "region_type": feature["region_type"],
                         "lat": feature["lat"],
@@ -669,11 +894,11 @@ class EnvProfileGenerator:
         selected_classes: set[str] = set()
 
         for index, cluster in enumerate(clusters):
-            if cluster["macro_class"] in selected_classes:
+            if cluster["cluster_class"] in selected_classes:
                 continue
             selected_clusters.append(cluster)
             selected_keys.add(index)
-            selected_classes.add(cluster["macro_class"])
+            selected_classes.add(cluster["cluster_class"])
             if len(selected_clusters) >= max_regions:
                 break
 
@@ -762,25 +987,38 @@ class EnvProfileGenerator:
                 "evidence_tags": [subtype],
             }
 
-        if subtype in {
-            "worldcover_80",
-            "water",
-            "river",
-            "stream",
-            "canal",
-            "reservoir",
-            "basin",
-            "coastline",
-            "beach",
-            "breakwater",
-            "groyne",
-        }:
+        if subtype in WATER_SUBTYPES | {"breakwater", "groyne"}:
+            water_class = self._map_seed_water_class(prepared)
+            water_profile = {
+                "coast": {
+                    "label": "近岸水域",
+                    "region_type": "coastal_zone",
+                    "carriers": ["water_flow", "shore_contact"],
+                },
+                "river": {
+                    "label": "河流廊道",
+                    "region_type": "river_corridor",
+                    "carriers": ["water_flow", "river_transport"],
+                },
+                "reservoir": {
+                    "label": "湖库水域",
+                    "region_type": "reservoir_zone",
+                    "carriers": ["water_flow", "reservoir_retention"],
+                },
+                "open_water": {
+                    "label": "开放水域",
+                    "region_type": "open_water_zone",
+                    "carriers": ["water_flow"],
+                },
+            }[water_class]
             return {
                 "macro_class": "water",
-                "label": "近岸水域",
-                "region_type": "coastal_zone",
-                "carriers": ["water_flow"],
-                "evidence_tags": [subtype],
+                "cluster_class": f"water:{water_class}",
+                "water_class": water_class,
+                "label": water_profile["label"],
+                "region_type": water_profile["region_type"],
+                "carriers": water_profile["carriers"],
+                "evidence_tags": [subtype, water_class],
             }
 
         if subtype in {
@@ -839,6 +1077,36 @@ class EnvProfileGenerator:
 
         return None
 
+    def _map_seed_water_class(self, prepared: PreparedEntityContext) -> str:
+        """Keep materially different water systems out of one generic cluster."""
+        attrs = prepared.entity.attributes or {}
+        subtype = str(attrs.get("subtype") or "").strip().lower()
+        text = " ".join(
+            [
+                str(prepared.entity.name or ""),
+                str(attrs.get("description") or ""),
+                json.dumps(attrs.get("tags") or {}, ensure_ascii=False, sort_keys=True, default=str),
+            ]
+        ).lower()
+
+        if subtype in {"coastline", "beach", "breakwater", "groyne"}:
+            return "coast"
+        if subtype in {"river", "stream", "canal", "ditch"}:
+            return "river"
+        if subtype in {"reservoir", "basin"}:
+            return "reservoir"
+        if any(token in text for token in ("reservoir", "lake", "水库", "湖库", "湖")):
+            return "reservoir"
+        if any(token in text for token in ("coast", "estuary", "bay", "sea", "ocean", "海", "湾", "洋", "珠江口")):
+            return "coast"
+        if any(
+            token in text for token in ("river", "stream", "canal", "creek", "河", "江", "溪", "渠", "涌")
+        ):
+            return "river"
+        if any(token in text for token in ("shore", "岸")):
+            return "coast"
+        return "open_water"
+
     def _map_seed_feature_weight(
         self,
         prepared: PreparedEntityContext,
@@ -853,6 +1121,10 @@ class EnvProfileGenerator:
         weight = importance + share * 0.85 + distance_factor * 4.0
         if str(attrs.get("source_kind") or "").lower() == "observed":
             weight += 1.2
+        elif str(attrs.get("source_kind") or "").lower() == "reference":
+            # Curated gazetteer/reference points are useful fallbacks but must
+            # never outrank live observed or detected evidence solely by source.
+            weight -= 0.8
         if macro_class == "transport" and distance_m <= radius_m * 0.18:
             weight += 3.0
         if macro_class == "water" and share >= 20:
@@ -905,6 +1177,10 @@ class EnvProfileGenerator:
         label = cluster["label"]
         center_distance = self._haversine_m(cluster["lat"], cluster["lon"], center_lat, center_lon)
 
+        lead_name = self._map_seed_real_lead_name(cluster)
+        if lead_name:
+            return lead_name
+
         if macro_class == "transport" and road:
             return f"{road}{label}"
         if macro_class == "water" and road and ("桥" in road or "bridge" in road.lower()) and center_distance <= radius_m * 0.2:
@@ -917,6 +1193,45 @@ class EnvProfileGenerator:
             return f"{city}{label}"
         return label
 
+    def _map_seed_real_lead_name(self, cluster: Dict[str, Any]) -> str:
+        """Prefer the strongest observed place/facility name over a directional alias."""
+        features = sorted(cluster.get("features") or [], key=lambda item: item.get("weight") or 0, reverse=True)
+        source_priority = {"observed": 0, "reference": 1, "detected": 2}
+        prioritized = sorted(
+            features,
+            key=lambda feature: (
+                source_priority.get(
+                    str((feature.get("attrs") or {}).get("source_kind") or "").strip().lower(),
+                    3,
+                ),
+                -(float(feature.get("weight") or 0)),
+            ),
+        )
+        for feature in prioritized:
+            prepared = feature.get("prepared")
+            if not prepared:
+                continue
+            name = str(prepared.entity.name or "").strip()
+            normalized = name.lower().replace("_", " ").strip()
+            subtype = str((feature.get("attrs") or {}).get("subtype") or "").strip().lower()
+            if not name or normalized in {
+                "water",
+                "open water",
+                "river",
+                "stream",
+                "canal",
+                "reservoir",
+                "coastline",
+                "selected aoi",
+            }:
+                continue
+            if str((feature.get("attrs") or {}).get("source_kind") or "").strip().lower() != "observed" and (
+                normalized.startswith("worldcover") or subtype.startswith("worldcover_")
+            ):
+                continue
+            return name
+        return ""
+
     def _describe_map_seed_region(
         self,
         cluster: Dict[str, Any],
@@ -927,6 +1242,13 @@ class EnvProfileGenerator:
         lead_name = lead["prepared"].entity.name
         subtype_labels = [item["prepared"].entity.name for item in features[1:3]]
         tags = lead["attrs"].get("tags") or {}
+        source_kinds = sorted(
+            {
+                str((item.get("attrs") or {}).get("source_kind") or "").strip().lower()
+                for item in features
+                if str((item.get("attrs") or {}).get("source_kind") or "").strip()
+            }
+        )
         share = self._coerce_float(tags.get("pixel_share_pct"))
         area_label = admin_context.get("display_name") or admin_context.get("city") or "当前 AOI"
         summary = f"由 {lead_name}"
@@ -935,6 +1257,8 @@ class EnvProfileGenerator:
         summary += f" 等 {len(features)} 个空间要素归并出的{cluster['label']}。"
         if share:
             summary += f" 其中主导斑块约占分析像元的 {round(share, 1)}%。"
+        if source_kinds:
+            summary += f" 空间证据来源：{', '.join(source_kinds)}。"
         summary += f" 用于表达 {area_label} 内更接近真实空间结构的主导分区。"
         return summary
 
@@ -960,6 +1284,8 @@ class EnvProfileGenerator:
             cluster["macro_class"],
             self._orientation_label(cluster["lat"], cluster["lon"], center_lat, center_lon, radius_m) or "center",
         }
+        if cluster.get("water_class"):
+            tags.add(str(cluster["water_class"]))
         tags.update(cluster["evidence_tags"])
         return sorted(tag for tag in tags if tag)
 
@@ -1111,7 +1437,7 @@ class EnvProfileGenerator:
             return []
 
         prompt = {
-            "task": "Build a region-level adjacency graph for an eco-social disaster simulation.",
+            "task": "为生态社会灾害推演构建区域级邻接图，并返回严格 JSON。",
             "scenario_mode": scenario_mode,
             "diffusion_template": diffusion_template,
             "region_candidates": region_candidates,
@@ -1121,9 +1447,9 @@ class EnvProfileGenerator:
             "output_schema": {
                 "regions": [
                     {
-                        "name": "Region name",
+                        "name": "中文区域名",
                         "region_type": "coastal_zone/city/river_basin/port/industrial_zone/residential_zone",
-                        "description": "short explanation",
+                        "description": "中文简短说明",
                         "neighbors": ["neighbor names"],
                         "carriers": ["air_mass/river_segment/coastal_current/soil_zone"],
                         "tags": ["coastal", "fishery", "urban"],
@@ -1137,6 +1463,8 @@ class EnvProfileGenerator:
                 "Neighbors must refer to other listed regions.",
                 "Prefer region-level units, not single buildings.",
                 "If information is sparse, still return at least one region.",
+                "name、description 等展示字段必须使用简体中文，不能使用 snake_case、类名、UUID 或内部编号充当显示内容。",
+                "region_type、carriers 等机器枚举字段可保留英文，展示字段与机器字段不得混用。",
             ],
         }
 
@@ -1145,7 +1473,7 @@ class EnvProfileGenerator:
                 messages=[
                     {
                         "role": "system",
-                        "content": "You produce compact, valid JSON for a region-level eco-social simulation graph.",
+                        "content": "你生成区域级生态社会推演图。只返回合法 JSON；所有展示字段必须是简体中文，禁止用 snake_case、类名或内部编号作为名称。",
                     },
                     {"role": "user", "content": json.dumps(prompt, ensure_ascii=False)},
                 ],
@@ -1163,20 +1491,27 @@ class EnvProfileGenerator:
         used: set[str] = set()
         regions: List[RegionNode] = []
         name_to_id: Dict[str, str] = {}
+        raw_item_by_region_id: Dict[str, Dict[str, Any]] = {}
         candidate_lookup = {str(item.get("name") or "").strip(): item for item in region_candidates}
-        for item in raw_regions[:max_regions]:
-            name = str(item.get("name") or "").strip()
-            if not name:
+        for index, item in enumerate(raw_regions[:max_regions]):
+            if not isinstance(item, dict):
                 continue
+            raw_name = str(item.get("name") or "").strip()
+            name = _chinese_display_text(raw_name, f"区域{index + 1}")
             region_id = ensure_unique_slug(name, used)
+            name_to_id[raw_name or name] = region_id
             name_to_id[name] = region_id
-            candidate = candidate_lookup.get(name, {})
+            raw_item_by_region_id[region_id] = item
+            candidate = candidate_lookup.get(raw_name, {})
             regions.append(
                 RegionNode(
                     region_id=region_id,
                     name=name,
                     region_type=str(item.get("region_type") or "region"),
-                    description=str(item.get("description") or ""),
+                    description=_chinese_display_text(
+                        item.get("description"),
+                        f"{name}是本次推演中的区域单元。",
+                    ),
                     carriers=[str(carrier) for carrier in (item.get("carriers") or [])[:4]],
                     tags=[str(tag) for tag in (item.get("tags") or [])[:6]],
                     lat=self._coerce_float(item.get("lat")) or self._coerce_float(candidate.get("lat")),
@@ -1188,9 +1523,8 @@ class EnvProfileGenerator:
         if not regions:
             return []
 
-        raw_lookup = {str(item.get("name") or "").strip(): item for item in raw_regions}
         for region in regions:
-            raw_item = raw_lookup.get(region.name, {})
+            raw_item = raw_item_by_region_id.get(region.region_id, {})
             for neighbor_name in raw_item.get("neighbors") or []:
                 neighbor_id = name_to_id.get(str(neighbor_name).strip())
                 if neighbor_id and neighbor_id != region.region_id:
@@ -1205,7 +1539,7 @@ class EnvProfileGenerator:
         diffusion_template: str,
     ) -> List[RegionNode]:
         if not region_candidates:
-            region_candidates = [{"name": "Core Region", "description": "Fallback region", "tags": ["fallback"]}]
+            region_candidates = [{"name": "核心区域", "description": "兜底区域", "tags": ["fallback"]}]
 
         used: set[str] = set()
         regions: List[RegionNode] = []
@@ -1281,7 +1615,7 @@ class EnvProfileGenerator:
                 retention_factor=0.1 if diffusion_template == "ash_plume" else 0.06,
                 directionality="directed",
                 evidence={"transport_context": diffusion_context},
-                rationale="Atmospheric transport follows dominant wind-driven downwind ordering.",
+                rationale="大气传播按主导风向的下风顺序连接区域。",
             )
         if diffusion_template in {"marine", "marine_current", "coastal_inundation"}:
             return self._build_projected_transport_edges(
@@ -1293,7 +1627,7 @@ class EnvProfileGenerator:
                 retention_factor=0.28 if diffusion_template == "coastal_inundation" else 0.42,
                 directionality="directed" if diffusion_template == "coastal_inundation" else "asymmetric",
                 evidence={"transport_context": diffusion_context},
-                rationale="Marine transport follows coastal-current ordering with stronger retention in enclosed zones.",
+                rationale="海洋传播按沿岸流向连接区域，并提高封闭水域的滞留影响。",
             )
         if diffusion_template == "ecological_mobility":
             return self._build_neighbor_transport_edges(regions, channel_type="habitat_corridor")
@@ -1345,7 +1679,7 @@ class EnvProfileGenerator:
                     barrier_factor=0.24 if self._is_barrier_region(neighbor) else 0.0,
                     confidence=0.72,
                     evidence={"ordering": "river_rank", "source_rank": order_lookup[region.region_id][0], "target_rank": order_lookup[neighbor.region_id][0]},
-                    rationale="Inland-water routing follows directed upstream-to-downstream topology.",
+                    rationale="内陆水系传播按从上游到下游的有向拓扑连接区域。",
                 )
 
         if not edges:
@@ -1363,7 +1697,7 @@ class EnvProfileGenerator:
                     retention_factor=0.08,
                     confidence=0.62,
                     evidence={"ordering": "fallback_chain"},
-                    rationale="Fallback inland-water routing follows ordered basin chain.",
+                    rationale="缺少完整水系拓扑时，按流域顺序构建保守传播链。",
                 )
         return edges
 
@@ -1388,7 +1722,7 @@ class EnvProfileGenerator:
                 travel_time_rounds=travel_time_rounds,
                 retention_factor=retention_factor,
                 confidence=0.46,
-                rationale=f"{rationale} Fallback to topology-only ordering because directional data is unavailable.",
+                rationale=f"{_chinese_display_text(rationale, '按区域传播关系构建路径。')} 缺少方向资料，改用拓扑顺序。",
             )
 
         coords = [region for region in regions if region.lat is not None and region.lon is not None]
@@ -1400,7 +1734,7 @@ class EnvProfileGenerator:
                 travel_time_rounds=travel_time_rounds,
                 retention_factor=retention_factor,
                 confidence=0.46,
-                rationale=f"{rationale} Fallback to topology-only ordering because region coordinates are unavailable.",
+                rationale=f"{_chinese_display_text(rationale, '按区域传播关系构建路径。')} 缺少区域坐标，改用拓扑顺序。",
             )
 
         ordered_regions = sorted(
@@ -1466,7 +1800,10 @@ class EnvProfileGenerator:
                     retention_factor=retention_factor,
                     confidence=confidence,
                     evidence={"ordering": "neighbor_fallback"},
-                    rationale=rationale or "Transport falls back to existing neighbor adjacency.",
+                    rationale=_chinese_display_text(
+                        rationale,
+                        "缺少明确传播方向时，按现有相邻关系构建保守路径。",
+                    ),
                 )
 
         if edges:
@@ -1485,7 +1822,10 @@ class EnvProfileGenerator:
                 retention_factor=retention_factor,
                 confidence=confidence,
                 evidence={"ordering": "chain_fallback"},
-                rationale=rationale or "Transport falls back to ordered region chain.",
+                rationale=_chinese_display_text(
+                    rationale,
+                    "缺少相邻关系时，按区域顺序构建保守传播链。",
+                ),
             )
         return edges
 
@@ -1579,14 +1919,19 @@ class EnvProfileGenerator:
         subregions: List[RegionNode],
         map_evidence_context: Optional[MapEvidenceContext] = None,
         override_target_agent_count: Optional[int] = None,
+        max_agent_count: Optional[int] = None,
     ) -> int:
         if override_target_agent_count is not None:
-            return max(24, int(override_target_agent_count))
-        if map_evidence_context is not None:
-            return map_evidence_context.target_agent_count
-        base = len(prepared_entities)
-        layered = max(len(subregions) * 4, len(regions) * 12)
-        return min(180, max(84, base + layered))
+            target = max(1, int(override_target_agent_count))
+        elif map_evidence_context is not None:
+            target = map_evidence_context.target_agent_count
+        else:
+            base = len(prepared_entities)
+            layered = max(len(subregions) * 4, len(regions) * 12)
+            target = min(180, max(84, base + layered))
+        if max_agent_count is not None:
+            target = min(target, max(1, int(max_agent_count)))
+        return max(1, target)
 
     def _build_map_evidence_context(
         self,
@@ -1595,6 +1940,7 @@ class EnvProfileGenerator:
         subregions: List[RegionNode],
         diffusion_template: str,
         search_mode: str,
+        max_agent_count: Optional[int] = None,
     ) -> MapEvidenceContext:
         del search_mode
         score = defaultdict(float)
@@ -1604,6 +1950,15 @@ class EnvProfileGenerator:
         admin_context: Dict[str, Any] = {}
         observed_human_subtypes: set[str] = set()
         warnings: List[str] = []
+        data_quality: Dict[str, Any] = next(
+            (
+                dict((prepared.entity.attributes or {}).get("data_quality") or {})
+                for prepared in prepared_entities
+                if isinstance((prepared.entity.attributes or {}).get("data_quality"), dict)
+                and "formal_ready" in ((prepared.entity.attributes or {}).get("data_quality") or {})
+            ),
+            {},
+        )
 
         def add_ref(bucket: str, ref: str) -> None:
             if ref and ref not in refs[bucket]:
@@ -1614,27 +1969,53 @@ class EnvProfileGenerator:
             ref = prepared.entity.uuid or prepared.entity.name
             if isinstance(attrs.get("admin_context"), dict):
                 admin_context = dict(attrs.get("admin_context") or {})
+                if isinstance(attrs.get("data_quality"), dict):
+                    data_quality = dict(attrs.get("data_quality") or {})
                 add_ref("governance", ref)
                 add_ref("admin", ref)
+                # The AOI root is user-defined scope, not a public observation.
+                continue
 
             subtype = str(attrs.get("subtype") or "").strip().lower()
             source_kind = str(attrs.get("source_kind") or "").strip().lower()
+            provider = self._map_feature_provider(attrs)
             proxy_role = str(attrs.get("proxy_role") or "").strip().lower()
             if source_kind:
-                source_counts[source_kind] += 1
+                if provider in CONTEXTUAL_PROVIDERS:
+                    source_counts["contextual"] += 1
+                elif provider in FALLBACK_PROVIDERS or source_kind == "reference":
+                    source_counts["reference"] += 1
+                else:
+                    source_counts[source_kind] += 1
             if subtype:
                 subtype_counts[subtype] += 1
 
+            formal_spatial_ready = data_quality.get("formal_ready") is True
+            provider_is_analytic = (
+                provider in PUBLIC_PROVIDERS
+                and source_kind in {"observed", "detected"}
+            )
             weight = self._map_feature_weight_for_evidence(prepared)
+            if not formal_spatial_ready and not provider_is_analytic:
+                # Keep provenance counts and admin/weather references, but do
+                # not let degraded reference density manufacture land use,
+                # population or industry evidence for Agent generation.
+                if subtype == "weather_baseline":
+                    add_ref("weather", ref)
+                    add_ref("governance", ref)
+                continue
             if subtype in HUMAN_ACTIVITY_SUBTYPES:
-                score["human_activity"] += weight
-                observed_human_subtypes.add(subtype)
+                if provider_is_analytic:
+                    score["human_activity"] += weight
+                    observed_human_subtypes.add(subtype)
                 add_ref("human_activity", ref)
             if subtype in INDUSTRY_SUBTYPES:
-                score["industry"] += weight
+                if provider_is_analytic:
+                    score["industry"] += weight
                 add_ref("industry", ref)
             if subtype in TRANSPORT_SUBTYPES:
-                score["transport"] += weight
+                if provider_is_analytic:
+                    score["transport"] += weight
                 add_ref("transport", ref)
                 if subtype in {"pier", "marina", "ferry_terminal"}:
                     add_ref("coastal_work", ref)
@@ -1645,7 +2026,8 @@ class EnvProfileGenerator:
                 score["ecology"] += weight
                 add_ref("ecology", ref)
             if subtype in AGRICULTURE_SUBTYPES:
-                score["agriculture"] += weight
+                if provider_is_analytic:
+                    score["agriculture"] += weight
                 add_ref("agriculture", ref)
             if subtype in OPEN_SUBTYPES:
                 score["open"] += weight
@@ -1671,7 +2053,8 @@ class EnvProfileGenerator:
                 if normalized in {"water", "ecology", "transport", "industrial", "urban", "open"}:
                     add_ref(normalized, f"region::{region.region_id}")
 
-        evidence_level = self._map_evidence_level(source_counts)
+        formal_spatial_ready = data_quality.get("formal_ready") is True
+        evidence_level = self._map_evidence_level(source_counts) if formal_spatial_ready else "low"
         environment_archetype = self._infer_map_environment_archetype(
             human_activity_score=score["human_activity"],
             industry_score=score["industry"],
@@ -1684,6 +2067,9 @@ class EnvProfileGenerator:
             diffusion_template=diffusion_template,
         )
         target_range = self._map_target_count_range(environment_archetype)
+        if max_agent_count is not None:
+            cap = max(1, int(max_agent_count))
+            target_range = (min(target_range[0], cap), min(target_range[1], cap))
         target_agent_count = self._resolve_map_target_agent_count(
             target_range=target_range,
             environment_archetype=environment_archetype,
@@ -1706,6 +2092,8 @@ class EnvProfileGenerator:
             warnings.append("AOI lacks direct human-activity evidence; social agents are gated off.")
         if evidence_level == "low":
             warnings.append("Map evidence is sparse; generated agents should be treated as low-confidence simulation proxies.")
+        if not formal_spatial_ready:
+            warnings.append("Public spatial evidence is unavailable; reference/context nodes cannot ground detailed Agent geography.")
 
         dominant_subtypes = [
             key
@@ -1723,6 +2111,8 @@ class EnvProfileGenerator:
             environment_archetype=environment_archetype,
             target_count_range=target_range,
             target_agent_count=target_agent_count,
+            formal_spatial_ready=formal_spatial_ready,
+            data_quality_status=str(data_quality.get("status") or "unknown"),
             allowed_roles=allowed_roles,
             forbidden_roles=forbidden_roles,
             evidence_refs_by_role={key: list(dict.fromkeys(value)) for key, value in refs.items()},
@@ -1736,12 +2126,22 @@ class EnvProfileGenerator:
     def _map_feature_weight_for_evidence(self, prepared: PreparedEntityContext) -> float:
         attrs = prepared.entity.attributes or {}
         source_kind = str(attrs.get("source_kind") or "").lower()
-        source_multiplier = {"observed": 1.0, "detected": 0.7, "inferred": 0.35}.get(source_kind, 0.45)
+        provider = self._map_feature_provider(attrs)
+        if provider in CONTEXTUAL_PROVIDERS:
+            source_multiplier = 0.18
+        elif provider in FALLBACK_PROVIDERS or source_kind == "reference":
+            source_multiplier = 0.25
+        else:
+            source_multiplier = {"observed": 1.0, "detected": 0.7, "inferred": 0.35}.get(source_kind, 0.45)
         importance = self._coerce_float(attrs.get("importance")) or 4.0
         tags = attrs.get("tags") if isinstance(attrs.get("tags"), dict) else {}
         share = self._coerce_float((tags or {}).get("pixel_share_pct")) or 0.0
         confidence = self._coerce_float(attrs.get("confidence")) or 0.6
         return round((importance * 0.7 + share * 0.08 + confidence * 2.0) * source_multiplier, 3)
+
+    def _map_feature_provider(self, attrs: Dict[str, Any]) -> str:
+        tags = attrs.get("tags") if isinstance(attrs.get("tags"), dict) else {}
+        return str(attrs.get("source_provider") or tags.get("provider") or "").strip().lower()
 
     def _map_evidence_level(self, source_counts: Dict[str, int]) -> str:
         observed = source_counts.get("observed", 0)
@@ -1912,7 +2312,7 @@ class EnvProfileGenerator:
                 kept = []
                 for candidate in accepted:
                     if candidate.candidate_id in rejected_ids:
-                        rejected.append({"candidate": candidate.to_dict(), "reason": "LLM critic rejected as weakly grounded"})
+                        rejected.append({"candidate": candidate.to_dict(), "reason": "模型复核认为接地证据不足。"})
                     else:
                         kept.append(candidate)
                 accepted = kept
@@ -2258,12 +2658,14 @@ class EnvProfileGenerator:
         if not self.llm_client:
             return []
         prompt = {
-            "task": "Create grounded EnvFish agent candidates from map evidence only.",
+            "task": "仅依据地图证据生成有依据的 EnvFish 代理体候选，并返回严格 JSON。",
             "rules": [
                 "Return compact JSON only.",
                 "Do not invent residents, workers, businesses, tourists, or institutions unless allowed_roles supports them.",
                 "Every candidate must include evidence_refs from evidence_refs_by_role or a subregion ref.",
                 "Respect forbidden_roles strictly.",
+                "role_name、why_this_agent 等展示字段必须使用简体中文，禁止使用 snake_case、类名、UUID 或内部编号作为显示内容。",
+                "agent_type、agent_subtype、role_type 等机器枚举字段可保留英文，不能把它们直接复制到展示字段。",
             ],
             "evidence_context": evidence_context.to_dict(),
             "regions": [region.to_dict() for region in regions[:8]],
@@ -2273,7 +2675,7 @@ class EnvProfileGenerator:
             "schema": {
                 "candidates": [
                     {
-                        "role_name": "short role label",
+                        "role_name": "中文角色名",
                         "agent_type": "human|organization|governance|ecology|carrier",
                         "agent_subtype": "resident|field_observer|environment_bureau|habitat_species|water_flow",
                         "role_type": "RoleType",
@@ -2281,7 +2683,7 @@ class EnvProfileGenerator:
                         "home_subregion_id": "subregion id",
                         "evidence_refs": ["uuid or subregion ref"],
                         "confidence": 0.7,
-                        "why_this_agent": "one sentence",
+                        "why_this_agent": "中文依据说明",
                         "action_space_hint": ["monitor"],
                     }
                 ]
@@ -2290,7 +2692,7 @@ class EnvProfileGenerator:
         try:
             result = self.llm_client.chat_json(
                 messages=[
-                    {"role": "system", "content": "You generate fact-constrained map simulation agent plans as JSON."},
+                    {"role": "system", "content": "你依据地图证据生成受约束的推演代理体规划。只返回合法 JSON；所有展示字段必须是简体中文，禁止显示 snake_case、类名或内部编号。"},
                     {"role": "user", "content": json.dumps(prompt, ensure_ascii=False)},
                 ],
                 temperature=0.15,
@@ -2316,10 +2718,11 @@ class EnvProfileGenerator:
             agent_subtype = str(item.get("agent_subtype") or "habitat_species")
             node_family = self._node_family_for_agent_type(agent_type)
             confidence = self._coerce_float(item.get("confidence")) or 0.55
+            role_fallback = _agent_role_label(agent_subtype, node_family)
             candidates.append(
                 AgentCandidatePlan(
                     candidate_id=f"map_llm_{index}_{home_subregion_id}_{agent_subtype}",
-                    role_name=str(item.get("role_name") or agent_subtype),
+                    role_name=_chinese_display_text(item.get("role_name"), role_fallback),
                     node_family=node_family,
                     agent_type=agent_type,
                     agent_subtype=agent_subtype,
@@ -2328,7 +2731,10 @@ class EnvProfileGenerator:
                     home_subregion_id=home_subregion_id,
                     evidence_refs=[str(ref) for ref in (item.get("evidence_refs") or []) if ref],
                     confidence=max(0.0, min(1.0, confidence)),
-                    why_this_agent=str(item.get("why_this_agent") or "LLM planned from constrained map evidence."),
+                    why_this_agent=_chinese_display_text(
+                        item.get("why_this_agent"),
+                        "该候选主体由受约束的地图证据推导生成。",
+                    ),
                     action_space_hint=[str(action) for action in (item.get("action_space_hint") or []) if action],
                     generation_mode="map_llm_personalized",
                 )
@@ -3065,6 +3471,7 @@ class EnvProfileGenerator:
         regions: List[RegionNode],
         subregions: List[RegionNode],
         profiles: List[EnvAgentProfile],
+        per_agent_limit: Optional[int] = None,
     ) -> List[AgentRelationshipEdge]:
         del regions
         edges: List[AgentRelationshipEdge] = []
@@ -3123,6 +3530,21 @@ class EnvProfileGenerator:
                     interaction_channel="social",
                     rationale="同一子区域内的个体会相互传递观察、情绪和行动建议。",
                 )
+
+        if per_agent_limit is not None:
+            relationship_limit = max(1, int(per_agent_limit))
+            degree: Dict[int, int] = defaultdict(int)
+            bounded_edges: List[AgentRelationshipEdge] = []
+            for edge in edges:
+                if (
+                    degree[edge.source_agent_id] >= relationship_limit
+                    or degree[edge.target_agent_id] >= relationship_limit
+                ):
+                    continue
+                bounded_edges.append(edge)
+                degree[edge.source_agent_id] += 1
+                degree[edge.target_agent_id] += 1
+            edges = bounded_edges
 
         profile_lookup = {profile.agent_id: profile for profile in profiles}
         for edge in edges:
@@ -3253,7 +3675,7 @@ class EnvProfileGenerator:
             "goals": [f"稳住 {subregion_name} 的局部秩序", f"降低 {region_name} 的次生损失"],
             "sensitivities": ["风险感知滞后", "跨部门协作失灵"],
             "motivation_stack": ["保全生计", "减少暴露", "维护局部秩序"],
-            "capabilities": ["local_observation", "resource_mobilization"],
+            "capabilities": ["本地观察", "资源动员"],
             "constraints": ["信息不完全", "资源有限"],
             "action_space": ["monitor", "signal", "adapt"],
             "decision_policy": {"activation_threshold": 48, "coordination_bias": 0.5, "ecology_weight": 0.4},
@@ -3299,7 +3721,7 @@ class EnvProfileGenerator:
             },
             "community_committee": {
                 "action_space": ["coordinate_cleanup", "issue_notice", "resource_queue"],
-                "capabilities": ["local_coordination", "resource_dispatch"],
+                "capabilities": ["本地协调", "资源调度"],
                 "impact_profile": {"panic_delta": -0.6, "trust_delta": 1.0, "economic_delta": 0.0, "ecology_delta": 0.8},
             },
             "market_association": {
@@ -3314,17 +3736,17 @@ class EnvProfileGenerator:
             },
             "environment_bureau": {
                 "action_space": ["issue_alert", "enforce_restriction", "deploy_remediation"],
-                "capabilities": ["enforcement", "monitoring", "public_briefing"],
+                "capabilities": ["执法约束", "监测", "公开通报"],
                 "impact_profile": {"panic_delta": -0.8, "trust_delta": 1.2, "economic_delta": -0.6, "ecology_delta": 1.4},
             },
             "emergency_office": {
                 "action_space": ["coordinate_response", "evacuate", "stabilize_services"],
-                "capabilities": ["response_command", "resource_dispatch"],
+                "capabilities": ["响应指挥", "资源调度"],
                 "impact_profile": {"panic_delta": -1.1, "trust_delta": 1.0, "economic_delta": -0.4, "ecology_delta": 0.6},
             },
             "safety_inspector": {
                 "action_space": ["inspect", "fine_operator", "halt_line"],
-                "capabilities": ["inspection", "compliance_enforcement"],
+                "capabilities": ["巡查", "合规执法"],
                 "impact_profile": {"panic_delta": -0.2, "trust_delta": 0.7, "economic_delta": -0.8, "ecology_delta": 1.0},
             },
             "conservation_station": {
@@ -3350,7 +3772,7 @@ class EnvProfileGenerator:
             },
             "transport_node": {
                 "action_space": ["route_flow", "throttle_capacity", "report_disruption"],
-                "capabilities": ["routing", "flow_observation"],
+                "capabilities": ["路径调度", "流量观察"],
                 "motivation_stack": ["维持通行能力", "降低中断扩散"],
                 "impact_profile": {"panic_delta": 0.2, "trust_delta": 0.0, "economic_delta": 0.6, "ecology_delta": -0.2},
                 "bio": f"{subregion_name} 的基础设施节点，承载并传导人流/物流压力。",
@@ -3377,10 +3799,10 @@ class EnvProfileGenerator:
             merged["decision_policy"] = {**merged["decision_policy"], "economic_weight": 0.1, "ecology_weight": 0.95}
         if land_use_class == "transport":
             merged["decision_policy"] = {**merged["decision_policy"], "economic_weight": 0.75, "ecology_weight": 0.2}
-            merged["capabilities"] = list(dict.fromkeys([*merged["capabilities"], "routing", "traffic_control"]))
+            merged["capabilities"] = list(dict.fromkeys([*merged["capabilities"], "路径调度", "交通管制"]))
         if land_use_class == "water":
             merged["decision_policy"] = {**merged["decision_policy"], "economic_weight": 0.15, "ecology_weight": 0.9}
-            merged["capabilities"] = list(dict.fromkeys([*merged["capabilities"], "hydro_observation"]))
+            merged["capabilities"] = list(dict.fromkeys([*merged["capabilities"], "水文观察"]))
         if land_use_class == "open":
             merged["decision_policy"] = {**merged["decision_policy"], "economic_weight": 0.2, "ecology_weight": 0.75}
         return merged
@@ -3407,10 +3829,22 @@ class EnvProfileGenerator:
         base_goals = self._default_goals(prepared.node_family, primary_region.name)
         sensitivities = self._default_sensitivities(prepared.node_family, primary_region.name)
         if relevant_variables:
-            base_goals = self._merge_text_items(base_goals, [f"respond to {item.name}" for item in relevant_variables[:2]])
+            base_goals = self._merge_text_items(
+                base_goals,
+                [
+                    f"响应{_chinese_display_text(item.name, '场景变量')}带来的影响"
+                    for item in relevant_variables[:2]
+                ],
+            )
             sensitivities = self._merge_text_items(
                 sensitivities,
-                [item.description or item.name for item in relevant_variables[:2]],
+                [
+                    _chinese_display_text(
+                        item.description or item.name,
+                        "场景变量造成的状态变化",
+                    )
+                    for item in relevant_variables[:2]
+                ],
             )
 
         # Decide identity first so persona/bio stay consistent with agent_subtype
@@ -3434,24 +3868,31 @@ class EnvProfileGenerator:
             )
 
         username = self._username_from_name(prepared.entity.name, index)
-        profession = (
+        role_label = _agent_role_label(agent_subtype, prepared.node_family)
+        display_region = _chinese_display_text(primary_region.name, "所属区域")
+        safe_bio_fallback = f"该{role_label}位于{display_region}，持续感知并响应本次推演中的局部变化。"
+        safe_persona_fallback = "该主体会根据环境暴露、制度信号和周边主体行为调整自身策略。"
+        profession = _chinese_display_text(
             (llm_payload or {}).get("profession")
             or prepared.entity.attributes.get("role")
             or prepared.entity.attributes.get("profession")
-            or prepared.entity_type
+            or prepared.entity_type,
+            role_label,
         )
-        bio = (
+        bio = _chinese_display_text(
             (llm_payload or {}).get("bio")
             or behavior.get("bio")
-            or f"{prepared.entity.name} is a {prepared.entity_type} rooted in {primary_region.name}."
+            or "该主体位于所属区域，并参与本次生态社会推演。",
+            safe_bio_fallback,
         )
-        persona = (
+        persona = _chinese_display_text(
             (llm_payload or {}).get("persona")
             or behavior.get("persona")
-            or f"{prepared.entity.name} tracks local ecological change, social pressure, and risk trade-offs."
+            or "该主体会依据环境变化、社会压力与风险权衡调整行动。",
+            safe_persona_fallback,
         )
-        goals = [str(item) for item in ((llm_payload or {}).get("goals") or base_goals)][:6]
-        sensitivities = [str(item) for item in ((llm_payload or {}).get("sensitivities") or sensitivities)][:6]
+        goals = _chinese_display_list((llm_payload or {}).get("goals"), base_goals)
+        sensitivities = _chinese_display_list((llm_payload or {}).get("sensitivities"), sensitivities)
         influenced_regions = [primary_region.region_id] + [
             region.region_id
             for region in regions
@@ -3468,12 +3909,15 @@ class EnvProfileGenerator:
         return EnvAgentProfile(
             agent_id=index,
             username=username,
-            name=prepared.entity.name,
+            name=_chinese_display_text(
+                prepared.entity.name,
+                f"{display_region}{role_label}{index + 1}",
+            ),
             node_family=prepared.node_family,
             role_type=prepared.entity_type,
             bio=bio,
             persona=persona,
-            profession=str(profession),
+            profession=profession,
             primary_region=primary_region.region_id,
             agent_type=agent_type,
             agent_subtype=agent_subtype,
@@ -3725,11 +4169,7 @@ class EnvProfileGenerator:
             provenance = "inferred"
             confidence = 0.42
             note = "缺少来源实体锚点，角色由规则推断。"
-        # Encode provenance in grounding_reason in a uniformly parseable way
-        # (`provenance=<tier>; ...`) so downstream can read the tier without a
-        # new model field, mirroring how the map path explains its grounding.
-        reason = f"provenance={provenance}; {note}"
-        return provenance, round(confidence, 3), reason
+        return provenance, round(confidence, 3), note
 
     def _generate_profile_with_llm(
         self,
@@ -3739,7 +4179,7 @@ class EnvProfileGenerator:
         injected_variables: List[InjectedVariable],
     ) -> Optional[Dict[str, Any]]:
         prompt = {
-            "task": "Create a compact eco-social simulation role profile as JSON.",
+            "task": "生成紧凑的生态社会推演角色画像，并返回严格 JSON。",
             "entity_name": prepared.entity.name,
             "entity_type": prepared.entity_type,
             "node_family": prepared.node_family,
@@ -3750,25 +4190,54 @@ class EnvProfileGenerator:
             "requirement": simulation_requirement[:800],
             "injected_variables": self._summarize_injected_variables(injected_variables),
             "schema": {
-                "profession": "short string",
-                "bio": "1-2 sentences",
-                "persona": "2-3 sentences in third person",
-                "goals": ["goal 1", "goal 2"],
-                "sensitivities": ["sensitivity 1", "sensitivity 2"],
+                "profession": "简体中文角色名称",
+                "bio": "一至两句简体中文简介",
+                "persona": "两至三句第三人称简体中文行为画像",
+                "goals": ["简体中文目标一", "简体中文目标二"],
+                "sensitivities": ["简体中文敏感项一", "简体中文敏感项二"],
             },
+            "rules": [
+                "profession、bio、persona、goals、sensitivities 全部必须使用简体中文。",
+                "禁止使用 snake_case、类名、UUID、内部编号或 entity/agent 等机器词作为显示内容。",
+                "机器枚举只用于理解输入，不能直接复制到展示字段。",
+                "只返回合法 JSON。",
+            ],
         }
         try:
-            return self.llm_client.chat_json(
+            payload = self.llm_client.chat_json(
                 messages=[
                     {
                         "role": "system",
-                        "content": "Return only valid JSON. Keep descriptions grounded and concise.",
+                        "content": "只返回合法 JSON。所有展示字段必须使用简体中文，禁止输出 snake_case、类名、UUID 或内部编号。内容应有依据且简洁。",
                     },
                     {"role": "user", "content": json.dumps(prompt, ensure_ascii=False)},
                 ],
                 temperature=0.3,
                 max_tokens=900,
             )
+            if not isinstance(payload, dict):
+                return None
+            entity_label = _chinese_display_text(prepared.entity.name, "该主体")
+            region_label = _chinese_display_text(primary_region.name, "所属区域")
+            return {
+                "profession": _chinese_display_text(payload.get("profession"), "场景主体"),
+                "bio": _chinese_display_text(
+                    payload.get("bio"),
+                    f"{entity_label}位于{region_label}，参与本次生态社会推演。",
+                ),
+                "persona": _chinese_display_text(
+                    payload.get("persona"),
+                    "该主体会根据环境变化、社会压力和风险权衡调整行动。",
+                ),
+                "goals": _chinese_display_list(
+                    payload.get("goals"),
+                    [f"降低{region_label}的风险暴露", "维持局部系统稳定"],
+                ),
+                "sensitivities": _chinese_display_list(
+                    payload.get("sensitivities"),
+                    ["环境压力变化", "协作资源不足"],
+                ),
+            }
         except Exception as exc:
             logger.debug(f"Profile LLM generation failed for {prepared.entity.name}: {exc}")
             return None
@@ -3850,24 +4319,26 @@ class EnvProfileGenerator:
         return merged[:6]
 
     def _default_goals(self, node_family: str, region_name: str) -> List[str]:
+        display_region = _chinese_display_text(region_name, "所属区域")
         defaults = {
-            "EnvironmentalCarrier": [f"propagate changes across {region_name}", "reflect current transport conditions"],
-            "EcologicalReceptor": [f"maintain habitat quality in {region_name}", "avoid prolonged exposure"],
-            "GovernmentActor": [f"stabilize {region_name}", "coordinate response legitimacy"],
-            "OrganizationActor": [f"protect operations in {region_name}", "manage reputational risk"],
-            "Infrastructure": [f"keep services operating in {region_name}", "reduce disruption spillover"],
+            "EnvironmentalCarrier": [f"反映{display_region}的传播变化", "呈现当前输运条件"],
+            "EcologicalReceptor": [f"维持{display_region}的栖息地质量", "避免长期暴露"],
+            "GovernmentActor": [f"稳定{display_region}的公共秩序", "协调应急响应"],
+            "OrganizationActor": [f"维持{display_region}的组织运转", "控制声誉与运营风险"],
+            "Infrastructure": [f"保障{display_region}的服务运行", "降低中断外溢"],
         }
-        return defaults.get(node_family, [f"protect interests in {region_name}", "adapt to changing environmental conditions"])
+        return defaults.get(node_family, [f"维护{display_region}的核心利益", "适应环境条件变化"])
 
     def _default_sensitivities(self, node_family: str, region_name: str) -> List[str]:
         defaults = {
-            "EnvironmentalCarrier": ["upstream/downstream pressure", "weather and current shifts"],
-            "EcologicalReceptor": ["toxicity persistence", "habitat fragmentation"],
-            "GovernmentActor": ["trust collapse", "resource constraints"],
-            "OrganizationActor": ["consumer sentiment", "supply chain interruption"],
-            "Infrastructure": ["service overload", "contamination shutdowns"],
+            "EnvironmentalCarrier": ["上下游压力", "天气与水流变化"],
+            "EcologicalReceptor": ["污染持续时间", "栖息地破碎化"],
+            "GovernmentActor": ["公众信任下降", "应急资源约束"],
+            "OrganizationActor": ["公众态度变化", "供应链中断"],
+            "Infrastructure": ["服务超载", "污染导致的停运"],
         }
-        return defaults.get(node_family, [f"rapid sentiment change in {region_name}", "policy uncertainty"])
+        display_region = _chinese_display_text(region_name, "所属区域")
+        return defaults.get(node_family, [f"{display_region}的态度快速变化", "政策不确定性"])
 
     def _username_from_name(self, name: str, index: int) -> str:
         normalized = "".join(ch.lower() if ch.isalnum() else "_" for ch in name).strip("_")

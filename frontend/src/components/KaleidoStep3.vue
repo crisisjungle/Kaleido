@@ -1,80 +1,60 @@
 <template>
   <div class="envfish-step envfish-step3">
-    <div class="hero">
-      <div class="hero-copy">
-        <div class="eyebrow">KALEIDO / STEP 3</div>
-        <h2>推演工作台与运行干预</h2>
-      </div>
+    <div class="runtime-sticky">
+      <section class="control-panel runtime-console runtime-transport" aria-label="推演播放控制">
+        <span class="runtime-progress-label">{{ isReplayPlayback ? '回放进度' : '推演进度' }}</span>
+        <input
+          v-model.number="roundIndex"
+          type="range"
+          :min="0"
+          :max="Math.max(playbackFrames.length - 1, 0)"
+          :disabled="playbackFrames.length <= 1"
+          step="1"
+          class="range compact-range"
+          :style="{ '--range-progress': `${progressPercent}%` }"
+          aria-label="选择推演进度"
+          :aria-valuetext="`${selectedRoundLabel}，完成 ${progressPercent}%`"
+          @input="stopAnimationPlayback"
+        />
+        <strong class="runtime-progress-value mono">{{ progressPercent }}%</strong>
+        <button
+          class="play-control runtime-play-toggle"
+          type="button"
+          :disabled="playbackFrames.length <= 1"
+          :aria-pressed="isPlayingAnimation"
+          @click="toggleAnimationPlayback"
+        >
+          <span aria-hidden="true">{{ isPlayingAnimation ? 'Ⅱ' : '▶' }}</span>
+          {{ isPlayingAnimation ? '暂停' : '播放' }}
+        </button>
+      </section>
 
-      <div class="hero-controls">
-        <button class="ghost-btn" @click="handleGoBack">返回场景设计</button>
-        <button class="ghost-btn" :disabled="isStopping" @click="handleStop">
-          {{ isStopping ? '停止中...' : '停止推演' }}
-        </button>
-        <button class="primary-btn" :disabled="!canGenerateReport" @click="handleNextStep">
-          {{ reportButtonLabel }}
-        </button>
-      </div>
+      <KWorkflowTabs
+        class="step3-workflow-tabs"
+        :items="workspaceTabs"
+        :model-value="activeWorkspaceTab"
+        variant="compact"
+        aria-label="推演观察视图"
+        @change="selectWorkspaceTab"
+      />
     </div>
 
-    <div class="status-strip">
-      <div class="status-card accent">
-        <span>轮次</span>
-        <strong class="mono">{{ currentRoundNumber }}</strong>
-      </div>
-      <div class="status-card">
-        <span>阶段</span>
-        <strong>{{ runStageLabel }}</strong>
-      </div>
-      <div class="status-card">
-        <span>场景</span>
-        <strong>{{ scenarioLabel }}</strong>
-      </div>
-      <!-- 11卡状态条 → 3：模板/区域/子区域/活跃代理体/事件/交互/干预/不确定性 计数已并入各 tab 内容，
-           顶栏只保留轮次/阶段/场景三项核心状态（同时移除了 不确定性 n/a 与 模板 原始 id 泄漏） -->
-    </div>
-
-    <section class="workspace-shell">
-      <div class="workspace-topbar">
-        <div class="workspace-copy">
-          <div class="eyebrow workspace-eyebrow">第 3 步工作台</div>
-          <h3>观察区域脉冲、多智能体互动与风险链路</h3>
-        </div>
-
-        <div class="workspace-tabs" role="tablist" aria-label="Step3 工作台标签页">
-          <button
-            v-for="tab in workspaceTabs"
-            :key="tab.value"
-            type="button"
-            :id="`workspace-tab-${tab.value}`"
-            role="tab"
-            class="workspace-tab"
-            :class="{ active: activeWorkspaceTab === tab.value }"
-            :aria-selected="activeWorkspaceTab === tab.value"
-            :aria-controls="`workspace-panel-${tab.value}`"
-            @click="activeWorkspaceTab = tab.value"
-          >
-            <span class="workspace-tab-label">{{ tab.label }}</span>
-            <span class="workspace-tab-meta">{{ tab.meta }}</span>
-          </button>
-        </div>
-      </div>
-
+    <section ref="workspaceShellRef" class="workspace-shell" @scroll="handleWorkspaceScroll">
       <section
-        v-if="activeWorkspaceTab === 'overview'"
-        id="workspace-panel-overview"
+        v-if="['pulse', 'state', 'spread'].includes(activeWorkspaceTab)"
+        :id="`workspace-panel-${activeWorkspaceTab}`"
         role="tabpanel"
-        aria-labelledby="workspace-tab-overview"
+        :aria-label="activeWorkspaceTabLabel"
         class="workspace-panel"
       >
-        <div class="summary-grid">
+        <div v-if="activeWorkspaceTab === 'state'" class="summary-grid">
           <article class="summary-card accent">
             <span>重点区域</span>
             <strong>{{ regionRows[0]?.name || '等待区域状态' }}</strong>
             <p>
               {{
                 regionRows[0]
-                  ? `${formatScoreKeyLabel(selectedScoreKey)} ${regionRows[0].selectedScore} · ${translateDisplayToken(regionRows[0].tagline || 'region', '区域')}`
+                  ? safeRuntimeCopy(regionRows[0].tagline, '区域')
                   : '等待区域矩阵返回。'
               }}
             </p>
@@ -86,129 +66,46 @@
               {{
                 subregionRows[0]
                   ? `${subregionRows[0].parentName || '宏观区域'} · ${subregionRows[0].agentCount} 个代理体`
-                  : '当前轮次还没有 subregion heat。'
+                  : '当前轮次还没有子区域热度。'
               }}
             </p>
           </article>
           <article class="summary-card">
             <span>领先代理体</span>
-            <strong>{{ agentRows[0]?.name || '等待 agent 状态' }}</strong>
+            <strong>{{ agentRows[0]?.name || '等待代理体状态' }}</strong>
             <p>
               {{
                 agentRows[0]
                   ? `${agentRows[0].familyLabel} · 脆弱性 ${agentRows[0].vulnerability_score}`
-                  : '后端尚未返回可排序的 agent 快照。'
+                  : '系统尚未返回可排序的代理体快照。'
               }}
             </p>
           </article>
           <article class="summary-card">
             <span>主导渠道</span>
             <strong>{{ dominantInteractionLabel }}</strong>
-            <p>{{ latestInteraction ? latestInteraction.summary : '当前还没有可展示的 agent interaction。' }}</p>
+            <p>{{ latestInteraction ? latestInteraction.summary : '当前还没有可展示的代理体互动。' }}</p>
           </article>
         </div>
 
-        <div class="overview-top-grid">
-          <section class="control-panel embedded">
-            <div class="control-head">
-              <div>
-                <div class="panel-title-row">
-                  <h3>播放控制</h3>
-                  <span class="hint">{{ runStageLabel }}</span>
-                </div>
-                <p class="progress-note">{{ runMessage || '系统会按轮次刷新区域状态、扩散事件和干预反馈。' }}</p>
-              </div>
-              <div class="mini-summary">
-                <div class="mini-pill">
-                  <span>当前轮次</span>
-                  <strong>{{ currentRoundNumber }}/{{ totalRoundsLabel }}</strong>
-                </div>
-                <div class="mini-pill">
-                  <span>评分维度</span>
-                  <strong>{{ formatScoreKeyLabel(selectedScoreKey) }}</strong>
-                </div>
-              </div>
-            </div>
-
-            <div class="slider-shell">
-              <input
-                v-model.number="roundIndex"
-                type="range"
-                :min="0"
-                :max="Math.max(playbackFrames.length - 1, 0)"
-                step="1"
-                class="range"
-              />
-              <div class="range-labels">
-                <span>起点</span>
-                <span>当前快照：{{ selectedRoundLabel }}</span>
-                <span>最新</span>
-              </div>
-            </div>
-
-            <div class="selector-row">
-              <label class="selector">
-                <span>区域评分</span>
-                <select v-model="selectedScoreKey">
-                  <option v-for="key in scoreKeys" :key="key" :value="key">{{ formatScoreKeyLabel(key) }}</option>
-                </select>
-              </label>
-
-              <label class="selector">
-                <span>快速回放</span>
-                <select v-model.number="roundIndex">
-                  <option v-for="(frame, idx) in playbackFrames" :key="frameKey(frame, idx)" :value="idx">
-                    R{{ frame.round ?? extractRoundNumber(frame, idx) }}
-                  </option>
-                </select>
-              </label>
-
-              <div class="selector playback-buttons">
-                <span>动画</span>
-                <button class="mini-btn ghost" type="button" :disabled="playbackFrames.length <= 1 || roundIndex <= 0" @click="stepAnimationFrame(-1)">
-                  上一轮
-                </button>
-                <button class="mini-btn" type="button" :disabled="playbackFrames.length <= 1" @click="toggleAnimationPlayback">
-                  {{ isPlayingAnimation ? '暂停' : '播放' }}
-                </button>
-                <button class="mini-btn ghost" type="button" :disabled="playbackFrames.length <= 1 || roundIndex >= playbackFrames.length - 1" @click="stepAnimationFrame(1)">
-                  下一轮
-                </button>
-                <select v-model.number="playbackSpeedMs">
-                  <option v-for="speed in playbackSpeedOptions" :key="speed" :value="speed">{{ speed }}ms</option>
-                </select>
-              </div>
-            </div>
-          </section>
-
+        <div v-if="activeWorkspaceTab === 'pulse'" class="overview-top-grid">
           <section class="panel pulse-panel">
             <div class="panel-title-row">
               <h3>运行脉冲</h3>
               <span class="hint">{{ selectedRoundLabel }}</span>
             </div>
 
-            <div class="pulse-metric">
-              <div class="pulse-metric-head">
-                <!-- 回放态下这是"回放到第几轮"的位置，而非运行进度，避免与「阶段=已完成」打架 -->
-                <span>{{ isReplayOnly ? '回放进度' : '推演进度' }}</span>
-                <strong class="mono">{{ progressPercent }}%</strong>
-              </div>
-              <div class="progress-track">
-                <div class="progress-fill" :style="{ width: `${progressPercent}%` }"></div>
-              </div>
-            </div>
-
             <div class="pulse-delta-grid">
               <article class="pulse-delta-card">
-                <span>本轮新增连接</span>
+                <span>已延展关系</span>
                 <strong class="mono">{{ playbackPulseStats.newEdges }}</strong>
               </article>
               <article class="pulse-delta-card">
-                <span>本轮活跃连接</span>
+                <span>当前传播波</span>
                 <strong class="mono">{{ playbackPulseStats.activeEdges }}</strong>
               </article>
               <article class="pulse-delta-card">
-                <span>相关节点</span>
+                <span>响应节点</span>
                 <strong class="mono">{{ playbackPulseStats.focusNodes }}</strong>
               </article>
             </div>
@@ -236,15 +133,15 @@
                 <p>
                   {{
                     latestInteraction
-                      ? `${latestInteraction.actionLabel}${latestInteraction.targetName ? ` -> ${latestInteraction.targetName}` : ''}`
+                      ? `${latestInteraction.actionLabel}${latestInteraction.targetName ? ` → ${latestInteraction.targetName}` : ''}`
                       : '还没有交互记录。'
                   }}
                 </p>
               </article>
               <article class="spotlight-card">
                 <span>反馈回路</span>
-                <strong>{{ feedbackLoops[0] ? translateDisplayToken(feedbackLoops[0], feedbackLoops[0]) : '等待反馈链' }}</strong>
-                <p>{{ feedbackLoops.length > 1 ? feedbackLoops.slice(1, 3).map(item => translateDisplayToken(item, item)).join(' · ') : '以环境-生态-生计-治理链为主线。' }}</p>
+                <strong>{{ feedbackLoops[0] ? safeRuntimeCopy(feedbackLoops[0], '反馈链') : '等待反馈链' }}</strong>
+                <p>{{ feedbackLoops.length > 1 ? feedbackLoops.slice(1, 3).map(item => safeRuntimeCopy(item, '反馈链')).join(' · ') : '以环境—生态—生计—治理链为主线。' }}</p>
               </article>
               <article class="spotlight-card">
                 <span>生效变量</span>
@@ -261,16 +158,14 @@
           </section>
         </div>
 
-        <div class="overview-main-grid">
-          <section class="panel region-panel">
+        <div v-if="['state', 'spread'].includes(activeWorkspaceTab)" class="overview-main-grid">
+          <section v-if="activeWorkspaceTab === 'state'" class="panel region-panel">
             <div class="panel-title-row">
               <h3>区域状态矩阵</h3>
-              <span class="hint">按 {{ formatScoreKeyLabel(selectedScoreKey) }} 排序</span>
             </div>
 
             <div class="matrix-head">
               <span>区域</span>
-              <span>当前维度</span>
               <span>暴露</span>
               <span>恐慌</span>
               <span>信任</span>
@@ -281,13 +176,7 @@
               <article v-for="region in (expandedLists.regions ? regionRows : regionRows.slice(0, LIST_PREVIEW.regions))" :key="region.id" class="region-row">
                 <div class="region-meta">
                   <strong>{{ region.name }}</strong>
-                  <span>{{ translateDisplayToken(region.tagline, region.tagline) }}</span>
-                </div>
-                <div class="score-cell">
-                  <div class="bar-track">
-                    <div class="bar-fill" :style="{ width: `${region.selectedScore}%` }"></div>
-                  </div>
-                  <span class="score-text mono">{{ region.selectedScore }}</span>
+                  <span>{{ safeRuntimeCopy(region.tagline, '区域') }}</span>
                 </div>
                 <span class="metric mono">{{ region.exposure_score }}</span>
                 <span class="metric mono">{{ region.panic_level }}</span>
@@ -308,7 +197,50 @@
             </div>
           </section>
 
-          <section class="panel timeline-panel">
+          <div v-if="activeWorkspaceTab === 'state'" class="state-secondary-grid">
+            <section class="mini-panel subregion-panel">
+              <div class="mini-panel-head">
+                <h4>子区域热度</h4>
+                <span class="hint mono">{{ subregionRows.length }} 个</span>
+              </div>
+              <div v-if="subregionRows.length > 0" class="subregion-list">
+                <article v-for="subregion in subregionRows.slice(0, LIST_PREVIEW.subregions)" :key="subregion.id" class="subregion-card">
+                  <div class="subregion-card-head">
+                    <div>
+                      <strong>{{ subregion.name }}</strong>
+                      <span>{{ subregion.parentName || '宏观区域' }} · {{ subregion.agentCount }} 个代理体</span>
+                    </div>
+                    <span class="subregion-score mono">{{ subregion.selectedScore }}</span>
+                  </div>
+                  <div class="subregion-bar">
+                    <div class="subregion-bar-fill" :style="{ width: `${subregion.selectedScore}%` }"></div>
+                  </div>
+                </article>
+              </div>
+              <div v-else class="empty-state">当前轮次还没有子区域状态。</div>
+            </section>
+
+            <section class="mini-panel decision-panel">
+              <div class="mini-panel-head">
+                <h4>当前轮决策</h4>
+                <span class="hint mono">{{ agentInteractionScopeLabel }}</span>
+              </div>
+              <div v-if="agentInteractions.length > 0" class="interaction-timeline">
+                <article v-for="item in agentInteractions.slice(0, LIST_PREVIEW.interactions)" :key="item.id" class="interaction-card">
+                  <div class="interaction-head">
+                    <span class="interaction-round mono">R{{ item.round }}</span>
+                    <span class="interaction-channel">{{ item.channel }}</span>
+                  </div>
+                  <strong>{{ item.sourceName }} · {{ item.actionLabel }}</strong>
+                  <p>{{ item.summary }}<span v-if="item.targetName"> → {{ item.targetName }}</span></p>
+                  <div v-if="item.rationale" class="interaction-meta"><span>{{ item.rationale }}</span></div>
+                </article>
+              </div>
+              <div v-else class="empty-state">当前轮次还没有记录代理体决策。</div>
+            </section>
+          </div>
+
+          <section v-if="activeWorkspaceTab === 'spread'" class="panel timeline-panel">
             <div class="panel-title-row">
               <h3>扩散与反馈事件</h3>
               <span class="hint">{{ spreadEvents.length }} 个事件</span>
@@ -343,7 +275,7 @@
                 <span class="hint">人地反馈回路</span>
               </div>
               <div class="loop-list">
-                <span v-for="loop in feedbackLoops" :key="loop" class="loop-pill">{{ translateDisplayToken(loop, loop) }}</span>
+                <span v-for="loop in feedbackLoops" :key="loop" class="loop-pill">{{ safeRuntimeCopy(loop, '反馈链') }}</span>
                 <span v-if="feedbackLoops.length === 0" class="empty-loop">环境 → 生态 → 生计 → 恐慌/媒体 → 政策</span>
               </div>
             </div>
@@ -351,32 +283,33 @@
         </div>
       </section>
 
-      <!-- 多智能体并入「运行总览」（4 tab → 2）：去掉重复的 summary-grid，直接接在运行总览下方 -->
       <section
-        v-if="activeWorkspaceTab === 'overview'"
-        class="workspace-panel workspace-panel-merged"
+        v-if="activeWorkspaceTab === 'agents'"
+        id="workspace-panel-agents"
+        role="tabpanel"
+        :aria-label="activeWorkspaceTabLabel"
+        class="workspace-panel"
       >
-        <section class="multi-agent-panel stage-panel briefing-section bsec-agents" :class="{ collapsed: !isExpanded('agents') }">
-          <div class="panel-title-row briefing-head" @click="toggleSection('agents')">
-            <h3>多代理体工作台</h3>
+        <section class="multi-agent-panel stage-panel">
+          <div class="panel-title-row">
+            <h3>代理工作台</h3>
             <span class="hint">
               {{ subregionRows.length }} 个子区域 · {{ agentRows.length }} 个代理体 · {{ agentInteractions.length }} 次交互
             </span>
-            <i class="bh-chev" aria-hidden="true">⌄</i>
           </div>
 
           <div class="multi-agent-grid">
             <div class="mini-panel subregion-panel">
               <div class="mini-panel-head">
                 <h4>子区域热度</h4>
-                <span class="hint mono">{{ formatScoreKeyLabel(subregionHeatKey) }}</span>
+                <span class="hint mono">{{ subregionRows.length }} 个</span>
               </div>
               <div v-if="subregionRows.length > 0" class="subregion-list">
                 <article v-for="subregion in (expandedLists.subregions ? subregionRows : subregionRows.slice(0, LIST_PREVIEW.subregions))" :key="subregion.id" class="subregion-card">
                   <div class="subregion-card-head">
                     <div>
                       <strong>{{ subregion.name }}</strong>
-                      <span>{{ translateDisplayToken(subregion.tagline || subregion.landUseLabel || 'subregion', '子区域') }}</span>
+                      <span>{{ safeRuntimeCopy(subregion.tagline || subregion.landUseLabel, '子区域') }}</span>
                     </div>
                     <span class="subregion-score mono">{{ subregion.selectedScore }}</span>
                   </div>
@@ -386,7 +319,7 @@
                   <div class="subregion-meta">
                     <span>{{ subregion.parentName || subregion.parent_region_id || '宏观区域' }}</span>
                     <span>{{ subregion.agentCount }} 个代理体</span>
-                    <span>{{ subregion.distanceLabel || subregion.distance_band || '带状区域' }}</span>
+                    <span>{{ formatDistanceLabelZh(subregion.distanceLabel || subregion.distance_band) || '带状区域' }}</span>
                   </div>
                 </article>
               </div>
@@ -431,12 +364,18 @@
                   <div class="agent-rank-meta">
                     <span>{{ agent.regionLabel || '—' }}</span>
                     <span>{{ agent.subregionLabel || '—' }}</span>
-                    <span>{{ formatScoreKeyLabel(selectedScoreKey) }} {{ agent.selectedScore }}</span>
+                    <span>{{ agent.lifecycleStatusLabel }}</span>
+                    <span>{{ agent.representationLabel }}</span>
+                  </div>
+                  <div v-if="agent.latestAction" class="agent-action-line">
+                    <strong>{{ agent.latestAction.actionLabel }}</strong>
+                    <span>R{{ agent.latestAction.round }} · {{ agent.latestAction.statusLabel }}</span>
                   </div>
                   <div class="agent-rank-tags">
-                    <span v-for="tag in agent.motivations.slice(0, 3)" :key="tag" class="pill">{{ tag }}</span>
+                    <span v-for="tag in agent.capabilityLabels.slice(0, 3)" :key="`capability-${tag}`" class="pill">{{ tag }}</span>
+                    <span v-if="agent.capabilityLabels.length === 0" class="pill">能力待补证</span>
                   </div>
-                  <p>{{ agent.summary }}</p>
+                  <p>{{ agent.summary }}<template v-if="agent.resourceSummary"> · {{ agent.resourceSummary }}</template></p>
                 </article>
               </div>
               <div v-else class="empty-state">
@@ -466,7 +405,7 @@
                   <strong>{{ item.sourceName }}</strong>
                   <p>
                     {{ item.summary }}
-                    <span v-if="item.targetName"> -> {{ item.targetName }}</span>
+                    <span v-if="item.targetName"> → {{ item.targetName }}</span>
                   </p>
                   <div class="interaction-meta">
                     <span v-if="item.sourceRegion">{{ item.sourceRegion }}</span>
@@ -489,6 +428,28 @@
               </button>
             </div>
           </div>
+
+          <section class="runtime-ledger-section policy-ledger-section">
+            <div class="panel-title-row">
+              <h3>政策执行台账</h3>
+              <span class="hint">{{ policyExecutionSummary }}</span>
+            </div>
+            <div v-if="policyExecutionRows.length > 0" class="runtime-ledger-list">
+              <article v-for="item in policyExecutionRows.slice(0, 8)" :key="item.id" class="runtime-ledger-row">
+                <div>
+                  <span class="runtime-ledger-round mono">R{{ item.round }}</span>
+                  <strong>{{ item.label }}</strong>
+                  <p>{{ item.summary }}</p>
+                </div>
+                <div class="runtime-ledger-meta">
+                  <span :class="`is-${item.status}`">{{ item.statusLabel }}</span>
+                  <span>{{ item.executorLabel }}</span>
+                  <span>{{ item.targetLabel }}</span>
+                </div>
+              </article>
+            </div>
+            <div v-else class="empty-state">截至当前所选轮次，尚无到期的政策执行记录。</div>
+          </section>
         </section>
       </section>
 
@@ -496,69 +457,123 @@
         v-if="activeWorkspaceTab === 'risk'"
         id="workspace-panel-risk"
         role="tabpanel"
-        aria-labelledby="workspace-tab-risk"
+        :aria-label="activeWorkspaceTabLabel"
         class="workspace-panel"
       >
-        <div v-if="riskObjects.length > 0" class="summary-grid">
-          <article class="summary-card accent">
-            <span>主要风险对象</span>
-            <strong>{{ selectedRiskObject?.title || '等待风险对象' }}</strong>
-            <p>{{ selectedRiskObject?.why_now || selectedRiskObject?.summary || '等待 risk object 摘要。' }}</p>
-          </article>
-          <article class="summary-card">
-            <span>实体关联</span>
-            <strong>{{ riskObjectEntityNodes.length }}</strong>
-            <p>{{ riskObjectEntityNodes[0]?.name || '当前对象尚未映射实体节点。' }}</p>
-          </article>
-          <article class="summary-card">
-            <span>区域范围</span>
-            <strong>{{ riskObjectRegionNodes.length }}</strong>
-            <p>{{ riskObjectRegionNodes[0]?.name || '当前对象没有可展示的区域范围。' }}</p>
-          </article>
-          <article class="summary-card">
-            <span>受影响群簇</span>
-            <strong>{{ riskObjectClusters.length }}</strong>
-            <p>{{ riskObjectClusters[0]?.name || '当前对象还没有聚合出人群簇。' }}</p>
-          </article>
-        </div>
-
-        <section v-if="riskObjects.length > 0" class="risk-panel-shell">
+        <section class="relationship-runtime-panel stage-panel">
           <div class="panel-title-row">
-            <h3>风险对象链路</h3>
-            <span class="hint">
-              {{ riskObjects.length }} 个对象 / {{ riskObjectEntityNodes.length + riskObjectRegionNodes.length }} 个关联节点
-            </span>
+            <div>
+              <h3>动态关系台账</h3>
+              <p>关系由代理体行动与运行证据更新；风险对象只读取这些结果，不负责创建代理体。</p>
+            </div>
+            <span class="hint">{{ relationshipStateRows.length }} 条关系 · {{ agentEmergenceRows.length }} 个生命周期事件</span>
           </div>
 
-          <div class="risk-panel-grid">
-            <div class="risk-card-list">
+          <div class="relationship-summary-grid">
+            <div><span>活跃关系</span><strong>{{ relationshipDynamics.activeCount }}</strong></div>
+            <div><span>平均信任</span><strong>{{ relationshipDynamics.trustLabel }}</strong></div>
+            <div><span>平均协同</span><strong>{{ relationshipDynamics.coordinationLabel }}</strong></div>
+            <div><span>平均张力</span><strong>{{ relationshipDynamics.tensionLabel }}</strong></div>
+          </div>
+
+          <div class="relationship-runtime-grid">
+            <section class="runtime-ledger-section">
+              <div class="mini-panel-head">
+                <h4>关系状态</h4>
+                <span class="hint">随轮次变化</span>
+              </div>
+              <div v-if="relationshipStateRows.length > 0" class="relationship-state-list">
+                <article v-for="item in relationshipStateRows.slice(0, 10)" :key="item.id" class="relationship-state-row">
+                  <div class="relationship-state-head">
+                    <strong>{{ item.sourceName }} → {{ item.targetName }}</strong>
+                    <span>{{ item.typeLabel }} · {{ item.statusLabel }}</span>
+                  </div>
+                  <div class="relationship-state-metrics">
+                    <span>信任 {{ item.trustLabel }}</span>
+                    <span>依赖 {{ item.dependencyLabel }}</span>
+                    <span>协同 {{ item.coordinationLabel }}</span>
+                    <span>张力 {{ item.tensionLabel }}</span>
+                  </div>
+                </article>
+              </div>
+              <div v-else class="empty-state">截至当前所选轮次，尚未形成可核验的动态关系状态。</div>
+            </section>
+
+            <section class="runtime-ledger-section">
+              <div class="mini-panel-head">
+                <h4>关系与代理体变化</h4>
+                <span class="hint">只影响当前轮及未来</span>
+              </div>
+              <div v-if="relationshipEventRows.length > 0 || agentEmergenceRows.length > 0" class="runtime-event-list">
+                <article v-for="item in combinedRuntimeEvents.slice(0, 12)" :key="item.id" class="runtime-event-row">
+                  <span class="runtime-ledger-round mono">R{{ item.round }}</span>
+                  <div>
+                    <strong>{{ item.typeLabel }}</strong>
+                    <p>{{ item.summary }}</p>
+                    <small v-if="item.effectiveRound > item.round">R{{ item.effectiveRound }} 起生效</small>
+                  </div>
+                </article>
+              </div>
+              <div v-else class="empty-state">截至当前所选轮次，尚无关系或代理体生命周期变化。</div>
+            </section>
+          </div>
+        </section>
+
+        <section v-if="riskObjects.length > 0" class="risk-panel-shell">
+          <div class="panel-title-row risk-panel-heading">
+            <h3>风险对象</h3>
+            <span class="hint">{{ riskObjects.length }} 个对象 · {{ activeRiskObjectCount }} 个活动</span>
+          </div>
+
+          <div class="risk-selector-shell" :class="{ 'has-overflow-controls': riskSelectorOverflow }">
+            <button
+              v-if="riskSelectorOverflow"
+              type="button"
+              class="risk-selector-nav"
+              aria-label="向左浏览风险对象"
+              :disabled="!canScrollRiskSelectorPrev"
+              @click="scrollRiskSelector(-1)"
+            >‹</button>
+            <div
+              ref="riskSelectorRef"
+              class="risk-selector-track"
+              role="tablist"
+              aria-label="选择风险对象"
+              @scroll.passive="syncRiskSelectorScrollState"
+            >
               <button
-                v-for="item in riskObjects"
+                v-for="(item, index) in riskObjects"
                 :key="item.risk_object_id"
                 type="button"
-                class="risk-object-card"
+                role="tab"
+                class="risk-selector-option"
                 :class="{ active: item.risk_object_id === selectedRiskObjectId }"
-                @click="selectedRiskObjectId = item.risk_object_id"
+                :aria-selected="item.risk_object_id === selectedRiskObjectId"
+                @click="selectRiskObject(item.risk_object_id)"
               >
-                <div class="risk-card-head">
-                  <span class="risk-mode-tag">{{ translateDisplayToken(item.mode || 'watch', item.mode || 'watch') }}</span>
-                  <span v-if="item.risk_object_id === primaryRiskObjectId" class="risk-primary-tag">主要</span>
-                </div>
-                <strong>{{ item.title }}</strong>
-                <p>{{ item.why_now || item.summary || '等待风险对象摘要。' }}</p>
-                <div class="risk-card-meta">
-                  <span>严重性 {{ normalizeScore(item.severity_score) }}</span>
-                  <span>可行动性 {{ normalizeScore(item.actionability_score) }}</span>
-                  <span>置信度 {{ formatPercent(item.confidence_score) }}</span>
-                </div>
+                <span class="risk-selector-index mono">{{ String(index + 1).padStart(2, '0') }}</span>
+                <span class="risk-selector-copy">
+                  <strong>{{ item.title }}</strong>
+                  <small>{{ riskFamilyLabel(item) }} · {{ runtimeStatusMeta(item.lifecycle_status || item.runtime_status || 'watch').label }}</small>
+                </span>
+                <span v-if="item.risk_object_id === primaryRiskObjectId" class="risk-primary-tag">主要</span>
               </button>
             </div>
+            <button
+              v-if="riskSelectorOverflow"
+              type="button"
+              class="risk-selector-nav"
+              aria-label="向右浏览风险对象"
+              :disabled="!canScrollRiskSelectorNext"
+              @click="scrollRiskSelector(1)"
+            >›</button>
+          </div>
 
-            <div v-if="selectedRiskObject" class="risk-detail">
+          <div v-if="selectedRiskObject" class="risk-detail">
               <div class="risk-detail-top">
                 <div>
                   <div class="eyebrow risk-eyebrow">
-                    {{ selectedRiskObject.mode === 'incident' ? '事件风险对象' : '观察风险对象' }}
+                    {{ selectedRiskObject.mode === 'incident' ? '事件风险对象' : '观察风险对象' }} · {{ riskFamilyLabel(selectedRiskObject) }}
                   </div>
                   <h3>{{ selectedRiskObject.title }}</h3>
                   <p>{{ selectedRiskObject.summary || selectedRiskObject.why_now || '等待风险对象摘要。' }}</p>
@@ -573,24 +588,31 @@
                     <strong>{{ normalizeTension(selectedRiskObject.runtime_tension) }}</strong>
                   </div>
                   <div class="mini-pill">
-                    <span>严重性{{ selectedRiskObject.has_runtime_signal ? '(静态)' : '' }}</span>
-                    <strong>{{ normalizeScore(selectedRiskObject.severity_score) }}</strong>
+                    <span>影响潜力</span>
+                    <strong>{{ normalizeScore(selectedRiskObject.impact_score ?? selectedRiskObject.severity_score) }}</strong>
                   </div>
                   <div class="mini-pill">
                     <span>可行动性</span>
                     <strong>{{ normalizeScore(selectedRiskObject.actionability_score) }}</strong>
                   </div>
                   <div class="mini-pill">
-                    <span>置信度</span>
-                    <strong>{{ formatPercent(selectedRiskObject.confidence_score) }}</strong>
+                    <span>证据充分度</span>
+                    <strong>{{ riskEvidenceScore(selectedRiskObject) }}</strong>
                   </div>
                 </div>
               </div>
 
-              <div
-                v-if="selectedRiskObject.has_runtime_signal || (selectedRiskObject.tension_trace || []).length || selectedRiskObject.uncertainty_band"
-                class="risk-runtime-box"
-              >
+              <div class="risk-detail-tabs" role="tablist" aria-label="风险对象详情">
+                <button type="button" role="tab" :aria-selected="activeRiskDetailTab === 'chain'" :class="{ active: activeRiskDetailTab === 'chain' }" @click="activeRiskDetailTab = 'chain'">风险链与张力</button>
+                <button type="button" role="tab" :aria-selected="activeRiskDetailTab === 'scope'" :class="{ active: activeRiskDetailTab === 'scope' }" @click="activeRiskDetailTab = 'scope'">受影响区域与主体</button>
+                <button type="button" role="tab" :aria-selected="activeRiskDetailTab === 'branches'" :class="{ active: activeRiskDetailTab === 'branches' }" @click="activeRiskDetailTab = 'branches'">监测与生命周期</button>
+              </div>
+
+              <div v-if="activeRiskDetailTab === 'chain'" class="risk-detail-section">
+                <div
+                  v-if="selectedRiskObject.has_runtime_signal || (selectedRiskObject.tension_trace || []).length || selectedRiskObject.uncertainty_band"
+                  class="risk-runtime-box"
+                >
                 <div class="risk-runtime-head">
                   <span>运行态张力</span>
                   <span class="runtime-hint">{{ selectedRiskObject.has_runtime_signal ? '随推演演化，替代静态严重性判读' : '尚无运行信号 · 暂用静态严重性' }}</span>
@@ -603,7 +625,7 @@
                   >
                     {{ runtimeStatusMeta(selectedRiskObject.runtime_status).label }}
                   </span>
-                  <span v-if="selectedRiskObject.turning_point" class="runtime-turning-tag">⚑ 转折点</span>
+                  <span v-if="selectedRiskObject.turning_point" class="runtime-turning-tag">出现转折点</span>
                   <svg
                     v-if="buildTensionSparkline(selectedRiskObject.tension_trace)"
                     class="tension-sparkline"
@@ -639,143 +661,199 @@
                     </small>
                   </strong>
                 </div>
-              </div>
-
-              <div class="risk-highlight-row">
-                <div class="risk-note">
-                  <span>当前触发原因</span>
-                  <strong>{{ selectedRiskObject.why_now || '暂无 why now 描述' }}</strong>
                 </div>
-                <div class="risk-note">
-                  <span>根源压力</span>
-                  <strong>{{ formatInlineList(selectedRiskObject.root_pressures, '暂无根压力') }}</strong>
-                </div>
-              </div>
 
-              <div class="risk-step-pills">
-                <span v-for="step in selectedRiskObject.chain_steps || []" :key="step" class="risk-step-pill">{{ translateDisplayToken(step, step) }}</span>
-              </div>
-
-              <div class="risk-related-grid">
-                <section class="risk-subpanel">
-                  <div class="subpanel-head">
-                    <h4>相关实体节点</h4>
-                    <span>{{ riskObjectEntityNodes.length }}</span>
+                <div class="risk-causal-chain" aria-label="风险对象机制链">
+                  <div class="risk-causal-node">
+                    <span>触发源</span>
+                    <strong>{{ selectedRiskStatement.trigger_name || selectedRiskObject.root_pressures?.[0] || '场景触发因素' }}</strong>
                   </div>
-                  <div v-if="riskObjectEntityNodes.length > 0" class="node-chip-list">
-                    <article v-for="node in riskObjectEntityNodes" :key="node.id" class="node-chip">
+                  <span class="risk-causal-arrow" aria-hidden="true">→</span>
+                  <div class="risk-causal-node mechanism">
+                    <span>机制步骤</span>
+                    <div class="risk-step-pills">
+                      <strong v-for="step in selectedRiskMechanismSteps" :key="step">{{ safeRuntimeCopy(step, '机制步骤') }}</strong>
+                      <strong v-if="selectedRiskMechanismSteps.length === 0">{{ selectedRiskObject.mechanism_edge_ids?.length || 0 }} 条已校验机制边</strong>
+                    </div>
+                  </div>
+                  <span class="risk-causal-arrow" aria-hidden="true">→</span>
+                  <div class="risk-causal-node">
+                    <span>受影响对象</span>
+                    <strong>{{ selectedRiskStatement.receptor_name || '主要受影响对象' }}</strong>
+                  </div>
+                  <span class="risk-causal-arrow" aria-hidden="true">→</span>
+                  <div class="risk-causal-node consequence">
+                    <span>具体后果</span>
+                    <strong>{{ selectedRiskStatement.consequence || selectedRiskObject.summary }}</strong>
+                  </div>
+                </div>
+              </div>
+
+              <div v-if="activeRiskDetailTab === 'scope'" class="risk-related-grid">
+                <section v-if="riskAffectedSubjectNodes.length > 0" class="risk-subpanel">
+                  <div class="subpanel-head">
+                    <h4>受影响主体与受体</h4>
+                    <span>{{ riskAffectedSubjectNodes.length }}</span>
+                  </div>
+                  <div class="node-chip-list">
+                    <article v-for="node in riskAffectedSubjectNodes" :key="node.id" class="node-chip">
                       <div class="node-chip-head">
                         <strong>{{ node.name }}</strong>
                         <span class="node-chip-state" :class="{ matched: node.matched }">
-                          {{ node.matched ? '图谱节点' : '风险引用' }}
+                          {{ node.stateLabel }}
                         </span>
                       </div>
                       <div class="node-chip-labels">
-                        <span v-for="label in node.labels" :key="label" class="node-label">{{ translateDisplayToken(label, label) }}</span>
+                        <span v-for="label in node.labels" :key="label" class="node-label">{{ safeRuntimeCopy(label, '关联主体') }}</span>
+                        <span v-if="node.scopeBasisLabel" class="node-label">{{ node.scopeBasisLabel }}</span>
                       </div>
-                      <p>{{ node.summary || '该节点当前仅作为风险对象引用出现。' }}</p>
+                      <p>{{ node.summary || '该主体或受体被当前机制路径直接引用。' }}</p>
                     </article>
                   </div>
-                  <div v-else class="empty-state">当前风险对象还没有映射到实体节点。</div>
                 </section>
 
-                <section class="risk-subpanel">
+                <section v-if="riskObjectRegionNodes.length > 0" class="risk-subpanel">
                   <div class="subpanel-head">
-                    <h4>相关区域</h4>
+                    <h4>作用区域</h4>
                     <span>{{ riskObjectRegionNodes.length }}</span>
                   </div>
-                  <div v-if="riskObjectRegionNodes.length > 0" class="node-chip-list compact">
+                  <div class="node-chip-list compact">
                     <article v-for="region in riskObjectRegionNodes" :key="region.id" class="node-chip compact">
                       <div class="node-chip-head">
                         <strong>{{ region.name }}</strong>
                         <span class="node-chip-state" :class="{ matched: region.matched }">
-                          {{ region.matched ? '图谱节点' : '作用域' }}
+                          {{ region.matched ? '地图节点' : '已校验区域' }}
                         </span>
                       </div>
                       <div class="node-chip-labels">
-                        <span v-for="label in region.labels" :key="label" class="node-label">{{ translateDisplayToken(label, label) }}</span>
+                        <span v-for="label in region.labels" :key="label" class="node-label">{{ safeRuntimeCopy(label, '作用区域') }}</span>
+                        <span v-if="region.scopeBasisLabel" class="node-label">{{ region.scopeBasisLabel }}</span>
                       </div>
                       <p>{{ region.summary || '当前区域来自风险对象作用域。' }}</p>
                     </article>
                   </div>
-                  <div v-else class="empty-state">当前风险对象没有可展示的区域范围。</div>
                 </section>
 
-                <section class="risk-subpanel">
+                <section v-if="selectedRiskEvidence.length > 0" class="risk-subpanel">
                   <div class="subpanel-head">
-                    <h4>受影响群簇</h4>
-                    <span>{{ riskObjectClusters.length }}</span>
+                    <h4>证据与认识状态</h4>
+                    <span>{{ selectedRiskEvidence.length }}</span>
                   </div>
-                  <div v-if="riskObjectClusters.length > 0" class="cluster-list">
-                    <article v-for="cluster in riskObjectClusters" :key="cluster.cluster_id" class="cluster-card">
+                  <div class="cluster-list">
+                    <article v-for="item in selectedRiskEvidence" :key="item.evidence_id || item.title" class="cluster-card">
                       <div class="cluster-head">
-                        <strong>{{ cluster.name }}</strong>
-                        <span class="pill">脆弱性 {{ normalizeScore(cluster.vulnerability_score) }}</span>
+                        <strong>{{ item.title || '机制依据' }}</strong>
+                        <span class="pill">{{ item.epistemic_status_label || safeRuntimeCopy(translateDisplayToken(item.epistemic_status, ''), '机制推断') }}</span>
                       </div>
-                      <p>{{ formatInlineList(cluster.dependency_profile, '暂无依赖结构描述') }}</p>
-                      <div class="risk-card-meta">
-                        <span>错配风险 {{ normalizeScore(cluster.mismatch_risk) }}</span>
-                        <span>{{ translateDisplayToken(cluster.cluster_type || 'cluster', cluster.cluster_type || '群簇') }}</span>
-                      </div>
+                      <p>{{ item.summary || formatInlineList(item.extracted_facts, '暂无证据摘要') }}</p>
                     </article>
                   </div>
-                  <div v-else class="empty-state">当前风险对象还没有聚合出人群簇。</div>
                 </section>
+
+                <div
+                  v-if="riskAffectedSubjectNodes.length === 0 && riskObjectRegionNodes.length === 0 && selectedRiskEvidence.length === 0"
+                  class="empty-state risk-detail-empty"
+                >
+                  当前风险对象尚无可展示的影响范围或证据。
+                </div>
               </div>
 
-              <div class="risk-related-grid secondary">
-                <section class="risk-subpanel">
+              <div v-if="activeRiskDetailTab === 'branches'" class="risk-related-grid secondary">
+                <section v-if="selectedRiskMetrics.length > 0" class="risk-subpanel">
                   <div class="subpanel-head">
-                    <h4>转折点</h4>
-                    <span>{{ (selectedRiskObject.turning_points || []).length }}</span>
+                    <h4>专属监测指标</h4>
+                    <span>{{ selectedRiskMetrics.length }}</span>
                   </div>
-                  <ul v-if="(selectedRiskObject.turning_points || []).length > 0" class="bullet-list">
-                    <li v-for="point in selectedRiskObject.turning_points" :key="point">{{ point }}</li>
-                  </ul>
-                  <div v-else class="empty-state">当前对象还没有标出显式转折点。</div>
+                  <div class="metric-list">
+                    <article v-for="metric in selectedRiskMetrics" :key="metric.key || metric.label" class="metric-row">
+                      <strong>{{ metric.label }}</strong>
+                      <span>升高 {{ metric.thresholds?.elevated ?? 52 }} · 危急 {{ metric.thresholds?.critical ?? 72 }} · 解除 {{ metric.thresholds?.resolved ?? 35 }}</span>
+                    </article>
+                  </div>
                 </section>
 
-                <section class="risk-subpanel">
+                <section v-if="selectedRiskEvents.length > 0 || selectedRiskObject.created_round > 0" class="risk-subpanel">
                   <div class="subpanel-head">
-                    <h4>分支比较</h4>
-                    <span>{{ (selectedRiskObject.scenario_branches || []).length }}</span>
+                    <h4>生命周期记录</h4>
+                    <span>{{ selectedRiskEvents.length }}</span>
                   </div>
-                  <div v-if="(selectedRiskObject.scenario_branches || []).length > 0" class="branch-list">
-                    <article
-                      v-for="branch in selectedRiskObject.scenario_branches"
-                      :key="branch.branch_id"
-                      class="branch-card"
-                    >
+                  <div v-if="selectedRiskEvents.length > 0" class="branch-list">
+                    <article v-for="event in selectedRiskEvents" :key="event.event_id" class="branch-card">
                       <div class="branch-head">
-                        <strong>{{ branch.name }}</strong>
-                        <span class="pill">{{ translateDisplayToken(branch.branch_type || 'branch', branch.branch_type || '分支') }}</span>
+                        <strong>第 {{ event.round ?? 0 }} 轮</strong>
+                        <span class="pill">{{ safeRuntimeCopy(event.event_type, '状态变化') }}</span>
                       </div>
-                      <p>{{ branch.description || '等待分支说明。' }}</p>
+                      <p>{{ event.summary || '风险状态发生变化。' }}</p>
                     </article>
                   </div>
-                  <div v-else class="empty-state">当前对象没有可对比的分支。</div>
+                  <div v-else class="empty-state">
+                    {{ selectedRiskObject.created_round > 0 ? `第 ${selectedRiskObject.created_round} 轮自动涌现，暂无后续状态事件。` : '初始风险对象，暂无状态变化事件。' }}
+                  </div>
                 </section>
+
+                <section v-if="selectedRiskObject.quality_flags?.length > 0" class="risk-subpanel">
+                  <div class="subpanel-head">
+                    <h4>质量标记</h4>
+                    <span>{{ selectedRiskObject.quality_flags?.length || 0 }}</span>
+                  </div>
+                  <div class="node-chip-labels">
+                    <span v-for="flag in selectedRiskObject.quality_flags.slice(0, 3)" :key="flag" class="node-label">{{ safeRuntimeCopy(translateDisplayToken(flag, ''), '质量复核项') }}</span>
+                    <span v-if="selectedRiskObject.quality_flags.length > 3" class="node-label">+{{ selectedRiskObject.quality_flags.length - 3 }}</span>
+                  </div>
+                </section>
+
+                <div
+                  v-if="selectedRiskMetrics.length === 0 && selectedRiskEvents.length === 0 && !(selectedRiskObject.created_round > 0) && !(selectedRiskObject.quality_flags?.length > 0)"
+                  class="empty-state risk-detail-empty"
+                >
+                  当前风险对象尚无监测或生命周期记录。
+                </div>
               </div>
-            </div>
           </div>
         </section>
 
         <div v-else class="empty-state stage-empty">
-          当前轮次还没有可展示的风险对象链路。等 risk object 生成后，这里会出现对象卡片、相关实体和区域映射。
+          场景准备完成，未形成通过证据校验的风险对象
         </div>
       </section>
 
-      <!-- 变量注入收进高级抽屉（写操作，不占主线流程）；去掉重复 summary-grid -->
-      <details class="inject-drawer">
-        <summary class="inject-drawer-summary">
-          <span class="inject-drawer-title">变量注入（高级）</span>
-          <span class="hint">中途注入 · 变量记录 · 系统日志 · {{ interventionRows.length }} 条</span>
-        </summary>
+    </section>
 
-        <div class="inject-grid">
-          <section class="panel injection-panel">
+    <WorkflowActionBar class="step3-action-bar" :sticky="false" :elevated="false" :compact="true" aria-label="推演流程操作">
+      <div class="action-context">
+        <span>{{ runStageLabel }}</span>
+        <strong>{{ actionBarSummary }}</strong>
+      </div>
+      <template #actions>
+        <button class="text-btn" type="button" @click="handleGoBack">返回场景设计</button>
+        <button class="ghost-btn intervention-trigger" type="button" @click="isInterventionPanelOpen = true">
+          干预推演
+          <span v-if="activeVariableRows.length" class="control-count mono">{{ activeVariableRows.length }}</span>
+        </button>
+        <button v-if="!isReplayPlayback && (canStop || isStopping)" class="ghost-btn" type="button" :disabled="isStopping" @click="handleStop">
+          {{ stopButtonLabel }}
+        </button>
+        <button class="primary-btn" type="button" :disabled="!canGenerateReport" @click="handleNextStep">
+          {{ reportButtonLabel }}
+        </button>
+      </template>
+    </WorkflowActionBar>
+
+    <div v-if="isInterventionPanelOpen" class="intervention-overlay" role="presentation" @click.self="isInterventionPanelOpen = false">
+      <aside class="intervention-drawer" role="dialog" aria-modal="true" aria-labelledby="intervention-title">
+        <header class="intervention-drawer-head">
+          <div>
+            <div class="eyebrow">运行控制</div>
+            <h2 id="intervention-title">运行干预</h2>
+            <p>新建干预、检查当前生效条件与历史记录。左侧运行图谱保持可见。</p>
+          </div>
+          <button type="button" class="drawer-close" aria-label="关闭运行干预" @click="isInterventionPanelOpen = false">×</button>
+        </header>
+
+        <div class="intervention-drawer-body">
+          <section class="injection-panel">
             <div class="panel-title-row">
-              <h3>中途变量注入</h3>
+              <h3>新建干预</h3>
               <span class="hint">污染 / 政策 / 约束</span>
             </div>
 
@@ -797,7 +875,7 @@
                 <label>
                   干预模式
                   <select v-model="injection.policy_mode">
-                    <option v-for="mode in policyModes" :key="mode" :value="mode">{{ translateDisplayToken(mode, mode) }}</option>
+                    <option v-for="mode in policyModes" :key="mode" :value="mode">{{ safeRuntimeCopy(translateDisplayToken(mode, ''), '其他模式') }}</option>
                   </select>
                 </label>
               </div>
@@ -815,11 +893,11 @@
               <div class="field-row">
                 <label>
                   目标区域
-                  <input v-model="injection.target_regions_text" type="text" placeholder="滨海区,渔港,下游社区" />
+                  <input v-model="injection.target_regions_text" type="text" placeholder="滨海区、渔港和下游社区" />
                 </label>
                 <label>
                   目标节点
-                  <input v-model="injection.target_nodes_text" type="text" placeholder="渔民,居民,环保局,海流" />
+                  <input v-model="injection.target_nodes_text" type="text" placeholder="渔民、居民、环保局与海流" />
                 </label>
               </div>
 
@@ -841,14 +919,15 @@
 
             <div class="action-row">
               <button class="secondary-btn" @click="clearInjection">清空</button>
-              <button class="primary-btn" :disabled="isInjecting" @click="handleInject">
-                {{ isInjecting ? '注入中...' : '注入变量' }}
+              <button class="primary-btn" :disabled="!canInject" @click="handleInject">
+                {{ isInjecting ? '实施中...' : canInject ? '确认实施干预' : '当前阶段不可干预' }}
               </button>
             </div>
+            <p v-if="interventionMessage" class="intervention-message" aria-live="polite">{{ interventionMessage }}</p>
 
             <div class="injection-log">
               <div class="panel-title-row">
-                <h3>变量记录</h3>
+                <h3>历史记录</h3>
                 <span class="hint">{{ interventionRows.length }}</span>
               </div>
               <div v-if="interventionRows.length > 0" class="history-list">
@@ -862,35 +941,24 @@
                   </div>
                   <p>{{ item.summary }}</p>
                   <div class="event-pills">
-                    <span class="pill">{{ translateDisplayToken(item.type, item.type) }}</span>
+                    <span class="pill">{{ safeRuntimeCopy(translateDisplayToken(item.type, ''), '干预变量') }}</span>
                     <span class="pill">R{{ item.startRound }}</span>
                     <span class="pill">{{ item.duration }} 轮</span>
                     <span class="pill">强度 {{ item.intensity }}</span>
-                    <span v-if="item.mode" class="pill">{{ translateDisplayToken(item.mode, item.mode) }}</span>
+                    <span v-if="item.mode" class="pill">{{ safeRuntimeCopy(translateDisplayToken(item.mode, ''), '其他模式') }}</span>
                   </div>
                 </article>
               </div>
               <div v-else class="empty-state">
-                还没有中途注入记录。
+                还没有运行干预记录。
               </div>
             </div>
           </section>
 
-          <section class="panel log-panel">
-            <div class="panel-title-row">
-              <h3>系统日志</h3>
-              <span class="hint mono">{{ simulationId || 'NO_SIMULATION' }}</span>
-            </div>
-            <div class="logs">
-              <div v-for="(log, index) in systemLogs" :key="index" class="log-line">
-                <span class="log-time">{{ log.time }}</span>
-                <span class="log-msg">{{ log.msg }}</span>
-              </div>
-            </div>
-
-            <div class="injection-log">
+          <section class="active-intervention-panel">
+            <div class="injection-log active-intervention-list">
               <div class="panel-title-row">
-                <h3>当前生效变量</h3>
+                <h3>当前生效</h3>
                 <span class="hint">{{ activeVariableRows.length }}</span>
               </div>
               <div v-if="activeVariableRows.length > 0" class="history-list">
@@ -898,28 +966,31 @@
                   <strong>{{ item.name }}</strong>
                   <p>{{ item.summary }}</p>
                   <div class="event-pills">
-                    <span class="pill">{{ translateDisplayToken(item.type, item.type) }}</span>
+                    <span class="pill">{{ safeRuntimeCopy(translateDisplayToken(item.type, ''), '干预变量') }}</span>
                     <span class="pill">目标 {{ item.targets.join(' · ') || '全域' }}</span>
                   </div>
                 </article>
               </div>
               <div v-else class="empty-state">
-                当前没有处于生效窗口的变量。
+                当前没有处于生效窗口的干预。
               </div>
             </div>
           </section>
         </div>
-      </details>
-    </section>
+      </aside>
+    </div>
   </div>
 </template>
 
 <script setup>
-import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { getRunStatus, getRunStatusDetail, getSimulation, getSimulationConfig, injectSimulationVariable, startSimulation, stopSimulation } from '../api/simulation'
 import { generateReportAsync } from '../api/report'
-import { formatDistanceLabelZh, formatLandUseLabelZh, formatTokenLabelZh, translateDisplayToken } from '../utils/displayText'
+import { formatDistanceLabelZh, formatLandUseLabelZh, formatTokenLabelZh, normalizeDisplayLabels, safeDisplayError, safeDisplayText, sanitizeDisplayCopy, translateDisplayToken } from '../utils/displayText'
+import { buildPlaybackFrame, getFrameTimelineDuration } from '../utils/simulationPlayback'
+import KWorkflowTabs from './ui/KWorkflowTabs.vue'
+import WorkflowActionBar from './ui/WorkflowActionBar.vue'
 
 const props = defineProps({
   simulationId: String,
@@ -954,16 +1025,20 @@ const configSnapshot = ref(null)
 const currentScenarioMode = ref(props.initialScenarioMode || route.query.scenario_mode || 'baseline_mode')
 const currentTemplate = ref(props.initialDiffusionTemplate || route.query.diffusion_template || 'marine')
 const roundIndex = ref(0)
-const selectedScoreKey = ref('vulnerability_score')
 const injectionHistory = ref([])
 const isInjecting = ref(false)
+const interventionMessage = ref('')
 const injection = ref(createInjection())
 const selectedRiskObjectId = ref('')
-const activeWorkspaceTab = ref('overview')
-// 简报式分节折叠（多代理体这面"墙"默认收起，点标题展开）
-const expandedSections = ref({ agents: false })
-const isExpanded = (key) => !!expandedSections.value[key]
-const toggleSection = (key) => { expandedSections.value[key] = !expandedSections.value[key] }
+const riskSelectorRef = ref(null)
+const riskSelectorOverflow = ref(false)
+const canScrollRiskSelectorPrev = ref(false)
+const canScrollRiskSelectorNext = ref(false)
+const activeRiskDetailTab = ref('chain')
+const activeWorkspaceTab = ref('pulse')
+const isInterventionPanelOpen = ref(false)
+const workspaceShellRef = ref(null)
+const workspaceScrollByTab = ref({})
 // 层级：长列表默认只显 top-N，按需展开（区域矩阵/子区域/代理体/交互）
 const expandedLists = ref({ regions: false, subregions: false, agents: false, interactions: false })
 const toggleList = (key) => { expandedLists.value[key] = !expandedLists.value[key] }
@@ -975,6 +1050,7 @@ const hasAutoStartedReplay = ref(false)
 const playbackElapsedMs = ref(0)
 
 const policyModes = ['restrict', 'relocate', 'subsidize', 'monitor', 'disclose', 'repair', 'ban', 'reopen']
+const PRIMARY_HEAT_SCORE_KEY = 'vulnerability_score'
 
 let statusTimer = null
 let detailTimer = null
@@ -983,27 +1059,10 @@ let frameAnimationRaf = null
 let statusRefreshInFlight = false
 let detailRefreshInFlight = false
 
-const scenarioLabel = computed(() => {
-  return currentScenarioMode.value === 'crisis_mode' ? '灾难态' : '基线态'
-})
-
-const templateLabel = computed(() => {
-  return translateDisplayToken(currentTemplate.value || 'marine', '海洋')
-})
-
-const totalRoundsLabel = computed(() => {
-  return runStatus.value.total_rounds || props.maxRounds || props.animationData?.meta?.total_rounds || roundSnapshots.value.length || '-'
-})
-
 const playbackFrames = computed(() => {
   const frames = props.animationData?.frames
   if (Array.isArray(frames) && frames.length > 0) return frames
   return roundSnapshots.value
-})
-
-const playbackSpeedOptions = computed(() => {
-  const options = props.animationData?.meta?.speed_options_ms
-  return Array.isArray(options) && options.length > 0 ? options : [800, 1400, 2200]
 })
 
 const selectedAnimationFrame = computed(() => {
@@ -1011,11 +1070,11 @@ const selectedAnimationFrame = computed(() => {
   const safeIndex = Math.min(Math.max(roundIndex.value, 0), playbackFrames.value.length - 1)
   const frame = playbackFrames.value[safeIndex] || null
   if (!frame || !props.animationData?.frames?.length) return frame
-  return {
-    ...frame,
-    playback_elapsed_ms: playbackElapsedMs.value,
-    playback_duration_ms: resolvePlaybackDelayMs(frame),
-  }
+  return buildPlaybackFrame(props.animationData, frame, {
+    elapsedMs: playbackElapsedMs.value,
+    durationMs: resolvePlaybackDelayMs(frame),
+    isPlaying: isPlayingAnimation.value,
+  })
 })
 
 const isReplayPlayback = computed(() => Boolean(props.isReplayOnly || simulationSnapshot.value?.is_replay_only || props.animationData?.meta?.artifact_mode === 'frozen'))
@@ -1039,17 +1098,19 @@ const progressPercent = computed(() => {
 })
 
 const runStageLabel = computed(() => {
-  if (runStatus.value.runner_status === 'completed') return '已完成'
-  if (runStatus.value.runner_status === 'failed') return '失败'
-  if (runStatus.value.runner_status === 'stopped') return '已停止'
+  if (runStatus.value.runner_status === 'completed') return '推演结果'
+  if (runStatus.value.runner_status === 'failed') return '最后一轮结果'
+  if (runStatus.value.runner_status === 'stopped') return '当前轮次'
   if (runStatus.value.runner_status === 'running') return '运行中'
   if (isPlayingAnimation.value) return '回放中'
   if (isStarting.value) return '启动中'
   return '空闲'
 })
 
-const runMessage = computed(() => {
-  return runDetail.value.message || runStatus.value.message || runDetail.value.error || runStatus.value.error || ''
+const actionBarSummary = computed(() => {
+  if (canGenerateReport.value) return `${selectedRoundLabel.value} · 推演结果`
+  if (runStatus.value.runner_status === 'failed') return '可查看最后一轮结果与运行记录'
+  return `${selectedRoundLabel.value} · ${progressPercent.value}%`
 })
 
 const canGenerateReport = computed(() => {
@@ -1059,16 +1120,35 @@ const canGenerateReport = computed(() => {
   return ['completed', 'stopped'].includes(String(runStatus.value.runner_status || ''))
 })
 
+const canStop = computed(() => {
+  if (!props.simulationId) return false
+  if (isReplayPlayback.value) return isPlayingAnimation.value
+  return ['running', 'paused'].includes(String(runStatus.value.runner_status || ''))
+})
+
+const stopButtonLabel = computed(() => {
+  if (isStopping.value) return '停止中...'
+  if (isReplayPlayback.value) return isPlayingAnimation.value ? '暂停回放' : '回放已暂停'
+  if (runStatus.value.runner_status === 'completed') return '推演结果'
+  if (runStatus.value.runner_status === 'stopped') return '推演已停止'
+  return '停止推演'
+})
+
+const canInject = computed(() => {
+  if (!props.simulationId || isInjecting.value || isReplayPlayback.value) return false
+  return ['running', 'paused'].includes(String(runStatus.value.runner_status || ''))
+})
+
 const reportButtonLabel = computed(() => {
   if (isGeneratingReport.value) return '报告生成中...'
-  if (runStatus.value.runner_status === 'failed') return '推演失败'
+  if (runStatus.value.runner_status === 'failed') return '等待可用轮次'
   if (!canGenerateReport.value) return '等待推演完成'
   return '生成报告'
 })
 
 const uncertaintyLabel = computed(() => {
   const value = runDetail.value.uncertainty_band || runDetail.value.uncertainty || runStatus.value.uncertainty_band
-  if (value === undefined || value === null || value === '') return 'n/a'
+  if (value === undefined || value === null || value === '') return '暂无'
   if (typeof value === 'number') return value.toFixed(2)
   return String(value)
 })
@@ -1168,35 +1248,10 @@ const environmentEffectCount = computed(() => {
   return Array.isArray(effects) ? effects.length : 0
 })
 
-const scoreKeys = computed(() => {
-  const keys = new Set([
-    'exposure_score',
-    'spread_pressure',
-    'ecosystem_integrity',
-    'livelihood_stability',
-    'public_trust',
-    'panic_level',
-    'service_capacity',
-    'response_capacity',
-    'economic_stress',
-    'vulnerability_score'
-  ])
-
-  regionRows.value.forEach(row => {
-    Object.keys(row).forEach(key => {
-      if (key.endsWith('_score') || key.endsWith('_level') || key.endsWith('_stress') || key.endsWith('_capacity') || key.endsWith('_integrity') || key.endsWith('_stability')) {
-        keys.add(key)
-      }
-    })
-  })
-
-  return Array.from(keys)
-})
-
 const regionRows = computed(() => {
   const snapshot = latestSnapshot.value || runDetail.value
   const regions = normalizeRegionRows(snapshot)
-  const key = selectedScoreKey.value
+  const key = PRIMARY_HEAT_SCORE_KEY
 
   return regions
     .map(region => ({
@@ -1207,16 +1262,27 @@ const regionRows = computed(() => {
     .sort((a, b) => b.selectedScore - a.selectedScore)
 })
 
-const subregionHeatKey = computed(() => selectedScoreKey.value)
+const configuredSubregionAgentCount = computed(() => {
+  const counts = new Map()
+  const profiles = Array.isArray(configSnapshot.value?.actor_profiles)
+    ? configSnapshot.value.actor_profiles
+    : (Array.isArray(configSnapshot.value?.agent_configs) ? configSnapshot.value.agent_configs : [])
+  profiles.forEach(profile => {
+    const key = String(profile?.home_subregion_id || '').trim()
+    if (key) counts.set(key, (counts.get(key) || 0) + 1)
+  })
+  return counts
+})
 
 const subregionRows = computed(() => {
   const source = latestSnapshot.value || runDetail.value
   const rows = normalizeSubregionRows(source)
-  const key = selectedScoreKey.value
+  const key = PRIMARY_HEAT_SCORE_KEY
 
   return rows
     .map(item => ({
       ...item,
+      agentCount: configuredSubregionAgentCount.value.get(String(item.id)) ?? item.agentCount,
       selectedScore: normalizeScore(item[key])
     }))
     .sort((a, b) => b.selectedScore - a.selectedScore)
@@ -1228,6 +1294,11 @@ const regionNameById = computed(() => {
   ;[...regionRows.value, ...subregionRows.value].forEach(r => {
     if (r?.id) m.set(String(r.id), r.name)
   })
+  ;(configSnapshot.value?.spatial_anchor_candidates || []).forEach(anchor => {
+    const label = anchor?.display_name_zh || anchor?.region_id || ''
+    if (anchor?.entity_id && label) m.set(String(anchor.entity_id), label)
+    if (anchor?.anchor_id && label) m.set(String(anchor.anchor_id), label)
+  })
   return m
 })
 function resolveRegionName(raw) {
@@ -1235,16 +1306,59 @@ function resolveRegionName(raw) {
   const key = String(raw)
   return regionNameById.value.get(key)
     || regionNameById.value.get(key.split('::')[0])
-    || translateDisplayToken(raw, raw)
+    || safeRuntimeCopy(raw, '未知区域')
 }
+
+function formatInteractionRegion(raw) {
+  const label = resolveRegionName(raw)
+  if (!label || /^(?:未命名|未知|暂无|相关)(?:代理体|对象|区域|节点)?$/.test(label)) return ''
+  return label
+}
+
+const agentActionRows = computed(() => {
+  if (selectedRoundSnapshot.value) {
+    return normalizeAgentActionRows(selectedRoundSnapshot.value).sort(sortByRoundDesc)
+  }
+  const maxRound = currentRoundNumber.value || Number.MAX_SAFE_INTEGER
+  return normalizeAgentActionRows(runDetail.value)
+    .filter(item => item.round <= maxRound)
+    .sort(sortByRoundDesc)
+})
+
+const latestAgentActionById = computed(() => {
+  const map = new Map()
+  agentActionRows.value.forEach(item => {
+    const key = String(item.agentId ?? '')
+    if (key && !map.has(key)) map.set(key, item)
+  })
+  return map
+})
+
+const configuredAgentProfileById = computed(() => {
+  const map = new Map()
+  const sources = [
+    ...(Array.isArray(configSnapshot.value?.agent_configs) ? configSnapshot.value.agent_configs : []),
+    ...(Array.isArray(configSnapshot.value?.actor_profiles) ? configSnapshot.value.actor_profiles : [])
+  ]
+  sources.forEach((profile, index) => {
+    const id = profile?.agent_id ?? profile?.user_id ?? index
+    const key = String(id)
+    map.set(key, {
+      ...(map.get(key) || {}),
+      ...(profile || {})
+    })
+  })
+  return map
+})
 
 const agentRows = computed(() => {
   const source = latestSnapshot.value || runDetail.value
-  return normalizeAgentRows(source, selectedScoreKey.value)
+  return normalizeAgentRows(source, PRIMARY_HEAT_SCORE_KEY, configuredAgentProfileById.value)
     .map(a => ({
       ...a,
       regionLabel: resolveRegionName(a.regionLabel),
-      subregionLabel: resolveRegionName(a.subregionLabel)
+      subregionLabel: resolveRegionName(a.subregionLabel),
+      latestAction: latestAgentActionById.value.get(String(a.id)) || null
     }))
     .sort((a, b) => {
       const scoreDelta = b.vulnerability_score - a.vulnerability_score
@@ -1261,6 +1375,8 @@ const selectedRoundInteractions = computed(() => {
 const agentInteractions = computed(() => {
   const resolveRegions = (list) => list.map(i => ({
     ...i,
+    sourceName: runtimeAgentNameById.value.get(String(i.sourceAgentId)) || i.sourceName,
+    targetName: runtimeAgentNameById.value.get(String(i.targetAgentId)) || i.targetName,
     sourceRegion: resolveRegionName(i.sourceRegion),
     targetRegion: resolveRegionName(i.targetRegion)
   }))
@@ -1278,6 +1394,67 @@ const agentInteractions = computed(() => {
 
 const latestInteraction = computed(() => agentInteractions.value[0] || null)
 
+const runtimeAgentNameById = computed(() => {
+  const map = new Map()
+  agentRows.value.forEach(item => map.set(String(item.id), item.name))
+  return map
+})
+
+const relationshipStateRows = computed(() => {
+  const source = latestSnapshot.value || runDetail.value
+  return normalizeRelationshipStateRows(source, runtimeAgentNameById.value)
+    .sort((a, b) => b.lastUpdatedRound - a.lastUpdatedRound || b.tension - a.tension)
+})
+
+const relationshipEventRows = computed(() => {
+  const maxRound = currentRoundNumber.value || Number.MAX_SAFE_INTEGER
+  return mergeRuntimeRows(
+    normalizeRelationshipEventRows(selectedRoundSnapshot.value || {}, runtimeAgentNameById.value),
+    normalizeRelationshipEventRows(runDetail.value, runtimeAgentNameById.value)
+  ).filter(item => item.round <= maxRound).sort(sortByRoundDesc)
+})
+
+const agentEmergenceRows = computed(() => {
+  const maxRound = currentRoundNumber.value || Number.MAX_SAFE_INTEGER
+  return mergeRuntimeRows(
+    normalizeAgentEmergenceRows(selectedRoundSnapshot.value || {}),
+    normalizeAgentEmergenceRows(runDetail.value)
+  ).filter(item => item.round <= maxRound).sort(sortByRoundDesc)
+})
+
+const combinedRuntimeEvents = computed(() => [
+  ...agentEmergenceRows.value.slice(0, 4),
+  ...relationshipEventRows.value.slice(0, 8)
+].sort(sortByRoundDesc))
+
+const policyExecutionRows = computed(() => {
+  const maxRound = currentRoundNumber.value || Number.MAX_SAFE_INTEGER
+  return mergeRuntimeRows(
+    normalizePolicyExecutionRows(selectedRoundSnapshot.value || {}, runtimeAgentNameById.value),
+    normalizePolicyExecutionRows(runDetail.value, runtimeAgentNameById.value)
+  ).filter(item => item.round <= maxRound).sort(sortByRoundDesc)
+})
+
+const policyExecutionSummary = computed(() => {
+  const executed = policyExecutionRows.value.filter(item => item.status === 'executed').length
+  const blocked = policyExecutionRows.value.filter(item => item.status === 'blocked').length
+  if (policyExecutionRows.value.length === 0) return '当前轮次无到期措施'
+  return `${executed} 项已执行 · ${blocked} 项受阻`
+})
+
+const relationshipDynamics = computed(() => {
+  const rows = relationshipStateRows.value
+  const average = key => rows.length > 0
+    ? rows.reduce((sum, item) => sum + Number(item[key] || 0), 0) / rows.length
+    : 0
+  return {
+    activeCount: rows.filter(item => item.status === 'active').length,
+    trustLabel: formatPercent(average('trust')),
+    coordinationLabel: formatPercent(average('coordination')),
+    tensionLabel: formatPercent(average('tension'))
+  }
+})
+
 const dominantInteractionLabel = computed(() => {
   if (agentInteractions.value.length === 0) return '暂无交互'
 
@@ -1288,7 +1465,7 @@ const dominantInteractionLabel = computed(() => {
   })
 
   const [channel, count] = Array.from(counts.entries()).sort((a, b) => b[1] - a[1])[0] || []
-  return channel ? `${translateDisplayToken(channel, channel)} · ${count}` : '暂无交互'
+  return channel ? `${safeRuntimeCopy(channel, '交互')} · ${count}` : '暂无交互'
 })
 
 const activeVariableRows = computed(() => {
@@ -1326,27 +1503,125 @@ const spreadEvents = computed(() => {
 
 const feedbackLoops = computed(() => {
   const loops = runDetail.value.feedback_loops || runDetail.value.loop_summary || runDetail.value.feedback_chain || []
-  if (Array.isArray(loops)) return loops.map(String)
+  if (Array.isArray(loops)) return loops.map(localizeFeedbackLoop).filter(Boolean)
   if (typeof loops === 'string') {
-    return loops.split('|').map(item => item.trim()).filter(Boolean)
+    return loops.split('|').map(item => item.trim()).filter(Boolean).map(localizeFeedbackLoop)
   }
   return []
 })
+
+function localizeFeedbackLoop(value, index = 0) {
+  const text = String(value || '').trim()
+  if (!text) return ''
+  const translated = translateDisplayToken(text, text)
+  if (/[一-鿿]/.test(translated)) return translated
+
+  const normalized = text.toLowerCase()
+  if (normalized.includes('restricted access') && normalized.includes('economic')) {
+    return '限制进入抑制经济活动，但提升公共信任，形成负反馈。'
+  }
+  if (normalized.includes('spillover') && normalized.includes('restriction')) {
+    return '相邻区域的限制措施产生中等强度外溢。'
+  }
+  if (normalized.includes('economic loop') && normalized.includes('restriction')) {
+    return '限制措施在相邻区域形成相似的经济负反馈。'
+  }
+  if (normalized.includes('positive feedback')) return '系统记录到持续增强的正反馈链。'
+  if (normalized.includes('negative feedback')) return '系统记录到抑制扩散的负反馈链。'
+  return `反馈链 ${index + 1}：系统记录到跨区域状态回传。`
+}
+
+function arrayValue(value) {
+  return Array.isArray(value) ? value : []
+}
+
+function normalizeRuntimeRiskObject(raw = {}, index = 0) {
+  const confidence = Number(raw.confidence_score ?? raw.confidence ?? 0)
+  const evidenceStrength = Number(raw.evidence_strength_score)
+  const statement = raw.risk_statement && typeof raw.risk_statement === 'object' ? raw.risk_statement : {}
+  const riskId = String(raw.risk_object_id || raw.risk_id || raw.id || `risk_runtime_${index + 1}`)
+  return {
+    ...raw,
+    risk_object_id: riskId,
+    risk_id: String(raw.risk_id || riskId),
+    risk_contract_version: Number(raw.risk_contract_version) || 1,
+    title: safeRuntimeCopy(raw.title || raw.name, `风险对象 ${index + 1}`),
+    summary: safeRuntimeCopy(raw.summary || raw.description, '等待风险对象摘要。'),
+    why_now: safeRuntimeCopy(raw.why_now || raw.summary, '当前轮次持续观察该风险对象。'),
+    primary_family: String(raw.primary_family || raw.risk_type || raw.category || 'other_emergent'),
+    primary_family_label: safeRuntimeCopy(raw.primary_family_label, ''),
+    tags: uniqueList(arrayValue(raw.tags)).slice(0, 8),
+    evidence_strength_score: Number.isFinite(evidenceStrength)
+      ? evidenceStrength
+      : Math.max(0, Math.min(100, confidence <= 1 ? confidence * 100 : confidence)),
+    impact_score: Number(raw.impact_score ?? raw.severity_score ?? 0),
+    priority_score: Number(raw.priority_score ?? raw.priority_seed ?? 0),
+    risk_statement: {
+      ...statement,
+      trigger_name: safeRuntimeCopy(statement.trigger_name || arrayValue(raw.root_pressures)[0], '场景触发因素'),
+      source_node_ids: uniqueList(arrayValue(statement.source_node_ids)),
+      receptor_node_ids: uniqueList(arrayValue(statement.receptor_node_ids)),
+      receptor_name: safeRuntimeCopy(statement.receptor_name || arrayValue(raw.chain_steps).at(-1), '主要受影响对象'),
+      consequence: safeRuntimeCopy(statement.consequence || raw.consequence || raw.summary, '等待具体后果说明。'),
+      region_refs: arrayValue(statement.region_refs),
+      entity_refs: arrayValue(statement.entity_refs),
+      actor_refs: arrayValue(statement.actor_refs)
+    },
+    mechanism_node_ids: uniqueList(arrayValue(raw.mechanism_node_ids)),
+    mechanism_edge_ids: uniqueList(arrayValue(raw.mechanism_edge_ids || raw.edge_ids)),
+    edge_ids: uniqueList([...arrayValue(raw.edge_ids), ...arrayValue(raw.mechanism_edge_ids)]),
+    monitoring_metrics: arrayValue(raw.monitoring_metrics).filter(item => item && typeof item === 'object'),
+    quality_flags: uniqueList(arrayValue(raw.quality_flags)),
+    evidence: arrayValue(raw.evidence).filter(item => item && typeof item === 'object'),
+    region_scope: uniqueList(arrayValue(raw.region_scope)),
+    primary_regions: uniqueList(arrayValue(raw.primary_regions)),
+    source_entity_uuids: uniqueList(arrayValue(raw.source_entity_uuids)),
+    source_actor_ids: uniqueList(arrayValue(raw.source_actor_ids)),
+    source_actor_names: uniqueList(arrayValue(raw.source_actor_names)),
+    root_pressures: uniqueList(arrayValue(raw.root_pressures).map(value => safeRuntimeCopy(value, '')).filter(Boolean)),
+    chain_steps: uniqueList(arrayValue(raw.chain_steps).map(value => safeRuntimeCopy(value, '')).filter(Boolean)),
+    affected_clusters: arrayValue(raw.affected_clusters),
+    scenario_branches: arrayValue(raw.scenario_branches || raw.branch_templates),
+    created_round: Number(raw.created_round) || 0,
+    lifecycle_status: String(raw.lifecycle_status || raw.runtime_status || raw.status || 'watch')
+  }
+}
 
 const riskObjects = computed(() => {
   const candidates = [
     runDetail.value?.risk_objects,
     simulationSnapshot.value?.risk_objects,
-    configSnapshot.value?.risk_objects
+    configSnapshot.value?.risk_objects,
+    runDetail.value?.risk_definitions,
+    simulationSnapshot.value?.risk_definitions,
+    configSnapshot.value?.risk_definitions
   ]
 
   for (const items of candidates) {
     if (Array.isArray(items) && items.length > 0) {
       return items
+        .map(normalizeRuntimeRiskObject)
+        .sort((a, b) => {
+          const archivedA = ['dormant', 'resolved'].includes(a.lifecycle_status) ? 1 : 0
+          const archivedB = ['dormant', 'resolved'].includes(b.lifecycle_status) ? 1 : 0
+          if (archivedA !== archivedB) return archivedA - archivedB
+          return Number(b.priority_score || b.runtime_tension || 0) - Number(a.priority_score || a.runtime_tension || 0)
+        })
     }
   }
 
   return []
+})
+
+const activeRiskObjectCount = computed(() => riskObjects.value.filter(item => !['dormant', 'resolved'].includes(item.lifecycle_status)).length)
+const riskContractVersion = computed(() => {
+  const version = Number(
+    riskObjects.value[0]?.risk_contract_version ||
+    runDetail.value?.risk_contract_version ||
+    simulationSnapshot.value?.risk_contract_version ||
+    configSnapshot.value?.risk_contract_version
+  )
+  return Number.isFinite(version) && version > 0 ? version : 1
 })
 
 const primaryRiskObjectId = computed(() => {
@@ -1364,6 +1639,59 @@ const primaryRiskObjectId = computed(() => {
 const selectedRiskObject = computed(() => {
   if (riskObjects.value.length === 0) return null
   return riskObjects.value.find(item => item.risk_object_id === selectedRiskObjectId.value) || riskObjects.value[0]
+})
+
+const selectedRiskStatement = computed(() => selectedRiskObject.value?.risk_statement || {})
+const selectedRiskMechanismSteps = computed(() => {
+  const steps = uniqueList(selectedRiskObject.value?.chain_steps || [])
+  return steps.length > 2 ? steps.slice(1, -1) : []
+})
+const selectedRiskEvidence = computed(() => (selectedRiskObject.value?.evidence || []).map((item, index) => ({
+  ...item,
+  title: safeRuntimeCopy(item.title || item.name, `机制依据 ${index + 1}`),
+  summary: safeRuntimeCopy(item.summary || item.description, ''),
+  epistemic_status_label: safeRuntimeCopy(item.epistemic_status_label, '')
+})))
+const selectedRiskMetrics = computed(() => (selectedRiskObject.value?.monitoring_metrics || []).map((item, index) => ({
+  ...item,
+  label: safeRuntimeCopy(item.label || item.name || item.key, `监测指标 ${index + 1}`)
+})))
+
+function scopeBasisLabel(value) {
+  return value ? safeRuntimeCopy(translateDisplayToken(value, ''), '') : ''
+}
+
+function riskFamilyLabel(item) {
+  return safeRuntimeCopy(
+    item?.primary_family_label || translateDisplayToken(item?.primary_family || item?.risk_type || 'other_emergent', ''),
+    '其他涌现风险'
+  )
+}
+
+function riskEvidenceScore(item) {
+  const value = Number(item?.evidence_strength_score)
+  if (Number.isFinite(value)) return Math.round(Math.max(0, Math.min(100, value)))
+  const confidence = Number(item?.confidence_score)
+  if (!Number.isFinite(confidence)) return 0
+  return Math.round(Math.max(0, Math.min(100, confidence <= 1 ? confidence * 100 : confidence)))
+}
+
+const selectedRiskEvents = computed(() => {
+  if (!selectedRiskObject.value) return []
+  const riskId = selectedRiskObject.value.risk_object_id
+  const sources = [
+    runDetail.value?.risk_events,
+    simulationSnapshot.value?.risk_events,
+    configSnapshot.value?.risk_events
+  ]
+  const events = sources.find(items => Array.isArray(items) && items.length > 0) || []
+  return events
+    .filter(item => item && typeof item === 'object' && String(item.risk_id || item.risk_object_id || item.to_risk_id || '') === riskId)
+    .map(item => ({
+      ...item,
+      summary: safeRuntimeCopy(item.summary || item.description, '风险状态发生变化。')
+    }))
+    .sort((a, b) => Number(b.round || 0) - Number(a.round || 0))
 })
 
 const graphNodes = computed(() => collectGraphNodes(props.graphData))
@@ -1407,8 +1735,19 @@ const playbackNodeMap = computed(() => {
 
 const playbackPulseStats = computed(() => {
   const frame = selectedAnimationFrame.value || {}
+  const events = Array.isArray(frame.propagation_events) ? frame.propagation_events : []
   const edgeStates = Array.isArray(frame.edge_states) ? frame.edge_states : []
   const nodeIds = Array.isArray(frame.focus_ids?.node_ids) ? frame.focus_ids.node_ids : []
+  if (events.length) {
+    const elapsed = Number(frame.playback_elapsed_ms || 0)
+    const activeIds = new Set(Array.isArray(frame.active_propagation_event_ids) ? frame.active_propagation_event_ids : [])
+    const connectionEvents = events.filter(item => item?.edge_id || (item?.source_node_id && item?.target_node_id))
+    return {
+      newEdges: connectionEvents.filter(item => elapsed >= Number(item?.timing?.start_ms || 0)).length,
+      activeEdges: connectionEvents.filter(item => activeIds.has(String(item?.event_id || ''))).length,
+      focusNodes: nodeIds.length
+    }
+  }
   return {
     newEdges: edgeStates.filter(item => String(item?.status || '') === 'new').length,
     activeEdges: edgeStates.filter(item => String(item?.status || '') === 'active').length,
@@ -1418,6 +1757,42 @@ const playbackPulseStats = computed(() => {
 
 const playbackPulseRelations = computed(() => {
   const frame = selectedAnimationFrame.value || {}
+  const timelineEvents = Array.isArray(frame.propagation_events) ? frame.propagation_events : []
+  if (timelineEvents.length) {
+    const elapsed = Number(frame.playback_elapsed_ms || 0)
+    const activeIds = new Set(Array.isArray(frame.active_propagation_event_ids) ? frame.active_propagation_event_ids : [])
+    return timelineEvents
+      .filter(item => (item?.edge_id || (item?.source_node_id && item?.target_node_id)) && elapsed >= Number(item?.timing?.start_ms || 0))
+      .sort((a, b) => {
+        const activeDelta = Number(activeIds.has(String(b?.event_id || ''))) - Number(activeIds.has(String(a?.event_id || '')))
+        if (activeDelta !== 0) return activeDelta
+        return Number(b?.timing?.start_ms || 0) - Number(a?.timing?.start_ms || 0)
+      })
+      .slice(0, 6)
+      .map((event, index) => {
+        const edgeId = String(event?.edge_id || '')
+        const edge = graphEdgeMap.value.get(edgeId) || {}
+        const sourceId = String(event?.source_node_id || edge.source_node_uuid || edge.source || '')
+        const targetId = String(event?.target_node_id || edge.target_node_uuid || edge.target || '')
+        const sourceNode = playbackNodeMap.value.get(sourceId)
+        const targetNode = playbackNodeMap.value.get(targetId)
+        const active = activeIds.has(String(event?.event_id || ''))
+        return {
+          id: String(event?.event_id || `${edgeId || 'event'}-${index}`),
+          status: active ? 'active' : 'new',
+          statusLabel: active ? '正在延展' : '已经传导',
+          sourceName: safeRuntimeCopy(sourceNode?.name || event?.source_name || edge.source_name, '来源节点'),
+          targetName: safeRuntimeCopy(targetNode?.name || event?.target_name || edge.target_name, '目标节点'),
+          typeLabel: safeRuntimeCopy(
+            event?.display_label
+              || event?.label_zh
+              || event?.summary
+              || translateDisplayToken(event?.kind || edge.fact_type || edge.name || 'related_to', ''),
+            '关系响应'
+          )
+        }
+      })
+  }
   const edgeStates = Array.isArray(frame.edge_states) ? frame.edge_states : []
   const focusEdgeIds = new Set((frame.focus_ids?.edge_ids || []).map(item => String(item || '')).filter(Boolean))
   return edgeStates
@@ -1439,9 +1814,9 @@ const playbackPulseRelations = computed(() => {
         id: `${state.id || index}-${status}`,
         status,
         statusLabel: status === 'new' ? '新增' : status === 'active' ? '活跃' : '相关',
-        sourceName: sourceNode?.name || edge.source_name || sourceId || '来源节点',
-        targetName: targetNode?.name || edge.target_name || targetId || '目标节点',
-        typeLabel: translateDisplayToken(edge.fact_type || edge.name || 'related_to', edge.fact_type || edge.name || '关系')
+        sourceName: safeRuntimeCopy(sourceNode?.name || edge.source_name, '来源节点'),
+        targetName: safeRuntimeCopy(targetNode?.name || edge.target_name, '目标节点'),
+        typeLabel: safeRuntimeCopy(translateDisplayToken(edge.fact_type || edge.name || 'related_to', ''), '关系')
       }
     })
 })
@@ -1449,7 +1824,7 @@ const playbackPulseRelations = computed(() => {
 const graphNodesByName = computed(() => {
   const map = new Map()
   graphNodes.value.forEach(node => {
-    const name = String(node?.name || '').trim().toLowerCase()
+    const name = String(node?.name || node?.label || '').trim().toLowerCase()
     if (!name) return
     if (!map.has(name)) {
       map.set(name, [])
@@ -1459,46 +1834,156 @@ const graphNodesByName = computed(() => {
   return map
 })
 
+const graphNodeByToken = computed(() => {
+  const map = new Map()
+  const add = (token, node) => {
+    const key = String(token || '').trim().toLowerCase()
+    if (key && !map.has(key)) map.set(key, node)
+  }
+  graphNodes.value.forEach(node => {
+    add(node?.uuid, node)
+    add(node?.id, node)
+    add(node?.key, node)
+    add(node?.name, node)
+    add(node?.label, node)
+    add(node?.username, node)
+    add(node?.attributes?.agent_id, node)
+    add(node?.attributes?.region_id, node)
+    add(node?.attributes?.mechanism_node_id, node)
+    add(node?.agent_id, node)
+    add(node?.source_entity_uuid, node)
+    add(node?.attributes?.source_entity_uuid, node)
+  })
+  return map
+})
+
+function resolveGraphNodeByToken(token) {
+  return graphNodeByToken.value.get(String(token || '').trim().toLowerCase()) || null
+}
+
+function isInternalDisplayToken(value) {
+  const text = String(value || '').trim().toLowerCase()
+  return ['blue', 'brown', 'orange', 'green', 'purple', 'cyan', 'red', 'yellow', 'gray', 'grey'].includes(text)
+}
+
 const riskObjectEntityNodes = computed(() => {
   if (!selectedRiskObject.value) return []
-
-  const evidenceByUuid = new Map()
-  ;(selectedRiskObject.value.evidence || []).forEach(item => {
-    ;(item.entity_refs || []).forEach(uuid => {
-      if (uuid && !evidenceByUuid.has(uuid)) {
-        evidenceByUuid.set(uuid, item)
-      }
-    })
-  })
-
-  return uniqueList(selectedRiskObject.value.source_entity_uuids || []).map((uuid, index) => {
-    const node = graphNodeMap.value.get(uuid)
-    const evidence = evidenceByUuid.get(uuid)
+  const statement = selectedRiskObject.value.risk_statement || {}
+  const entityTokens = uniqueList([
+    ...(selectedRiskObject.value.mechanism_node_ids || []),
+    ...(statement.source_node_ids || []),
+    ...(statement.receptor_node_ids || []),
+    ...(selectedRiskObject.value.source_entity_uuids || []),
+    ...(selectedRiskObject.value.source_actor_ids || []),
+    ...(selectedRiskObject.value.source_actor_names || [])
+  ])
+  const seen = new Set()
+  return entityTokens.flatMap((token) => {
+    const node = resolveGraphNodeByToken(token)
+    if (!node) return []
+    const id = String(node.uuid || node.id || node.name || token)
+    if (seen.has(id)) return []
+    seen.add(id)
     return {
-      id: node?.uuid || `risk-entity-${index}`,
-      uuid,
-      name: node?.name || evidence?.title || `entity_${index + 1}`,
+      id,
+      uuid: node.uuid || node.id || node.name,
+      name: safeRuntimeCopy(node.name || node.label, '关联主体'),
       labels: normalizeLabels(node?.labels),
-      summary: node?.summary || evidence?.summary || '',
-      matched: Boolean(node)
+      summary: safeRuntimeCopy(node?.summary, ''),
+      matched: true
     }
+  })
+})
+
+const riskAffectedSubjectNodes = computed(() => {
+  if (!selectedRiskObject.value) return []
+  const statement = selectedRiskObject.value.risk_statement || {}
+  const refs = [
+    ...(statement.entity_refs || []).map(item => ({
+      id: item?.entity_uuid || item?.id,
+      name: item?.entity_name || item?.name,
+      entityType: item?.entity_type || item?.entityType || item?.node_family || item?.type,
+      summary: item?.entity_summary || item?.entitySummary || item?.summary,
+      labels: item?.labels,
+      scopeBasis: item?.scope_basis || item?.scopeBasis,
+      epistemicStatus: item?.epistemic_status || item?.epistemicStatus,
+      referenceKind: 'entity'
+    })),
+    ...(statement.actor_refs || []).map(item => ({
+      id: item?.actor_id || item?.agent_id,
+      name: item?.actor_name || item?.agent_name || item?.name,
+      entityType: item?.actor_type || item?.agent_type || item?.node_family,
+      summary: [item?.matched_role_demand_label, item?.profession].filter(Boolean).join(' · '),
+      labels: item?.labels,
+      scopeBasis: item?.scope_basis || item?.scopeBasis,
+      epistemicStatus: item?.epistemic_status || item?.epistemicStatus,
+      referenceKind: 'actor'
+    })),
+    ...(statement.receptor_node_ids || []).map(item => ({
+      id: item,
+      name: statement.receptor_name,
+      referenceKind: 'mechanism_receptor',
+      labels: ['机制节点', '受体']
+    }))
+  ]
+  const seen = new Set()
+  return refs.flatMap((ref, index) => {
+    const node = resolveGraphNodeByToken(ref.id) || resolveGraphNodeByToken(ref.name)
+    const id = String(node?.uuid || node?.id || ref.id || ref.name || `risk-subject-${index}`)
+    if (!id || seen.has(id)) return []
+    seen.add(id)
+    const name = safeRuntimeCopy(node?.name || node?.label || ref.name, '关联主体')
+    if (!name || isInternalDisplayToken(name)) return []
+    const referenceLabels = normalizeLabels([ref.entityType, ...arrayValue(ref.labels)])
+    return [{
+      id,
+      uuid: node?.uuid || node?.id || ref.id || '',
+      name,
+      labels: referenceLabels.length > 0 ? referenceLabels : normalizeLabels(node?.labels),
+      summary: safeRuntimeCopy(ref.summary || node?.summary, ''),
+      scopeBasisLabel: scopeBasisLabel(ref.scopeBasis),
+      epistemicStatus: ref.epistemicStatus || '',
+      stateLabel: ref.referenceKind === 'mechanism_receptor'
+        ? '受影响对象'
+        : ref.referenceKind === 'actor'
+          ? (node ? '场景代理体' : '已引用代理体')
+          : (node ? '真实实体' : '已校验实体'),
+      matched: Boolean(node)
+    }]
   })
 })
 
 const riskObjectRegionNodes = computed(() => {
   if (!selectedRiskObject.value) return []
+  const seen = new Set()
 
-  return uniqueList([
+  const statementRegions = (selectedRiskObject.value.risk_statement?.region_refs || []).map(item => ({
+    id: item?.region_id || item?.id || item?.region_name || item?.name,
+    name: item?.region_name || item?.name || item?.region_id || item?.id,
+    scopeBasis: item?.scope_basis || item?.scopeBasis,
+    epistemicStatus: item?.epistemic_status || item?.epistemicStatus
+  }))
+  const legacyRegions = uniqueList([
     ...(selectedRiskObject.value.primary_regions || []),
     ...(selectedRiskObject.value.region_scope || [])
-  ]).map((name, index) => {
+  ]).map(name => ({ id: name, name }))
+  const refs = statementRegions.length > 0 ? statementRegions : legacyRegions
+
+  return refs.flatMap((ref, index) => {
+    const name = safeRuntimeCopy(ref.name, `作用区域 ${index + 1}`)
+    if (!name || isInternalDisplayToken(name)) return []
     const matched = graphNodesByName.value.get(String(name).toLowerCase()) || []
-    const node = matched[0]
+    const node = resolveGraphNodeByToken(ref.id) || resolveGraphNodeByToken(name) || matched[0]
+    const dedupeKey = String(node?.uuid || node?.id || name).trim().toLowerCase()
+    if (!dedupeKey || seen.has(dedupeKey)) return []
+    seen.add(dedupeKey)
     return {
       id: node?.uuid || `risk-region-${index}`,
       name,
       labels: normalizeLabels(node?.labels),
-      summary: node?.summary || '',
+      summary: safeRuntimeCopy(node?.summary, ''),
+      scopeBasisLabel: scopeBasisLabel(ref.scopeBasis),
+      epistemicStatus: ref.epistemicStatus || '',
       matched: Boolean(node)
     }
   })
@@ -1515,42 +2000,133 @@ const riskObjectHighlightPayload = computed(() => {
       label: '',
       riskObjectId: '',
       nodeIds: [],
-      nodeNames: []
+      nodeNames: [],
+      edgeIds: [],
+      mode: ''
     }
   }
 
   return {
     label: selectedRiskObject.value.title || '',
     riskObjectId: selectedRiskObject.value.risk_object_id || '',
-    nodeIds: uniqueList(riskObjectEntityNodes.value.map(item => item.uuid)),
+    nodeIds: uniqueList([
+      ...riskObjectEntityNodes.value.map(item => item.uuid),
+      ...riskAffectedSubjectNodes.value.map(item => item.uuid)
+    ]),
     nodeNames: uniqueList([
       ...riskObjectEntityNodes.value.map(item => item.name),
+      ...riskAffectedSubjectNodes.value.map(item => item.name),
       ...riskObjectRegionNodes.value.map(item => item.name)
-    ])
+    ]),
+    edgeIds: uniqueList(selectedRiskObject.value.edge_ids || []),
+    mode: selectedRiskObject.value.generation_mode || selectedRiskObject.value.mode || 'risk_definition'
   }
 })
 
 const workspaceTabs = computed(() => {
   return [
     {
-      value: 'overview',
+      value: 'pulse',
+      panelId: 'workspace-panel-pulse',
       index: '01',
-      label: '运行总览',
-      meta: `${selectedRoundLabel.value} · ${progressPercent.value}%`,
-      note: '播放控制、区域脉冲、多智能体互动'
+      label: '运行脉冲',
+      meta: `${playbackPulseStats.value.newEdges} 条新增`
+    },
+    {
+      value: 'state',
+      panelId: 'workspace-panel-state',
+      index: '02',
+      label: '状态与行动',
+      meta: `${regionRows.value.length} 个区域`
+    },
+    {
+      value: 'spread',
+      panelId: 'workspace-panel-spread',
+      index: '03',
+      label: '扩散与反馈',
+      meta: `${spreadEvents.value.length} 个事件`
+    },
+    {
+      value: 'agents',
+      panelId: 'workspace-panel-agents',
+      index: '04',
+      label: '代理工作台',
+      meta: `${agentRows.value.length} 个代理体`
     },
     {
       value: 'risk',
-      index: '02',
+      panelId: 'workspace-panel-risk',
+      index: '05',
       label: '关系与风险',
-      meta: riskObjects.value.length > 0 ? `${riskObjects.value.length} 个风险对象` : '等待生成',
-      note: '风险对象、关联实体、作用区域'
+      meta: `${relationshipStateRows.value.length} 条关系 · ${riskObjects.value.length} 个风险对象`
     }
   ]
 })
 
+const activeWorkspaceTabLabel = computed(() => {
+  return workspaceTabs.value.find(item => item.value === activeWorkspaceTab.value)?.label || '推演观察视图'
+})
+
+function syncRiskSelectorScrollState() {
+  const track = riskSelectorRef.value
+  if (!track) {
+    riskSelectorOverflow.value = false
+    canScrollRiskSelectorPrev.value = false
+    canScrollRiskSelectorNext.value = false
+    return
+  }
+  const maxScrollLeft = Math.max(0, track.scrollWidth - track.clientWidth)
+  const availableWidth = track.closest('.risk-selector-shell')?.clientWidth || track.clientWidth
+  riskSelectorOverflow.value = track.scrollWidth > availableWidth + 2
+  canScrollRiskSelectorPrev.value = riskSelectorOverflow.value && track.scrollLeft > 2
+  canScrollRiskSelectorNext.value = riskSelectorOverflow.value && track.scrollLeft < maxScrollLeft - 2
+}
+
+function scrollRiskSelector(direction) {
+  const track = riskSelectorRef.value
+  if (!track) return
+  track.scrollBy({
+    left: direction * Math.max(190, track.clientWidth * 0.82),
+    behavior: 'smooth'
+  })
+}
+
+async function revealSelectedRiskObject() {
+  await nextTick()
+  const track = riskSelectorRef.value
+  const activeItem = track?.querySelector('.risk-selector-option.active')
+  activeItem?.scrollIntoView({ behavior: 'smooth', block: 'nearest', inline: 'nearest' })
+  syncRiskSelectorScrollState()
+}
+
+function selectRiskObject(riskObjectId) {
+  selectedRiskObjectId.value = riskObjectId
+  activeRiskDetailTab.value = 'chain'
+  revealSelectedRiskObject()
+}
+
+function handleWorkspaceScroll(event) {
+  workspaceScrollByTab.value[activeWorkspaceTab.value] = event.currentTarget?.scrollTop || 0
+}
+
+async function selectWorkspaceTab(tab) {
+  if (!workspaceTabs.value.some(item => item.value === tab) || tab === activeWorkspaceTab.value) return
+  const shell = workspaceShellRef.value
+  if (shell) workspaceScrollByTab.value[activeWorkspaceTab.value] = shell.scrollTop
+  activeWorkspaceTab.value = tab
+  await nextTick()
+  if (workspaceShellRef.value) {
+    workspaceShellRef.value.scrollTop = workspaceScrollByTab.value[tab] || 0
+  }
+}
+
 function addLog(msg) {
   emit('add-log', msg)
+}
+
+function createInjectionRequestKey() {
+  if (globalThis.crypto?.randomUUID) return `inject_${globalThis.crypto.randomUUID()}`
+  return `inject_${Date.now()}_${Math.random().toString(36).slice(2)}`
 }
 
 function createInjection() {
@@ -1575,29 +2151,14 @@ function normalizeScore(value) {
 
 function formatPercent(value) {
   const number = Number(value)
-  if (Number.isNaN(number)) return 'n/a'
+  if (Number.isNaN(number)) return '暂无'
   if (number <= 1) return `${Math.round(number * 100)}%`
   return `${Math.round(Math.max(0, Math.min(100, number)))}%`
 }
 
-function formatTokenLabel(value, fallback = 'Unknown') {
-  return formatTokenLabelZh(value, fallback)
-}
-
-function formatScoreKeyLabel(value) {
-  const map = {
-    exposure_score: '暴露',
-    spread_pressure: '扩散压力',
-    ecosystem_integrity: '生态完整性',
-    livelihood_stability: '生计稳定性',
-    public_trust: '公众信任',
-    panic_level: '恐慌水平',
-    service_capacity: '服务容量',
-    response_capacity: '响应能力',
-    economic_stress: '经济压力',
-    vulnerability_score: '脆弱性'
-  }
-  return map[value] || formatTokenLabel(value, 'Metric')
+function formatTokenLabel(value, fallback = '未分类') {
+  const translated = formatTokenLabelZh(value, fallback)
+  return safeRuntimeCopy(translated, fallback)
 }
 
 function formatStatusLabel(value) {
@@ -1620,7 +2181,13 @@ function formatVariableTypeLabel(value) {
 
 function formatInlineList(items, fallback = '—') {
   const values = uniqueList(Array.isArray(items) ? items : [])
-  return values.length > 0 ? values.join(' · ') : fallback
+  return values.length > 0
+    ? values.map(item => safeRuntimeCopy(item, '')).filter(Boolean).join(' · ') || fallback
+    : fallback
+}
+
+function safeRuntimeCopy(value, fallback = '') {
+  return safeDisplayText(value, fallback)
 }
 
 function uniqueList(items) {
@@ -1634,20 +2201,26 @@ function uniqueList(items) {
 }
 
 function normalizeLabels(labels) {
-  return uniqueList(Array.isArray(labels) ? labels : []).slice(0, 3)
+  return normalizeDisplayLabels(
+    uniqueList(Array.isArray(labels) ? labels : []).filter(label => !isInternalDisplayToken(label)),
+    3
+  )
 }
 
 const RUNTIME_STATUS_META = {
+  watch: { label: '观察', cls: 'steady' },
   rising: { label: '上升', cls: 'rising' },
   falling: { label: '回落', cls: 'falling' },
   critical: { label: '临界', cls: 'critical' },
   elevated: { label: '偏高', cls: 'elevated' },
+  resolved: { label: '已解除', cls: 'resolved' },
+  dormant: { label: '休眠', cls: 'dormant' },
   steady: { label: '平稳', cls: 'steady' }
 }
 
 function runtimeStatusMeta(value) {
   const key = String(value || '').trim().toLowerCase()
-  return RUNTIME_STATUS_META[key] || { label: translateDisplayToken(value, '平稳'), cls: 'steady' }
+  return RUNTIME_STATUS_META[key] || { label: safeRuntimeCopy(translateDisplayToken(value, ''), '平稳'), cls: 'steady' }
 }
 
 const PROVENANCE_META = {
@@ -1710,10 +2283,11 @@ function formatUncertaintyBand(band) {
   const lower = normalizeTension(band.lower)
   const upper = normalizeTension(band.upper)
   const range = (lower !== null && upper !== null) ? `${lower} – ${upper}` : null
+  const label = safeRuntimeCopy(band.label, '')
   return {
     center,
     range,
-    label: String(band.label || '推断区间(非测量)'),
+    label: label && label !== '模型' ? label : '推断区间（非测量值）',
     derived: band.derived !== false
   }
 }
@@ -1732,10 +2306,6 @@ function snapshotKey(snapshot, idx) {
   return snapshot?.id || `${extractRoundNumber(snapshot, idx)}-${idx}`
 }
 
-function frameKey(frame, idx) {
-  return frame?.id || `${frame?.round ?? idx}-${frame?.timestamp || idx}`
-}
-
 function normalizeRegionRows(source) {
   const raw =
     source?.region_states ||
@@ -1750,14 +2320,14 @@ function normalizeRegionRows(source) {
   if (Array.isArray(raw)) {
     raw.forEach((item, idx) => {
       if (typeof item === 'string') {
-        rows.push({ id: `${idx}`, name: item })
+        rows.push({ id: `${idx}`, name: safeRuntimeCopy(item, `区域 ${idx + 1}`) })
         return
       }
       const name = item.region || item.region_name || item.name || item.label || item.id || `region_${idx}`
       rows.push({
         id: item.region_id || item.id || `${name}-${idx}`,
-        name,
-        tagline: item.region_type || item.category || item.type || '',
+        name: safeRuntimeCopy(name, `区域 ${idx + 1}`),
+        tagline: safeRuntimeCopy(item.region_type || item.category || item.type || '', '区域'),
         exposure_score: normalizeScore(item.exposure_score ?? item.exposure ?? 0),
         spread_pressure: normalizeScore(item.spread_pressure ?? item.spread ?? 0),
         ecosystem_integrity: normalizeScore(item.ecosystem_integrity ?? item.ecosystem ?? 100),
@@ -1778,8 +2348,8 @@ function normalizeRegionRows(source) {
       if (value && typeof value === 'object') {
         rows.push({
           id: key,
-          name: value.region || value.name || key,
-          tagline: value.region_type || value.category || '',
+          name: safeRuntimeCopy(value.region || value.name || key, `区域 ${idx + 1}`),
+          tagline: safeRuntimeCopy(value.region_type || value.category || '', '区域'),
           exposure_score: normalizeScore(value.exposure_score ?? value.exposure ?? 0),
           spread_pressure: normalizeScore(value.spread_pressure ?? value.spread ?? 0),
           ecosystem_integrity: normalizeScore(value.ecosystem_integrity ?? value.ecosystem ?? 100),
@@ -1792,7 +2362,7 @@ function normalizeRegionRows(source) {
           vulnerability_score: normalizeScore(value.vulnerability_score ?? value.vulnerability ?? 0)
         })
       } else {
-        rows.push({ id: `${key}-${idx}`, name: key, selectedScore: normalizeScore(value) })
+        rows.push({ id: `${key}-${idx}`, name: safeRuntimeCopy(key, `区域 ${idx + 1}`), selectedScore: normalizeScore(value) })
       }
     })
   }
@@ -1837,7 +2407,7 @@ function normalizeSubregionRows(source) {
     if (!item || typeof item !== 'object') {
       return {
         id: `subregion-${idx}`,
-        name: String(item || `subregion_${idx}`),
+        name: safeRuntimeCopy(item, `子区域 ${idx + 1}`),
         tagline: '',
         parent_region_id: '',
         parentName: '',
@@ -1860,15 +2430,18 @@ function normalizeSubregionRows(source) {
     const parentId = String(item.parent_region_id || item.parent_id || item.parent_region || '')
     return {
       id: item.region_id || item.id || item.uuid || `${name}-${idx}`,
-      name,
-      tagline: item.land_use_class || item.region_type || item.distance_band || item.zone || '',
+      name: safeRuntimeCopy(name, `子区域 ${idx + 1}`),
+      tagline: safeRuntimeCopy(item.land_use_class || item.region_type || item.distance_band || item.zone || '', '细分区域'),
       parent_region_id: parentId,
       parentName:
-        item.parent_name ||
-        item.parent_region_name ||
-        parentNameLookup.get(parentId) ||
-        parentId ||
-        '',
+        safeRuntimeCopy(
+          item.parent_name ||
+          item.parent_region_name ||
+          parentNameLookup.get(parentId) ||
+          parentId ||
+          '',
+          '宏观区域'
+        ),
       landUseLabel: formatLandUseLabel(item.land_use_class || item.region_type || item.zone || ''),
       distanceLabel: formatDistanceLabel(item.distance_band || item.distance || ''),
       distance_band: item.distance_band || item.distance || '',
@@ -1894,7 +2467,7 @@ function normalizeSubregionRows(source) {
   })
 }
 
-function normalizeAgentRows(source, scoreKey = 'vulnerability_score') {
+function normalizeAgentRows(source, scoreKey = 'vulnerability_score', configuredProfiles = new Map()) {
   const raw =
     source?.agents ||
     source?.top_agents ||
@@ -1908,23 +2481,81 @@ function normalizeAgentRows(source, scoreKey = 'vulnerability_score') {
 
   if (!Array.isArray(raw)) return []
 
-  return raw.map((item, idx) => {
-    const agentType = String(item.agent_type || item.node_family || item.family || 'human').toLowerCase()
-    const roleType = item.agent_subtype || item.role_type || item.profession || item.entity_type || ''
+  return raw.map((runtimeItem, idx) => {
+    const rawId = runtimeItem?.agent_id ?? runtimeItem?.user_id ?? idx
+    const configured = configuredProfiles.get(String(rawId)) || {}
+    const item = {
+      ...configured,
+      ...(runtimeItem || {}),
+      state_vector: {
+        ...(configured.state_vector || {}),
+        ...(runtimeItem?.state_vector || {})
+      },
+      runtime_lifecycle: {
+        ...(configured.runtime_lifecycle || {}),
+        ...(runtimeItem?.runtime_lifecycle || {})
+      },
+      capabilities: runtimeItem?.capabilities?.length ? runtimeItem.capabilities : configured.capabilities,
+      capability_keys: runtimeItem?.capability_keys?.length ? runtimeItem.capability_keys : configured.capability_keys,
+      permission_keys: runtimeItem?.permission_keys?.length ? runtimeItem.permission_keys : configured.permission_keys,
+      resource_budget: Object.keys(runtimeItem?.resource_budget || {}).length > 0
+        ? runtimeItem.resource_budget
+        : configured.resource_budget,
+      representation_level: runtimeItem?.representation_level || configured.representation_level,
+      archetype_key: runtimeItem?.archetype_key || configured.archetype_key,
+      role_type: runtimeItem?.role_type || configured.role_type,
+      agent_subtype: runtimeItem?.agent_subtype || configured.agent_subtype,
+      home_region_id: runtimeItem?.home_region_id || configured.home_region_id,
+      home_subregion_id: runtimeItem?.home_subregion_id || configured.home_subregion_id
+    }
+    const agentType = canonicalRuntimeAgentFamily(item)
+    const rawRoleType = String(item.role_type || '')
+    const roleType = item.archetype_key || item.agent_subtype || (
+      /^(?:entity|profile|actor|agent)$/i.test(rawRoleType)
+        ? item.archetype_key
+        : rawRoleType
+    ) || item.archetype_key || item.profession || item.entity_type || ''
     const state = item.state_vector || {}
     const selectedScore = normalizeScore(
       state[scoreKey] ?? item[scoreKey] ?? state.vulnerability_score ?? item.focus_score ?? item.exposure_score ?? 0
     )
-    const displayName = item.agent_name || item.username || item.name || `agent_${idx}`
+    const displayName = resolveActorDisplayName(
+      item.name,
+      runtimeItem?.agent_name,
+      configured.name,
+      configured.agent_name,
+      item.username,
+      `代理体 ${idx + 1}`
+    )
+    const lifecycleStatus = item.runtime_lifecycle?.lifecycle_status || item.lifecycle_status || 'active'
+    const rawRepresentation = item.representation_level || (item.is_aggregate ? 'region_aggregate' : 'institution')
+    const representation = item.archetype_key === 'ecological_receptor' && rawRepresentation === 'institution'
+      ? 'group_representative'
+      : rawRepresentation
+    const capabilityLabels = uniqueList([
+      ...(item.capabilities || []),
+      ...(item.capability_keys || [])
+    ].map(value => safeRuntimeCopy(translateDisplayToken(value, ''), '')).filter(Boolean))
+    const resourceRows = Object.entries(item.resource_budget || {}).map(([key, value]) => {
+      const label = safeRuntimeCopy(translateDisplayToken(key, ''), '相对资源')
+      return `${label} ${Math.round(Number(value) || 0)}`
+    })
+    const createdRound = Number(item.created_round ?? item.runtime_lifecycle?.created_round ?? 0) || 0
+    const isRuntimeGenerated = createdRound > 0 || /^runtime_/.test(String(item.generation_mode || ''))
+    const summary = isRuntimeGenerated
+      ? `${displayName}在 R${createdRound} 由运行证据建立，负责${capabilityLabels.slice(0, 3).join('、') || '专项响应'}。${safeRuntimeCopy(item.generation_reason, '')}`
+      : safeRuntimeCopy(item.bio || item.persona, `${displayName} 正在根据环境暴露和周边主体行动调整策略。`)
     return {
-      id: item.agent_id ?? item.user_id ?? idx,
+      id: rawId,
       name: displayName,
-      summary: item.bio || item.persona || `${displayName} 正在根据环境暴露和周边主体行动调整策略。`,
+      summary,
       provenance: item.provenance || item.profile_provenance || '',
-      groundingReason: item.grounding_reason || '',
+      groundingReason: safeRuntimeCopy(item.grounding_reason, ''),
       family: agentType,
       familyLabel: formatAgentTypeLabel(agentType),
       subtypeLabel: formatTokenLabel(roleType || 'agent', '代理体'),
+      lifecycleStatusLabel: formatTokenLabel(lifecycleStatus, '活跃'),
+      representationLabel: formatTokenLabel(representation, item.is_aggregate ? '区域聚合' : '机构主体'),
       regionLabel: item.home_region_id || item.primary_region || item.region || '',
       subregionLabel: item.home_subregion_id || item.subregion_id || item.subregion || '',
       selectedScore,
@@ -1932,13 +2563,179 @@ function normalizeAgentRows(source, scoreKey = 'vulnerability_score') {
       panic_level: normalizeScore(state.panic_level ?? item.panic_level ?? 0),
       public_trust: normalizeScore(state.public_trust ?? item.public_trust ?? 0),
       vulnerability_score: normalizeScore(state.vulnerability_score ?? item.vulnerability_score ?? 0),
+      capabilityLabels,
+      resourceSummary: resourceRows.slice(0, 2).join(' · '),
       motivations: uniqueList([
         ...(item.goals || []),
         ...(item.motivation_stack || []),
         ...(item.action_space || [])
-      ]).slice(0, 4).map(entry => translateDisplayToken(entry, entry))
+      ]).slice(0, 4).map(entry => safeRuntimeCopy(translateDisplayToken(entry, ''), '')).filter(Boolean)
     }
   })
+}
+
+function canonicalRuntimeAgentFamily(item = {}) {
+  const archetypeFamilies = {
+    local_government: 'governance',
+    industry_regulator: 'governance',
+    critical_facility_operator: 'infrastructure',
+    healthcare_provider: 'organization',
+    environmental_monitoring: 'organization',
+    emergency_response: 'organization',
+    transport_operator: 'infrastructure',
+    affected_population: 'human',
+    livelihood_group: 'human',
+    community_organization: 'organization',
+    supply_logistics: 'organization',
+    media_information: 'organization',
+    ecological_receptor: 'ecology',
+    environmental_carrier: 'ecology'
+  }
+  const archetypeFamily = archetypeFamilies[String(item?.archetype_key || '').toLowerCase()]
+  return archetypeFamily || String(item?.agent_type || item?.node_family || item?.family || 'human').toLowerCase()
+}
+
+function normalizeAgentActionRows(source) {
+  const raw = source?.action_records || source?.agent_action_decisions || source?.interactions?.action_records || []
+  if (!Array.isArray(raw)) return []
+  return raw.map((item, index) => {
+    const validation = item?.selected_validation || {}
+    const accepted = validation.accepted !== false
+    const actionKey = item?.selected_action_key || validation.action_key || 'wait'
+    return {
+      id: String(item?.action_decision_id || item?.id || `${item?.round || 0}-${item?.agent_id ?? index}-${index}`),
+      agentId: item?.agent_id ?? index,
+      round: Number(item?.round ?? item?.round_number ?? 0) || 0,
+      actionLabel: safeRuntimeCopy(
+        item?.selected_action_label_zh || validation.action_label_zh || translateDisplayToken(actionKey, ''),
+        '保持待命'
+      ),
+      status: accepted ? 'executed' : 'blocked',
+      statusLabel: accepted ? '已通过执行校验' : '执行校验未通过',
+      reasons: uniqueList(validation.reasons_zh || validation.reasons || [])
+        .map(value => safeRuntimeCopy(value, ''))
+        .filter(Boolean)
+    }
+  })
+}
+
+function normalizeRelationshipStateRows(source, agentNames) {
+  const raw = source?.relationship_states || source?.interactions?.relationship_states || []
+  if (!Array.isArray(raw)) return []
+  return raw.map((item, index) => {
+    const sourceId = item?.source_agent_id
+    const targetId = item?.target_agent_id
+    const trust = Math.max(0, Math.min(1, Number(item?.trust) || 0))
+    const dependency = Math.max(0, Math.min(1, Number(item?.dependency) || 0))
+    const coordination = Math.max(0, Math.min(1, Number(item?.coordination) || 0))
+    const tension = Math.max(0, Math.min(1, Number(item?.tension) || 0))
+    const status = String(item?.status || 'active')
+    return {
+      id: String(item?.relationship_state_id || item?.relationship_contract_id || `relationship-${index}`),
+      sourceName: agentNames.get(String(sourceId)) || `代理体 ${Number(sourceId) + 1 || index + 1}`,
+      targetName: agentNames.get(String(targetId)) || `代理体 ${Number(targetId) + 1 || index + 2}`,
+      typeLabel: formatTokenLabel(item?.relationship_type || 'interaction', '互动关系'),
+      status,
+      statusLabel: formatTokenLabel(status, '活跃'),
+      trust,
+      dependency,
+      coordination,
+      tension,
+      trustLabel: formatPercent(trust),
+      dependencyLabel: formatPercent(dependency),
+      coordinationLabel: formatPercent(coordination),
+      tensionLabel: formatPercent(tension),
+      lastUpdatedRound: Number(item?.last_updated_round || 0)
+    }
+  })
+}
+
+function normalizeRelationshipEventRows(source, agentNames) {
+  const raw = source?.relationship_events || source?.interactions?.relationship_events || []
+  if (!Array.isArray(raw)) return []
+  return raw.map((item, index) => {
+    const sourceName = agentNames.get(String(item?.source_agent_id)) || '相关代理体'
+    const targetName = agentNames.get(String(item?.target_agent_id)) || '相关代理体'
+    const round = Number(item?.round_number ?? item?.round ?? 0) || 0
+    const summary = safeRuntimeCopy(
+      item?.summary_zh || item?.summary,
+      `${sourceName} 与 ${targetName} 的关系状态已更新。`
+    )
+    return {
+      id: String(item?.relationship_event_id || item?.event_id || `relationship-event-${round}-${index}`),
+      round,
+      effectiveRound: round,
+      typeLabel: formatTokenLabel(item?.event_type || 'relationship_updated', '关系更新'),
+      summary
+    }
+  })
+}
+
+function normalizeAgentEmergenceRows(source) {
+  const snapshotEvents = [
+    ...(Array.isArray(source?.agent_emergence?.events) ? source.agent_emergence.events : []),
+    ...(Array.isArray(source?.agent_emergence?.activation_events) ? source.agent_emergence.activation_events : [])
+  ]
+  const raw = snapshotEvents.length > 0
+    ? snapshotEvents
+    : (Array.isArray(source?.agent_emergence_events) ? source.agent_emergence_events : [])
+  return raw.map((item, index) => {
+    const round = Number(item?.round ?? item?.round_number ?? 0) || 0
+    return {
+      id: String(item?.event_id || `agent-emergence-${round}-${index}`),
+      round,
+      effectiveRound: Number(item?.effective_round ?? round) || round,
+      typeLabel: formatTokenLabel(item?.event_type || 'agent_created', '代理体变化'),
+      summary: safeRuntimeCopy(item?.summary || item?.summary_zh, '运行证据触发了代理体生命周期变化。')
+        .replace(/能力响应单元/g, '专业响应单元')
+    }
+  })
+}
+
+function normalizePolicyExecutionRows(source, agentNames) {
+  const raw = source?.policy_execution?.execution_records || source?.policy_execution_events || []
+  if (!Array.isArray(raw)) return []
+  return raw.map((item, index) => {
+    const round = Number(item?.round_number ?? item?.round ?? 0) || 0
+    const status = String(item?.execution_status || 'blocked')
+    const executorNames = uniqueList(item?.executor_agent_ids || [])
+      .map(id => agentNames.get(String(id)) || '')
+      .filter(Boolean)
+    const targets = uniqueList(item?.target_region_ids || [])
+      .map(id => resolveRegionName(id))
+      .filter(Boolean)
+    return {
+      id: String(item?.policy_execution_id || `${item?.policy_id || 'policy'}-${round}-${index}`),
+      round,
+      status,
+      statusLabel: formatTokenLabel(status, status === 'executed' ? '已执行' : '执行受阻'),
+      label: safeRuntimeCopy(item?.policy_label_zh, '政策措施'),
+      summary: safeRuntimeCopy(item?.summary_zh, status === 'executed' ? '政策措施已在本轮执行。' : '政策措施本轮未能生效。'),
+      executorLabel: executorNames.length > 0 ? `执行者：${executorNames.join('、')}` : '执行者待补齐',
+      targetLabel: targets.length > 0 ? `作用区域：${targets.join('、')}` : '作用范围待核验'
+    }
+  })
+}
+
+function formatActorDisplayName(value, fallback = '代理体') {
+  const raw = String(value || '').trim()
+  if (!raw) return fallback
+  if (/^agent[_-]?\d*$/i.test(raw)) return fallback
+  return safeRuntimeCopy(raw
+    .replace(/[_-]\d+$/, '')
+    .replace(/_+/g, '·'), fallback)
+}
+
+function resolveActorDisplayName(...values) {
+  const fallback = String(values.at(-1) || '代理体')
+  const selected = values.slice(0, -1).find(value => {
+    const raw = String(value || '').trim()
+    return raw && !/^(?:未命名代理体|未知代理体|Agent(?:[_\s#-]*\d+)?)$/i.test(raw)
+  })
+  return formatActorDisplayName(
+    String(selected || '').replace(/能力响应单元/g, '专业响应单元'),
+    fallback
+  )
 }
 
 function formatAgentTypeLabel(value) {
@@ -1963,7 +2760,7 @@ function formatAgentTypeLabel(value) {
     coastalcurrent: '环境载体',
     infrastructure: '基础设施'
   }
-  return map[normalized] || formatTokenLabel(value, 'agent')
+  return map[normalized] || formatTokenLabel(value, '代理体')
 }
 
 function normalizeAgentInteractions(source) {
@@ -1980,23 +2777,26 @@ function normalizeAgentInteractions(source) {
   return raw.map((item, idx) => {
     // 清洗叙述句里嵌入的内部渠道 token（如 governance_hierarchy → 治理层级）
     const rawChannel = String(item.channel || item.interaction_channel || '').trim()
+    const channelLabel = safeRuntimeCopy(translateDisplayToken(rawChannel || 'social', ''), '社会')
     const cleanText = (text) => {
       const s = String(text || '')
-      return rawChannel ? s.split(rawChannel).join(translateDisplayToken(rawChannel, rawChannel)) : s
+      return rawChannel ? s.split(rawChannel).join(channelLabel) : s
     }
     return {
       id: item.id || `${item.round || item.round_num || idx}-${idx}`,
       round: item.round || item.round_num || idx + 1,
-      channel: translateDisplayToken(rawChannel || 'social', '社会'),
-      sourceName: item.source_agent_name || item.source_name || item.agent_name || `agent_${item.source_agent_id ?? idx}`,
-      targetName: item.target_agent_name || item.target_name || '',
-      sourceRegion: item.source_region_name || item.source_region || item.region || '',
-      targetRegion: item.target_region_name || item.target_region || '',
-      actionType: translateDisplayToken(item.action_type || item.type || '', ''),
-      actionLabel: translateDisplayToken(item.action_type || item.type || 'interaction', '交互'),
-      rationale: cleanText(item.rationale || item.description || item.note || 'agent interaction'),
+      channel: channelLabel,
+      sourceAgentId: item.source_agent_id ?? item.agent_id ?? '',
+      targetAgentId: item.target_agent_id ?? '',
+      sourceName: resolveActorDisplayName(item.source_agent_name, item.source_name, item.agent_name, `代理体 ${idx + 1}`),
+      targetName: resolveActorDisplayName(item.target_agent_name, item.target_name, ''),
+      sourceRegion: formatInteractionRegion(item.source_region_name || item.source_region || item.region),
+      targetRegion: formatInteractionRegion(item.target_region_name || item.target_region),
+      actionType: safeRuntimeCopy(translateDisplayToken(item.action_type || item.type || '', ''), ''),
+      actionLabel: safeRuntimeCopy(translateDisplayToken(item.action_type || item.type || 'interaction', ''), '交互'),
+      rationale: safeRuntimeCopy(cleanText(item.rationale || item.description || item.note), '代理体互动'),
       targetDeltaLabel: formatDeltaLabel(item.delta || item.target_delta || {}),
-      summary: cleanText(item.summary || item.description || item.rationale || item.note || 'agent interaction')
+      summary: safeRuntimeCopy(cleanText(item.summary || item.description || item.rationale || item.note), '代理体互动')
     }
   })
 }
@@ -2007,7 +2807,7 @@ function normalizeInterventionRows(raw, defaultStatus = 'configured') {
   return raw.map((item, idx) => {
     const entry = item && typeof item === 'object' ? item : {}
     const variable = entry.variable && typeof entry.variable === 'object' ? entry.variable : entry
-    const name = String(variable.name || variable.title || entry.name || entry.title || `variable_${idx + 1}`)
+    const name = safeRuntimeCopy(variable.name || variable.title || entry.name || entry.title, `干预变量 ${idx + 1}`)
     const type = String(variable.type || entry.type || 'variable')
     const mode = String(variable.policy_mode || entry.policy_mode || '')
     const startRound = Number(variable.start_round ?? entry.start_round ?? entry.round ?? 0) || 0
@@ -2022,16 +2822,16 @@ function normalizeInterventionRows(raw, defaultStatus = 'configured') {
     const targets = uniqueList([
       ...(Array.isArray(variable.target_regions) ? variable.target_regions : []),
       ...(Array.isArray(entry.target_regions) ? entry.target_regions : [])
-    ])
+    ]).map(item => safeRuntimeCopy(resolveRegionName(item), '')).filter(Boolean)
     const status = String(entry.status || variable.status || defaultStatus)
     const sourceOrigin = String(
       variable.source_origin || variable.sourceOrigin || entry.source_origin || entry.sourceOrigin || ''
     ).toLowerCase()
     const isStableContext = sourceOrigin === 'stable_context' || variable.is_stable_context === true || entry.is_stable_context === true
-    const summary =
-      variable.description ||
-      entry.message ||
+    const summary = safeRuntimeCopy(
+      variable.description || entry.message,
       `${formatVariableTypeLabel(type)}作用于${targets.length > 0 ? targets.join(' · ') : '全域'}，持续 ${duration} 轮。`
+    )
 
     return {
       id: String(entry.timestamp || entry.id || variable.variable_id || `${name}-${idx}`),
@@ -2058,6 +2858,16 @@ function sortByRoundDesc(a, b) {
   const roundDelta = Number(b.round || 0) - Number(a.round || 0)
   if (roundDelta !== 0) return roundDelta
   return String(b.id || '').localeCompare(String(a.id || ''))
+}
+
+function mergeRuntimeRows(...lists) {
+  const rows = new Map()
+  lists.flat().forEach((item, index) => {
+    if (!item) return
+    const key = String(item.id || `${item.round || 0}-${item.typeLabel || 'event'}-${index}`)
+    rows.set(key, item)
+  })
+  return [...rows.values()]
 }
 
 function relationStatusPriority(status) {
@@ -2096,7 +2906,7 @@ function formatDeltaLabel(delta) {
   const entries = Object.entries(delta).filter(([, value]) => Number(value) !== 0)
   if (entries.length === 0) return ''
   const [key, value] = entries[0]
-  return `${translateDisplayToken(key, String(key).replace(/_/g, ' '))} ${Number(value).toFixed(1)}`
+  return `${safeRuntimeCopy(translateDisplayToken(key, ''), '状态指标')} ${Number(value).toFixed(1)}`
 }
 
 function normalizeEvents(source) {
@@ -2113,13 +2923,13 @@ function normalizeEvents(source) {
   return raw.map((event, idx) => ({
     id: event.id || `${event.round || event.round_num || idx}-${idx}`,
     round: event.round || event.round_num || event.step || idx + 1,
-    title: event.title || event.event_name || event.label || event.action_type || '',
-    label: event.label,
-    event_type: event.event_type || event.type || event.action_type || '',
-    source: event.source || event.source_region || event.from || '',
-    target: event.target || event.target_region || event.to || '',
-    summary: event.summary || event.description || event.text || event.rationale || event.message || '',
-    rationale: event.rationale || event.reason || '',
+    title: safeRuntimeCopy(event.title || event.event_name || event.label || event.action_type, '扩散事件'),
+    label: safeRuntimeCopy(event.label, ''),
+    event_type: safeRuntimeCopy(event.event_type || event.type || event.action_type, '状态变化'),
+    source: safeRuntimeCopy(resolveRegionName(event.source || event.source_region || event.from), ''),
+    target: safeRuntimeCopy(resolveRegionName(event.target || event.target_region || event.to), ''),
+    summary: safeRuntimeCopy(event.summary || event.description || event.text || event.rationale || event.message, '系统记录到一次状态变化。'),
+    rationale: safeRuntimeCopy(event.rationale || event.reason, ''),
     intensity: event.intensity ?? event.transfer_intensity ?? event.score ?? undefined,
     confidence: event.confidence ?? event.probability ?? undefined
   }))
@@ -2171,40 +2981,64 @@ function clearInjection() {
   injection.value = createInjection()
 }
 
+const INTERNAL_VARIABLE_NAMES = new Set(['disaster_injection', 'policy_injection'])
+let injectionRequestIdentity = { fingerprint: '', key: '' }
+
+function resolveInjectionDisplayName(variable) {
+  const rawName = String(variable?.name || '').trim()
+  if (rawName && !INTERNAL_VARIABLE_NAMES.has(rawName)) return rawName
+  const description = String(variable?.description || '').trim()
+  if (description) return description.length > 24 ? `${description.slice(0, 24)}...` : description
+  return variable?.type === 'policy' ? '政策变量' : '灾害变量'
+}
+
 async function handleInject() {
-  if (!props.simulationId || isInjecting.value) return
+  if (!canInject.value) return
 
   isInjecting.value = true
+  interventionMessage.value = ''
   try {
+    const startRoundValue = injection.value.start_round
     const payload = {
       simulation_id: props.simulationId,
       type: injection.value.type,
-      name: injection.value.name || (injection.value.type === 'policy' ? 'policy_injection' : 'disaster_injection'),
+      name: resolveInjectionDisplayName(injection.value),
       description: injection.value.description || '',
-      target_regions: splitList(injection.value.target_regions_text),
-      target_nodes: splitList(injection.value.target_nodes_text),
-      start_round: Number(injection.value.start_round) || 0,
+      target_text: [injection.value.target_regions_text, injection.value.target_nodes_text]
+        .map(item => String(item || '').trim())
+        .filter(Boolean)
+        .join('；'),
+      start_round: startRoundValue === '' || startRoundValue == null
+        ? currentRoundNumber.value + 1
+        : Math.max(0, Number(startRoundValue)),
       duration_rounds: Math.max(1, Number(injection.value.duration_rounds) || 1),
       intensity: normalizeScore(injection.value.intensity),
       policy_mode: injection.value.type === 'policy' ? injection.value.policy_mode : 'restrict'
     }
+    const fingerprint = JSON.stringify(payload)
+    if (injectionRequestIdentity.fingerprint !== fingerprint) {
+      injectionRequestIdentity = { fingerprint, key: createInjectionRequestKey() }
+    }
+    payload.idempotency_key = injectionRequestIdentity.key
 
     const res = await injectSimulationVariable(payload)
     if (res.success) {
-      const summary = `${payload.name} @ R${payload.start_round} (${payload.type}, ${payload.intensity})`
+      const normalized = res.data?.normalized_intervention || payload
+      const summary = `${normalized.name} @ R${normalized.start_round} (${normalized.type}, ${normalized.intensity_0_100 ?? normalized.intensity})`
       const localEntry = normalizeInterventionRows([
         {
           round: currentRoundNumber.value,
           status: 'accepted',
           variable: {
-            name: payload.name,
-            type: payload.type,
-            description: payload.description,
-            target_regions: payload.target_regions,
-            start_round: payload.start_round,
-            duration_rounds: payload.duration_rounds,
-            intensity: payload.intensity,
-            policy_mode: payload.policy_mode
+            name: normalized.name,
+            type: normalized.type,
+            description: normalized.description,
+            target_regions: normalized.target_regions || [],
+            target_nodes: normalized.target_nodes || [],
+            start_round: normalized.start_round,
+            duration_rounds: normalized.duration_rounds,
+            intensity: normalized.intensity_0_100 ?? normalized.intensity,
+            policy_mode: normalized.policy_mode
           }
         }
       ], 'accepted')[0]
@@ -2212,24 +3046,19 @@ async function handleInject() {
       if (localEntry) {
         injectionHistory.value.unshift(localEntry)
       }
+      interventionMessage.value = ''
       addLog(`✓ 中途变量已注入: ${summary}`)
       await refreshDetail()
     } else {
+      interventionMessage.value = '干预内容已保留，可以重新应用。'
       addLog(`✗ 注入失败: ${res.error || '未知错误'}`)
     }
   } catch (err) {
+    interventionMessage.value = '干预内容已保留，可以重新应用。'
     addLog(`✗ 注入异常: ${err.message}`)
   } finally {
     isInjecting.value = false
   }
-}
-
-function splitList(value) {
-  if (!value) return []
-  return String(value)
-    .split(/[,\n;]/)
-    .map(item => item.trim())
-    .filter(Boolean)
 }
 
 async function startRun() {
@@ -2476,14 +3305,18 @@ function stopAnimationPlayback() {
 function resolvePlaybackDelayMs(frame = null) {
   const baseSpeed = Number(props.animationData?.meta?.default_speed_ms || 1800)
   const targetSpeed = Math.max(400, Number(playbackSpeedMs.value || baseSpeed))
-  const frameDuration = Number(frame?.playback_duration_ms || baseSpeed)
+  const frameDuration = getFrameTimelineDuration(
+    props.animationData,
+    frame,
+    Number(frame?.playback_duration_ms || baseSpeed)
+  )
   const scaled = frameDuration * (targetSpeed / Math.max(1, baseSpeed))
   return Math.max(420, Math.round(scaled))
 }
 
 function queueNextAnimationTick() {
   if (!isPlayingAnimation.value || playbackFrames.value.length <= 1) return
-  const frame = selectedAnimationFrame.value
+  const frame = playbackFrames.value[Math.min(Math.max(roundIndex.value, 0), playbackFrames.value.length - 1)]
   const durationMs = resolvePlaybackDelayMs(frame)
   runFramePulse(durationMs, () => {
     const maxIndex = Math.max(playbackFrames.value.length - 1, 0)
@@ -2514,16 +3347,6 @@ function runFramePulse(durationMs, onComplete = null) {
     frameAnimationRaf = requestAnimationFrame(tick)
   }
   frameAnimationRaf = requestAnimationFrame(tick)
-}
-
-function stepAnimationFrame(delta) {
-  if (playbackFrames.value.length <= 1) return
-  stopAnimationPlayback()
-  const maxIndex = Math.max(playbackFrames.value.length - 1, 0)
-  roundIndex.value = Math.min(maxIndex, Math.max(0, roundIndex.value + delta))
-  window.setTimeout(() => {
-    runFramePulse(resolvePlaybackDelayMs(selectedAnimationFrame.value))
-  }, 0)
 }
 
 function toggleAnimationPlayback() {
@@ -2575,23 +3398,26 @@ watch(
 
 watch(
   () => props.animationData,
-  (value) => {
+  (value, previousValue) => {
     if (value?.meta?.default_speed_ms) {
       playbackSpeedMs.value = value.meta.default_speed_ms
     }
     if (value?.frames?.length) {
+      const previousFrameCount = Array.isArray(previousValue?.frames) ? previousValue.frames.length : 0
+      const wasAtLatestFrame = previousFrameCount > 0 && roundIndex.value >= previousFrameCount - 1
       const targetRound = Number(
         runStatus.value.current_round ||
         runDetail.value.current_round ||
         runDetail.value.latest_round_snapshot?.round ||
         0
       )
-      if (!isReplayPlayback.value && targetRound > 0) {
+      if (!isReplayPlayback.value && targetRound > 0 && (previousFrameCount === 0 || wasAtLatestFrame)) {
         syncRoundIndexToRound(targetRound)
-      } else {
+      } else if (previousFrameCount === 0) {
         roundIndex.value = 0
+      } else {
+        roundIndex.value = Math.min(roundIndex.value, value.frames.length - 1)
       }
-      emit('animation-frame-change', value.frames[roundIndex.value] || value.frames[0])
       maybeAutoplayReplay()
     }
   },
@@ -2619,7 +3445,8 @@ watch(roundIndex, () => {
   if (!props.animationData?.frames?.length || isPlayingAnimation.value) return
   window.setTimeout(() => {
     if (isPlayingAnimation.value) return
-    runFramePulse(resolvePlaybackDelayMs(selectedAnimationFrame.value))
+    const frame = playbackFrames.value[Math.min(Math.max(roundIndex.value, 0), playbackFrames.value.length - 1)]
+    runFramePulse(resolvePlaybackDelayMs(frame))
   }, 0)
 })
 
@@ -2651,14 +3478,49 @@ watch(
 )
 
 watch(
-  riskObjectHighlightPayload,
-  (payload) => {
-    emit('risk-object-focus', payload)
+  selectedRiskObjectId,
+  () => {
+    revealSelectedRiskObject()
+  },
+  { flush: 'post' }
+)
+
+watch(
+  [() => riskObjects.value.length, activeWorkspaceTab],
+  async ([, tab]) => {
+    if (tab !== 'risk') {
+      riskSelectorOverflow.value = false
+      return
+    }
+    await nextTick()
+    syncRiskSelectorScrollState()
+  },
+  { flush: 'post' }
+)
+
+watch(
+  [riskObjectHighlightPayload, activeWorkspaceTab],
+  ([payload, tab]) => {
+    emit('risk-object-focus', tab === 'risk'
+      ? payload
+      : { label: '', riskObjectId: '', nodeIds: [], nodeNames: [] })
   },
   { immediate: true, deep: true }
 )
 
+function handleGlobalKeydown(event) {
+  if (event.key === 'Escape' && isInterventionPanelOpen.value) {
+    isInterventionPanelOpen.value = false
+  }
+}
+
+function handleStep3Resize() {
+  syncRiskSelectorScrollState()
+}
+
 onMounted(async () => {
+  window.addEventListener('keydown', handleGlobalKeydown)
+  window.addEventListener('resize', handleStep3Resize)
   addLog('Kaleido Step3 初始化')
   await refreshSimulationContext()
   if (isReplayPlayback.value) {
@@ -2684,6 +3546,8 @@ onMounted(async () => {
 })
 
 onUnmounted(() => {
+  window.removeEventListener('keydown', handleGlobalKeydown)
+  window.removeEventListener('resize', handleStep3Resize)
   stopPolling()
   stopAnimationPlayback()
 })
@@ -2691,17 +3555,31 @@ onUnmounted(() => {
 
 <style scoped>
 .envfish-step {
-  min-height: 100%;
+  height: 100%;
+  min-height: 0;
   display: flex;
   flex-direction: column;
   gap: 14px;
   padding: 18px;
-  overflow: visible;
+  overflow: hidden;
   background:
     radial-gradient(circle at top left, rgba(255, 191, 105, 0.18), transparent 30%),
     radial-gradient(circle at top right, rgba(28, 196, 135, 0.16), transparent 28%),
     linear-gradient(180deg, #fffaf4 0%, #ffffff 100%);
   color: #1e2333;
+  container-type: inline-size;
+}
+
+.runtime-sticky {
+  position: sticky;
+  top: 0;
+  z-index: 20;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 0 0 8px;
+  background: rgba(255, 250, 244, 0.97);
+  backdrop-filter: blur(18px);
 }
 
 .hero,
@@ -2719,8 +3597,9 @@ onUnmounted(() => {
   display: flex;
   justify-content: space-between;
   gap: 12px;
-  padding: 20px 22px;
-  border-radius: 24px;
+  align-items: center;
+  padding: 12px 16px;
+  border-radius: 18px;
 }
 
 .eyebrow {
@@ -2731,8 +3610,8 @@ onUnmounted(() => {
 }
 
 .hero h2 {
-  margin: 10px 0 8px;
-  font-size: 28px;
+  margin: 5px 0 0;
+  font-size: 22px;
   line-height: 1.1;
 }
 
@@ -2744,15 +3623,16 @@ onUnmounted(() => {
 
 .hero-controls {
   display: flex;
-  align-items: flex-start;
-  gap: 10px;
+  align-items: center;
+  gap: 8px;
   flex-wrap: wrap;
 }
 
 .ghost-btn,
 .primary-btn,
 .preset-btn,
-.secondary-btn {
+.secondary-btn,
+.text-btn {
   border: none;
   border-radius: 14px;
   padding: 10px 14px;
@@ -2766,6 +3646,31 @@ onUnmounted(() => {
 .preset-btn {
   background: rgba(29, 39, 58, 0.06);
   color: #27344a;
+}
+
+.text-btn {
+  padding-inline: 6px;
+  background: transparent;
+  color: #596276;
+}
+
+.intervention-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  color: #173056;
+  background: #eef4ff;
+}
+
+.control-count {
+  display: inline-grid;
+  min-width: 20px;
+  height: 20px;
+  place-items: center;
+  border-radius: 7px;
+  background: #173056;
+  color: #fff;
+  font-size: 10px;
 }
 
 .primary-btn {
@@ -2783,15 +3688,16 @@ onUnmounted(() => {
 
 .status-strip {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(132px, 1fr));
-  gap: 10px;
+  grid-template-columns: repeat(4, minmax(72px, 1fr));
+  gap: 6px;
 }
 
 .status-card {
-  border-radius: 18px;
-  padding: 12px 14px;
-  background: rgba(255, 255, 255, 0.84);
-  border: 1px solid rgba(39, 56, 84, 0.08);
+  min-width: 0;
+  border-radius: 12px;
+  padding: 9px 10px;
+  background: #f7f8fa;
+  border: 1px solid rgba(39, 56, 84, 0.06);
 }
 
 .status-card span,
@@ -2805,13 +3711,13 @@ onUnmounted(() => {
 
 .status-card strong {
   display: block;
-  margin-top: 8px;
-  font-size: 18px;
+  margin-top: 4px;
+  font-size: 14px;
   color: #183058;
 }
 
 .status-card.accent {
-  background: linear-gradient(135deg, rgba(233, 243, 255, 0.98), rgba(255, 244, 225, 0.96));
+  background: #eef4ff;
 }
 
 .control-panel {
@@ -2819,15 +3725,130 @@ onUnmounted(() => {
   padding: 16px 18px;
 }
 
+.runtime-console {
+  display: grid;
+  grid-template-columns: minmax(280px, 0.9fr) minmax(260px, 1.1fr) auto;
+  align-items: center;
+  gap: 14px;
+  padding: 10px 12px;
+  border-radius: 18px;
+}
+
+.runtime-timeline {
+  min-width: 0;
+}
+
+.runtime-timeline-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  color: #5f687a;
+  font-size: 11px;
+}
+
+.runtime-timeline-head strong {
+  color: #173056;
+  font-size: 12px;
+}
+
+.compact-range {
+  display: block;
+  width: 100%;
+  margin: 7px 0 0;
+}
+
+.runtime-timeline p {
+  margin: 4px 0 0;
+  overflow: hidden;
+  color: #7d8393;
+  font-size: 11px;
+  line-height: 1.35;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.runtime-controls,
+.runtime-playback-buttons {
+  display: flex;
+  align-items: flex-end;
+  gap: 6px;
+}
+
+.runtime-controls {
+  justify-content: flex-end;
+}
+
+.icon-control,
+.play-control,
+.latest-control {
+  height: 36px;
+  border: 1px solid rgba(23, 48, 86, 0.12);
+  border-radius: 11px;
+  background: #fff;
+  color: #173056;
+  cursor: pointer;
+  font: inherit;
+  font-weight: 700;
+}
+
+.icon-control {
+  width: 36px;
+}
+
+.play-control {
+  min-width: 58px;
+  padding: 0 11px;
+  background: #173056;
+  color: #fff;
+}
+
+.latest-control {
+  padding: 0 10px;
+  background: #fff;
+  color: #173056;
+}
+
+.icon-control:disabled,
+.play-control:disabled,
+.latest-control:disabled {
+  cursor: not-allowed;
+  opacity: 0.42;
+}
+
+.compact-selector {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  color: #7d8393;
+  font-size: 10px;
+}
+
+.compact-selector select {
+  height: 36px;
+  max-width: 126px;
+  padding: 0 28px 0 9px;
+  border: 1px solid rgba(23, 48, 86, 0.12);
+  border-radius: 11px;
+  background: #fff;
+  color: #173056;
+  font: inherit;
+}
+
+.speed-selector select {
+  max-width: 92px;
+}
+
 .workspace-shell {
   display: flex;
-  flex: 0 0 auto;
-  min-height: auto;
+  flex: 1 1 auto;
+  min-height: 0;
   flex-direction: column;
-  gap: 18px;
-  padding: 18px;
-  border-radius: 28px;
-  overflow: visible;
+  gap: 14px;
+  padding: 14px;
+  border-radius: 22px;
+  overflow-y: auto;
+  overflow-x: hidden;
 }
 
 .workspace-topbar {
@@ -2861,10 +3882,13 @@ onUnmounted(() => {
 /* tab 从大卡片 → 安静的下划线文字 tab（不再占满一行抢视觉） */
 .workspace-tabs {
   display: flex;
-  flex-wrap: wrap;
-  gap: 24px;
+  flex-wrap: nowrap;
+  gap: 22px;
   width: 100%;
+  overflow-x: auto;
+  padding: 0 4px;
   border-bottom: 0.5px solid rgba(29, 39, 58, 0.12);
+  background: rgba(255, 250, 244, 0.98);
 }
 
 .workspace-tab {
@@ -2881,6 +3905,7 @@ onUnmounted(() => {
   cursor: pointer;
   font-family: inherit;
   transition: color 0.15s ease, border-color 0.15s ease;
+  flex: 0 0 auto;
 }
 
 .workspace-tab:hover {
@@ -2911,39 +3936,86 @@ onUnmounted(() => {
   gap: 14px;
 }
 
-/* 多智能体并入运行总览后，加一条分隔让两段视觉上分组 */
-.workspace-panel-merged {
-  margin-top: 4px;
-  padding-top: 18px;
-  border-top: 1px dashed rgba(29, 39, 58, 0.1);
-}
-
-/* 变量注入高级抽屉 */
-.inject-drawer {
-  margin-top: 14px;
-  border: 1px solid rgba(29, 39, 58, 0.1);
-  border-radius: 18px;
-  background: rgba(248, 250, 253, 0.7);
-  padding: 4px 18px;
-}
-
-.inject-drawer[open] {
-  padding-bottom: 18px;
-}
-
-.inject-drawer-summary {
-  cursor: pointer;
-  list-style-position: inside;
+.intervention-overlay {
+  position: fixed;
+  inset: 60px 0 0;
+  z-index: 80;
   display: flex;
-  align-items: baseline;
-  gap: 12px;
-  padding: 12px 0;
+  justify-content: flex-end;
+  background: rgba(18, 29, 46, 0.08);
 }
 
-.inject-drawer-title {
-  font-size: 15px;
-  font-weight: 700;
-  color: #1d273a;
+.intervention-drawer {
+  width: min(560px, 100%);
+  height: 100%;
+  overflow-y: auto;
+  border-left: 1px solid rgba(23, 48, 86, 0.12);
+  background: #fbfbf9;
+  box-shadow: -22px 0 64px rgba(20, 33, 61, 0.16);
+}
+
+.intervention-drawer-head {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 20px;
+  padding: 20px 22px 16px;
+  border-bottom: 1px solid rgba(23, 48, 86, 0.08);
+  background: rgba(251, 251, 249, 0.96);
+  backdrop-filter: blur(14px);
+}
+
+.intervention-drawer-head h2 {
+  margin: 6px 0 0;
+  color: #173056;
+  font-size: 24px;
+}
+
+.intervention-drawer-head p {
+  margin: 6px 0 0;
+  color: #687185;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.drawer-close {
+  width: 34px;
+  height: 34px;
+  border: 1px solid rgba(23, 48, 86, 0.1);
+  border-radius: 11px;
+  background: #fff;
+  color: #47536a;
+  cursor: pointer;
+  font-size: 22px;
+  line-height: 1;
+}
+
+.intervention-drawer-body {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding: 18px 22px 28px;
+}
+
+.injection-panel,
+.active-intervention-panel {
+  padding: 16px;
+  border: 1px solid rgba(23, 48, 86, 0.08);
+  border-radius: 18px;
+  background: #fff;
+}
+
+.intervention-message {
+  margin: 10px 0 0;
+  padding: 10px 12px;
+  border-radius: 12px;
+  background: #eef7f2;
+  color: #1f5d45;
+  font-size: 12px;
+  line-height: 1.45;
 }
 
 .summary-grid {
@@ -2955,12 +4027,12 @@ onUnmounted(() => {
 .summary-card {
   border-radius: 20px;
   padding: 14px 16px;
-  background: linear-gradient(180deg, #fff, #f8fbff);
+  background: #ffffff;
   border: 1px solid rgba(29, 39, 58, 0.08);
 }
 
 .summary-card.accent {
-  background: linear-gradient(180deg, rgba(232, 242, 255, 0.96), rgba(255, 244, 225, 0.94));
+  background: #eef4ff;
 }
 
 .summary-card span {
@@ -3003,6 +4075,12 @@ onUnmounted(() => {
   flex: 0 0 auto;
 }
 
+.state-secondary-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 0.8fr) minmax(0, 1.2fr);
+  gap: 14px;
+}
+
 .inject-grid {
   grid-template-columns: minmax(0, 1.05fr) minmax(320px, 0.95fr);
   min-height: auto;
@@ -3025,7 +4103,7 @@ onUnmounted(() => {
 .pulse-metric {
   border-radius: 18px;
   padding: 14px;
-  background: linear-gradient(180deg, #fff, #f8fbff);
+  background: #ffffff;
   border: 1px solid rgba(29, 39, 58, 0.08);
 }
 
@@ -3131,7 +4209,7 @@ onUnmounted(() => {
 .spotlight-card {
   border-radius: 18px;
   padding: 14px;
-  background: linear-gradient(180deg, #fff, #f8fbff);
+  background: #ffffff;
   border: 1px solid rgba(29, 39, 58, 0.08);
 }
 
@@ -3323,7 +4401,7 @@ onUnmounted(() => {
   min-height: 0;
   border-radius: 18px;
   padding: 14px;
-  background: linear-gradient(180deg, #fff, #f8fbff);
+  background: #ffffff;
   border: 1px solid rgba(29, 39, 58, 0.08);
 }
 
@@ -3432,6 +4510,226 @@ onUnmounted(() => {
   margin-top: 10px;
 }
 
+.agent-action-line {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-top: 10px;
+  padding: 8px 0;
+  border-top: 1px solid rgba(29, 39, 58, 0.07);
+  border-bottom: 1px solid rgba(29, 39, 58, 0.07);
+}
+
+.agent-action-line strong {
+  color: #173056;
+  font-size: 12px;
+}
+
+.agent-action-line span {
+  color: #6f7588;
+  font-size: 10px;
+  text-align: right;
+}
+
+.runtime-ledger-section {
+  min-width: 0;
+}
+
+.policy-ledger-section {
+  margin-top: 16px;
+  padding-top: 16px;
+  border-top: 1px solid rgba(29, 39, 58, 0.09);
+}
+
+.runtime-ledger-list,
+.relationship-state-list,
+.runtime-event-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.runtime-ledger-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 16px;
+  padding: 11px 0;
+  border-bottom: 1px solid rgba(29, 39, 58, 0.07);
+}
+
+.runtime-ledger-row:last-child {
+  border-bottom: 0;
+}
+
+.runtime-ledger-row strong,
+.runtime-event-row strong {
+  color: #173056;
+  font-size: 12px;
+}
+
+.runtime-ledger-row p,
+.runtime-event-row p {
+  margin: 4px 0 0;
+  color: #5f6577;
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.runtime-ledger-round {
+  display: inline-block;
+  margin-right: 7px;
+  color: #113d7a;
+  font-size: 10px;
+  font-weight: 800;
+}
+
+.runtime-ledger-meta {
+  display: flex;
+  align-items: flex-start;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 6px;
+  max-width: 44%;
+}
+
+.runtime-ledger-meta span {
+  padding: 4px 7px;
+  border-radius: 999px;
+  background: rgba(17, 31, 59, 0.05);
+  color: #6f7588;
+  font-size: 10px;
+}
+
+.runtime-ledger-meta span.is-executed {
+  background: rgba(31, 93, 69, 0.1);
+  color: #1f5d45;
+}
+
+.runtime-ledger-meta span.is-blocked {
+  background: rgba(191, 66, 48, 0.1);
+  color: #a03a2f;
+}
+
+.relationship-runtime-panel {
+  margin-bottom: 14px;
+  padding: 16px 18px;
+  border: 1px solid rgba(29, 39, 58, 0.08);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.88);
+}
+
+.relationship-runtime-panel > .panel-title-row > div > p {
+  margin: 4px 0 0;
+  color: #6f7588;
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.relationship-summary-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 1px;
+  margin-top: 14px;
+  overflow: hidden;
+  border: 1px solid rgba(29, 39, 58, 0.08);
+  border-radius: 8px;
+  background: rgba(29, 39, 58, 0.08);
+}
+
+.relationship-summary-grid > div {
+  padding: 10px 12px;
+  background: #fff;
+}
+
+.relationship-summary-grid span,
+.relationship-summary-grid strong {
+  display: block;
+}
+
+.relationship-summary-grid span {
+  color: #7d8393;
+  font-size: 10px;
+}
+
+.relationship-summary-grid strong {
+  margin-top: 5px;
+  color: #173056;
+  font-size: 16px;
+}
+
+.relationship-runtime-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 18px;
+  margin-top: 16px;
+}
+
+.relationship-runtime-grid > section + section {
+  padding-left: 18px;
+  border-left: 1px solid rgba(29, 39, 58, 0.08);
+}
+
+.relationship-state-row {
+  padding: 9px 0;
+  border-bottom: 1px solid rgba(29, 39, 58, 0.07);
+}
+
+.relationship-state-row:last-child {
+  border-bottom: 0;
+}
+
+.relationship-state-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.relationship-state-head strong {
+  color: #173056;
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.relationship-state-head > span {
+  color: #6f7588;
+  font-size: 10px;
+  text-align: right;
+}
+
+.relationship-state-metrics {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 6px;
+  margin-top: 7px;
+}
+
+.relationship-state-metrics span {
+  color: #6f7588;
+  font-size: 10px;
+  white-space: nowrap;
+}
+
+.runtime-event-row {
+  display: grid;
+  grid-template-columns: 34px minmax(0, 1fr);
+  gap: 8px;
+  padding: 9px 0;
+  border-bottom: 1px solid rgba(29, 39, 58, 0.07);
+}
+
+.runtime-event-row:last-child {
+  border-bottom: 0;
+}
+
+.runtime-event-row small {
+  display: block;
+  margin-top: 4px;
+  color: #7d8393;
+  font-size: 10px;
+}
+
 .interaction-card p,
 .subregion-card p,
 .agent-rank-card p {
@@ -3461,41 +4759,135 @@ onUnmounted(() => {
   border-color: rgba(17, 61, 122, 0.18);
 }
 
-.risk-panel-grid {
+.risk-panel-heading {
+  margin-bottom: 10px;
+}
+
+.risk-selector-shell {
+  display: block;
+}
+
+.risk-selector-shell.has-overflow-controls {
   display: grid;
-  grid-template-columns: 320px minmax(0, 1fr);
-  gap: 14px;
+  grid-template-columns: 30px minmax(0, 1fr) 30px;
+  align-items: center;
+  gap: 7px;
 }
 
-.risk-card-list {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
+.risk-selector-nav {
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  min-height: 30px;
+  padding: 0;
+  border: 1px solid rgba(31, 93, 69, 0.2);
+  border-radius: 999px;
+  background: var(--k-color-surface);
+  color: var(--k-color-brand-700);
+  font: inherit;
+  font-size: 20px;
+  cursor: pointer;
+  transition: border-color 160ms ease, background 160ms ease, opacity 160ms ease;
 }
 
-.risk-object-card {
-  width: 100%;
-  border: 1px solid rgba(29, 39, 58, 0.08);
-  border-radius: 18px;
-  padding: 14px;
-  background: linear-gradient(180deg, #fff, #f8fbff);
+.risk-selector-nav:hover:not(:disabled) {
+  border-color: var(--k-color-brand-600);
+  background: var(--k-color-brand-050);
+}
+
+.risk-selector-nav:focus-visible {
+  outline: 2px solid var(--k-color-brand-500);
+  outline-offset: 2px;
+}
+
+.risk-selector-nav:disabled {
+  cursor: default;
+  opacity: 0.3;
+}
+
+.risk-selector-track {
+  display: grid;
+  grid-auto-flow: column;
+  grid-auto-columns: minmax(190px, 220px);
+  gap: 8px;
+  overflow-x: auto;
+  padding: 2px;
+  overscroll-behavior-inline: contain;
+  scroll-snap-type: inline proximity;
+  scrollbar-width: none;
+}
+
+.risk-selector-track::-webkit-scrollbar {
+  display: none;
+}
+
+.risk-selector-option {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 9px;
+  min-height: 62px;
+  padding: 9px 10px;
+  overflow: hidden;
+  border: 1px solid var(--k-color-border);
+  border-radius: 12px;
+  background: var(--k-color-surface);
+  color: var(--k-color-text);
   text-align: left;
   cursor: pointer;
-  transition: transform 0.18s ease, box-shadow 0.18s ease, border-color 0.18s ease;
+  scroll-snap-align: start;
+  transition: border-color 0.16s ease, background 0.16s ease, box-shadow 0.16s ease;
 }
 
-.risk-object-card:hover,
-.risk-object-card.active {
-  transform: translateY(-1px);
-  box-shadow: 0 12px 28px rgba(17, 31, 59, 0.08);
-  border-color: rgba(17, 61, 122, 0.22);
+.risk-selector-option:hover {
+  border-color: var(--k-color-brand-500);
 }
 
-.risk-object-card.active {
-  background: linear-gradient(180deg, rgba(232, 242, 255, 0.92), rgba(255, 245, 229, 0.92));
+.risk-selector-option:focus-visible {
+  outline: 2px solid var(--k-color-brand-500);
+  outline-offset: 1px;
 }
 
-.risk-card-head,
+.risk-selector-option.active {
+  border-color: var(--k-color-brand-500);
+  background: var(--k-color-brand-050);
+  box-shadow: 0 6px 16px rgba(28, 59, 46, 0.08);
+}
+
+.risk-selector-index {
+  align-self: start;
+  padding-top: 2px;
+  color: var(--k-color-text-muted);
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.risk-selector-copy {
+  min-width: 0;
+}
+
+.risk-selector-copy strong {
+  display: -webkit-box;
+  overflow: hidden;
+  color: var(--k-color-text);
+  font-size: 12px;
+  line-height: 1.38;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.risk-selector-copy small {
+  display: block;
+  margin-top: 4px;
+  overflow: hidden;
+  color: var(--k-color-text-muted);
+  font-size: 10px;
+  line-height: 1.3;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .cluster-head,
 .branch-head,
 .subpanel-head,
@@ -3506,7 +4898,6 @@ onUnmounted(() => {
   gap: 10px;
 }
 
-.risk-mode-tag,
 .risk-primary-tag,
 .node-chip-state {
   display: inline-flex;
@@ -3515,28 +4906,24 @@ onUnmounted(() => {
   padding: 5px 9px;
   border-radius: 999px;
   font-size: 11px;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-}
-
-.risk-mode-tag {
-  background: rgba(17, 61, 122, 0.1);
-  color: #113d7a;
+  letter-spacing: 0;
 }
 
 .risk-primary-tag {
-  background: rgba(240, 138, 36, 0.14);
-  color: #9a5b11;
+  align-self: start;
+  padding: 3px 6px;
+  border: 1px solid var(--k-color-border-strong);
+  background: transparent;
+  color: var(--k-color-brand-700);
+  font-size: 10px;
 }
 
-.risk-object-card strong,
 .risk-detail h3 {
   display: block;
   margin-top: 10px;
   color: #173056;
 }
 
-.risk-object-card p,
 .risk-detail p,
 .node-chip p,
 .cluster-card p,
@@ -3547,26 +4934,54 @@ onUnmounted(() => {
   font-size: 13px;
 }
 
-.risk-card-meta {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-  margin-top: 12px;
-  font-size: 12px;
-  color: #4f5568;
-}
-
-.risk-card-meta span {
-  padding: 5px 9px;
-  border-radius: 999px;
-  background: rgba(17, 31, 59, 0.05);
-}
-
 .risk-detail {
   display: flex;
   flex-direction: column;
   gap: 12px;
   min-width: 0;
+  padding-top: 12px;
+  border-top: 1px solid var(--k-color-border);
+}
+
+.risk-detail-empty {
+  grid-column: 1 / -1;
+  padding: 12px;
+}
+
+.risk-detail-tabs {
+  display: flex;
+  gap: 4px;
+  padding: 4px;
+  border-radius: 12px;
+  background: #f1f3f5;
+}
+
+.risk-detail-tabs button {
+  flex: 1;
+  min-width: 0;
+  padding: 8px 10px;
+  border: 0;
+  border-radius: 9px;
+  background: transparent;
+  color: #697386;
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
+.risk-detail-tabs button.active {
+  background: #fff;
+  color: #173056;
+  box-shadow: 0 4px 12px rgba(17, 31, 59, 0.08);
+}
+
+.risk-detail-section {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
 }
 
 .risk-detail-top {
@@ -3599,7 +5014,7 @@ onUnmounted(() => {
 .risk-runtime-box {
   border-radius: 18px;
   padding: 14px;
-  background: linear-gradient(180deg, #fff, #f6f9ff);
+  background: #ffffff;
   border: 1px solid rgba(29, 39, 58, 0.08);
   display: flex;
   flex-direction: column;
@@ -3640,6 +5055,8 @@ onUnmounted(() => {
 .runtime-status-tag.is-critical { color: #c0392b; background: rgba(192, 57, 43, 0.08); }
 .runtime-status-tag.is-falling { color: #0d7a52; }
 .runtime-status-tag.is-steady { color: #5a6b8c; }
+.runtime-status-tag.is-resolved { color: #0d7a52; background: rgba(13, 122, 82, 0.08); }
+.runtime-status-tag.is-dormant { color: #6a7283; background: rgba(106, 114, 131, 0.08); }
 
 .runtime-turning-tag {
   font-size: 11px;
@@ -3713,22 +5130,68 @@ onUnmounted(() => {
   color: #4a5a7c;
 }
 
-.risk-highlight-row,
 .risk-related-grid {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
   gap: 12px;
 }
 
 .risk-related-grid.secondary {
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+}
+
+.risk-causal-chain {
+  display: grid;
+  grid-template-columns: minmax(110px, 0.8fr) auto minmax(180px, 1.2fr) auto minmax(120px, 0.9fr) auto minmax(180px, 1.25fr);
+  gap: 8px;
+  align-items: stretch;
+}
+
+.risk-causal-node {
+  min-width: 0;
+  padding: 12px;
+  border: 1px solid rgba(29, 39, 58, 0.1);
+  border-radius: 8px;
+  background: #ffffff;
+}
+
+.risk-causal-node.mechanism {
+  background: rgba(238, 244, 255, 0.8);
+}
+
+.risk-causal-node.consequence {
+  background: rgba(255, 247, 231, 0.82);
+  border-color: rgba(229, 151, 45, 0.2);
+}
+
+.risk-causal-node > span {
+  display: block;
+  margin-bottom: 7px;
+  color: #7d8393;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.risk-causal-node strong {
+  display: block;
+  overflow-wrap: anywhere;
+  color: #1d355b;
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.risk-causal-arrow {
+  align-self: center;
+  color: #6881b3;
+  font-size: 17px;
+  font-weight: 800;
 }
 
 .risk-note,
 .risk-subpanel {
   border-radius: 18px;
   padding: 14px;
-  background: linear-gradient(180deg, #fff, #f8fbff);
+  background: #ffffff;
   border: 1px solid rgba(29, 39, 58, 0.08);
 }
 
@@ -3756,6 +5219,44 @@ onUnmounted(() => {
   display: flex;
   flex-wrap: wrap;
   gap: 10px;
+}
+
+.risk-step-pills strong {
+  margin: 0;
+  padding: 4px 7px;
+  border-radius: 5px;
+  background: rgba(17, 61, 122, 0.08);
+  color: #113d7a;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.metric-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.metric-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  padding: 11px 12px;
+  border: 1px solid rgba(29, 39, 58, 0.07);
+  border-radius: 8px;
+  background: rgba(248, 250, 253, 0.78);
+}
+
+.metric-row strong {
+  color: #1d355b;
+  font-size: 12px;
+}
+
+.metric-row span {
+  color: #6f7588;
+  font-size: 11px;
+  text-align: right;
 }
 
 .risk-step-pill {
@@ -3823,7 +5324,7 @@ onUnmounted(() => {
 .matrix-head,
 .region-row {
   display: grid;
-  grid-template-columns: 1.8fr 1.5fr 0.8fr 0.8fr 0.8fr 0.9fr;
+  grid-template-columns: minmax(180px, 1.8fr) repeat(4, minmax(56px, 0.8fr));
   gap: 10px;
   align-items: center;
 }
@@ -3845,7 +5346,7 @@ onUnmounted(() => {
 .region-row {
   padding: 12px 10px;
   border-radius: 18px;
-  background: linear-gradient(180deg, #fff, #f9fbff);
+  background: #ffffff;
   border: 1px solid rgba(29, 39, 58, 0.08);
 }
 
@@ -3898,7 +5399,7 @@ onUnmounted(() => {
 .history-card {
   border-radius: 18px;
   padding: 12px 14px;
-  background: linear-gradient(180deg, #fff, #f8fafe);
+  background: #ffffff;
   border: 1px solid rgba(29, 39, 58, 0.08);
 }
 
@@ -4045,25 +5546,69 @@ onUnmounted(() => {
   font-size: 12px;
 }
 
-@media (max-width: 1280px) {
-  .workspace-tabs,
+@container (max-width: 920px) {
+  .runtime-console {
+    grid-template-columns: 1fr;
+    gap: 8px;
+  }
+
+  .runtime-controls {
+    justify-content: flex-start;
+    flex-wrap: wrap;
+  }
+
+  .runtime-timeline p {
+    display: none;
+  }
+
+  .workspace-tab-meta {
+    display: none;
+  }
+}
+
+@container (max-width: 700px) {
   .summary-grid,
-  .overview-top-grid,
-  .overview-main-grid,
-  .inject-grid,
+  .state-secondary-grid,
   .multi-agent-grid,
-  .risk-panel-grid,
   .risk-highlight-row,
   .risk-related-grid,
   .risk-related-grid.secondary {
     grid-template-columns: 1fr;
   }
 
-  .workspace-topbar {
-    flex-direction: column;
+  .risk-causal-chain {
+    grid-template-columns: 1fr;
   }
 
-  .hero {
+  .risk-causal-arrow {
+    justify-self: center;
+    transform: rotate(90deg);
+  }
+
+}
+
+@media (max-width: 1280px) {
+  .workspace-tabs,
+  .overview-top-grid,
+  .overview-main-grid,
+  .inject-grid,
+  .multi-agent-grid,
+  .risk-highlight-row,
+  .risk-related-grid,
+  .risk-related-grid.secondary {
+    grid-template-columns: 1fr;
+  }
+
+  .risk-causal-chain {
+    grid-template-columns: 1fr;
+  }
+
+  .risk-causal-arrow {
+    justify-self: center;
+    transform: rotate(90deg);
+  }
+
+  .workspace-topbar {
     flex-direction: column;
   }
 }
@@ -4087,7 +5632,400 @@ onUnmounted(() => {
 
   .matrix-head,
   .region-row {
-    grid-template-columns: 1.5fr 1fr repeat(4, minmax(44px, 0.7fr));
+    grid-template-columns: minmax(150px, 1.5fr) repeat(4, minmax(44px, 0.7fr));
   }
+}
+
+/* Step 3 visual contract: shared green system, compact controls, one progress rail. */
+.envfish-step {
+  gap: 12px;
+  padding: 14px 16px 0;
+  color: var(--k-color-text);
+  background: var(--k-color-page);
+}
+
+.runtime-sticky {
+  flex: 0 0 auto;
+  position: relative;
+  gap: 6px;
+  padding-bottom: 6px;
+  background: color-mix(in srgb, var(--k-color-page) 94%, transparent);
+}
+
+.hero,
+.workspace-shell,
+.control-panel,
+.panel,
+.log-shell {
+  border-color: var(--k-color-border);
+  background: var(--k-color-surface);
+  box-shadow: var(--k-shadow-raised);
+}
+
+.runtime-console.runtime-transport {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 10px;
+  min-height: 50px;
+  padding: 7px 8px 7px 12px;
+  border-radius: var(--k-radius-md);
+  box-shadow: none;
+}
+
+.runtime-progress-label {
+  color: var(--k-color-text-secondary);
+  font-size: 12px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.runtime-progress-value {
+  min-width: 38px;
+  color: var(--k-color-text);
+  font-size: 12px;
+  text-align: right;
+}
+
+.runtime-play-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-width: 70px;
+  height: 34px;
+  padding: 0 11px;
+  border-radius: 10px;
+}
+
+.runtime-play-toggle span {
+  width: 10px;
+  font-size: 10px;
+  line-height: 1;
+}
+
+.eyebrow,
+.workspace-eyebrow {
+  color: var(--k-color-brand-600);
+}
+
+.status-card,
+.summary-card,
+.pulse-metric,
+.region-row,
+.event-card,
+.history-card,
+.node-chip {
+  border-color: var(--k-color-border);
+  background: var(--k-color-surface);
+}
+
+.status-card.accent,
+.summary-card.accent {
+  background: var(--k-color-brand-050);
+  border-color: var(--k-color-border-strong);
+}
+
+.status-card strong,
+.runtime-timeline-head strong,
+.summary-card strong,
+.workspace-copy h3,
+.risk-detail h3,
+.panel-title-row h3 {
+  color: var(--k-color-text);
+}
+
+.status-card span,
+.hint,
+.panel-title-row span,
+.summary-card span,
+.summary-card p,
+.runtime-timeline p,
+.region-meta span,
+.event-card p,
+.history-card p,
+.progress-note {
+  color: var(--k-color-text-muted);
+}
+
+.primary-btn,
+.play-control,
+.control-count {
+  background: var(--k-color-brand-600);
+  color: #fff;
+}
+
+.primary-btn:hover,
+.play-control:hover {
+  background: var(--k-color-brand-hover);
+}
+
+.ghost-btn,
+.secondary-btn,
+.preset-btn,
+.icon-control,
+.latest-control,
+.compact-selector select {
+  border-color: var(--k-color-border-strong);
+  background: var(--k-color-surface);
+  color: var(--k-color-text);
+}
+
+.intervention-trigger {
+  background: var(--k-color-brand-050);
+  color: var(--k-color-brand-700);
+}
+
+.compact-range {
+  height: 18px;
+  margin: 0;
+  accent-color: var(--k-color-brand-600);
+  cursor: pointer;
+}
+
+.compact-range:disabled {
+  cursor: default;
+  opacity: 0.55;
+}
+
+.compact-range::-webkit-slider-runnable-track {
+  height: 4px;
+  border-radius: 999px;
+  background: linear-gradient(
+    90deg,
+    var(--k-color-brand-600) 0 var(--range-progress),
+    var(--k-color-surface-muted) var(--range-progress) 100%
+  );
+}
+
+.compact-range::-webkit-slider-thumb {
+  width: 16px;
+  height: 16px;
+  margin-top: -6px;
+  border: 2px solid var(--k-color-surface);
+  border-radius: 50%;
+  background: var(--k-color-brand-600);
+  box-shadow: 0 1px 4px rgba(16, 35, 29, 0.24);
+  -webkit-appearance: none;
+}
+
+.workspace-tabs {
+  gap: 24px;
+  border-color: var(--k-color-border);
+  background: color-mix(in srgb, var(--k-color-page) 94%, transparent);
+}
+
+.workspace-shell {
+  flex: 1 1 0;
+}
+
+.step3-action-bar {
+  flex: 0 0 auto;
+  width: auto;
+  margin: -12px -16px 0;
+}
+
+.workspace-tab,
+.workspace-tab-meta {
+  color: var(--k-color-text-muted);
+}
+
+.workspace-tab:hover,
+.workspace-tab.active {
+  color: var(--k-color-brand-700);
+}
+
+.workspace-tab.active {
+  border-bottom-color: var(--k-color-brand-600);
+}
+
+.interaction-channel,
+.risk-primary-tag,
+.node-label,
+.pill,
+.loop-pill,
+.empty-loop,
+.runtime-status-tag,
+.node-chip-state,
+.node-chip-state.matched {
+  border: 1px solid var(--k-color-border-strong);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--k-color-text-secondary);
+  letter-spacing: 0;
+  text-transform: none;
+}
+
+.bar-fill,
+.progress-fill,
+.subregion-bar-fill,
+.agent-rank-strip-fill {
+  background: var(--k-color-brand-600);
+}
+
+.bar-track,
+.progress-track,
+.subregion-bar,
+.agent-rank-strip {
+  background: var(--k-color-surface-muted);
+}
+
+.subregion-score,
+.agent-rank-score,
+.interaction-round,
+.tension-sparkline,
+.risk-causal-arrow {
+  color: var(--k-color-brand-600);
+}
+
+.risk-causal-node.mechanism,
+.risk-causal-node.consequence {
+  border-color: var(--k-color-border-strong);
+  background: var(--k-color-brand-050);
+}
+
+.risk-step-pills strong,
+.subregion-meta span,
+.agent-rank-meta span,
+.interaction-meta span,
+.runtime-turning-tag,
+.variable-kind-tag {
+  border: 1px solid var(--k-color-border-strong);
+  background: transparent;
+  color: var(--k-color-text-secondary);
+}
+
+.agent-rank-card:hover {
+  border-color: var(--k-color-brand-500);
+  box-shadow: 0 8px 20px rgba(28, 59, 46, 0.08);
+}
+
+.list-expand-btn {
+  color: var(--k-color-brand-600);
+}
+
+.intervention-overlay {
+  background: var(--k-color-overlay);
+}
+
+@container (max-width: 920px) {
+  .step3-workflow-tabs :deep(.k-workflow-tabs__meta) {
+    display: none;
+  }
+
+  .summary-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .multi-agent-grid,
+  .relationship-runtime-grid,
+  .risk-causal-chain,
+  .risk-related-grid,
+  .risk-related-grid.secondary {
+    grid-template-columns: 1fr;
+  }
+
+  .relationship-runtime-grid > section + section {
+    padding-top: 16px;
+    padding-left: 0;
+    border-top: 1px solid rgba(29, 39, 58, 0.08);
+    border-left: 0;
+  }
+
+  .risk-causal-arrow {
+    justify-self: center;
+    transform: rotate(90deg);
+  }
+}
+
+@container (max-width: 620px) {
+  .runtime-console.runtime-transport {
+    grid-template-columns: minmax(0, 1fr) auto auto;
+    padding-left: 10px;
+  }
+
+  .runtime-progress-label {
+    display: none;
+  }
+
+  .runtime-play-toggle {
+    min-width: 64px;
+    padding-inline: 9px;
+  }
+
+  .risk-selector-track {
+    display: grid;
+    grid-auto-columns: minmax(170px, 85%);
+  }
+}
+
+@container (max-width: 520px) {
+  .summary-grid,
+  .relationship-summary-grid,
+  .relationship-state-metrics {
+    grid-template-columns: 1fr;
+  }
+
+  .runtime-ledger-row {
+    grid-template-columns: 1fr;
+  }
+
+  .runtime-ledger-meta {
+    justify-content: flex-start;
+    max-width: none;
+  }
+}
+
+/* Step 3 typography contract: compact controls, readable data, stable titles. */
+.envfish-step3 {
+  font-family: var(--k-font-sans);
+  font-size: var(--k-text-body);
+  line-height: var(--k-leading-body);
+}
+
+.step3-workflow-tabs :deep(.k-workflow-tabs__tab),
+.runtime-play-toggle,
+.primary-btn,
+.secondary-btn,
+.ghost-btn,
+.preset-btn,
+.text-btn {
+  font-size: var(--k-text-ui);
+  line-height: var(--k-leading-ui);
+}
+
+.panel-title-row h3,
+.workspace-copy h3,
+.risk-detail h3 {
+  font-size: var(--k-text-section);
+  line-height: var(--k-leading-ui);
+}
+
+.runtime-progress-label,
+.runtime-progress-value,
+.hint,
+.panel-title-row span,
+.summary-card span,
+.runtime-timeline p,
+.risk-primary-tag {
+  font-size: var(--k-text-meta);
+  line-height: var(--k-leading-ui);
+}
+
+.summary-card strong,
+.pulse-delta-card strong,
+.status-card strong {
+  font-size: var(--k-text-title);
+  line-height: var(--k-leading-tight);
+}
+
+.summary-card p,
+.risk-detail p,
+.node-chip p,
+.cluster-card p,
+.branch-card p,
+.empty-state {
+  font-size: var(--k-text-body);
+  line-height: var(--k-leading-body);
 }
 </style>

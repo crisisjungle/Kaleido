@@ -15,6 +15,7 @@ import { computed, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import KaleidoNavBrand from '../components/KaleidoNavBrand.vue'
 import { restoreGoldenCase } from '../api/goldenCases'
+import { safeDisplayError } from '../utils/displayText'
 
 const route = useRoute()
 const router = useRouter()
@@ -54,7 +55,7 @@ async function restoreDemo() {
     })
   } catch (err) {
     failed.value = true
-    message.value = err?.message || '请确认后端服务已启动，然后重试。'
+    message.value = safeDisplayError(err, '演示暂时无法进入，请稍后重试。')
   }
 }
 

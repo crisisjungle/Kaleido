@@ -18,7 +18,7 @@
           
           <div class="modal-body">
             <div class="legend-section">
-              <h4 class="section-title">卫星模型类别 (Satellite Models)</h4>
+              <h4 class="section-title">卫星模型类别</h4>
               <div v-for="item in satelliteModelItems" :key="item.label" class="legend-row model-row">
                 <span class="model-icon" :class="item.icon" aria-hidden="true">
                   <span class="model-body"></span>
@@ -39,7 +39,7 @@
             </div>
 
             <div class="legend-section">
-              <h4 class="section-title">碎片与云层 (Debris & Clouds)</h4>
+              <h4 class="section-title">碎片与云层</h4>
               <div v-for="item in particleItems" :key="item.label" class="legend-row">
                 <span class="dot" :class="item.type" :style="{ background: item.color }"></span>
                 <div class="text">
@@ -78,7 +78,7 @@ const satelliteModelItems = [
   {
     label: '立方星 / 小卫星',
     icon: 'cubesat',
-    desc: '紧凑盒式平台。代表 CubeSat、小型商业星座和低成本实验卫星。'
+    desc: '紧凑盒式平台。代表立方星、小型商业星座和低成本实验卫星。'
   },
   {
     label: '天线载荷卫星',

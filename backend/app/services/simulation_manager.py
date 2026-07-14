@@ -15,11 +15,23 @@ from datetime import datetime
 from enum import Enum
 from typing import Any, Dict, List, Optional
 
+from ..config import Config
 from ..utils.logger import get_logger
 from ..utils.atomic_file import read_json_file, write_text_file
 from ..models.task import TaskCancelledError
 from .env_profile_generator import EnvProfileGenerator
-from .env_simulation_config_generator import EnvSimulationConfigGenerator, normalize_search_mode
+from .effort_contract import (
+    build_effort_snapshot,
+    effort_operation_limit,
+    normalize_effort_snapshot,
+)
+from .env_simulation_config_generator import (
+    EnvSimulationConfigGenerator,
+    build_mechanism_transport_profile,
+    build_scenario_planner_display_projection,
+    build_scenario_temporal_runtime_projection,
+    normalize_search_mode,
+)
 from .envfish_models import (
     ENVFISH_ENGINE_MODE,
     InjectedVariable,
@@ -40,9 +52,57 @@ from .mechanism_simulation_service import (
 from .risk_artifact_store import write_risk_artifacts
 from .risk_definition_builder import RiskDefinitionBuilder
 from .risk_runtime_tracker import RiskRuntimeTracker
+from .scenario_planning.agent_planner import AgentPlannerV2
 from .zep_entity_reader import EntityNode, FilteredEntities, ZepEntityReader
 
 logger = get_logger("envfish.simulation")
+
+
+def _scenario_model_from_planning_input(
+    scenario_planning_input: Optional[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """Project the Step 2 planning artifact into the runtime scenario header.
+
+    The EventMechanismGraph remains the authoritative mechanism payload.  This
+    compact model only supplies the title/summary metadata expected by the
+    existing runtime and report surfaces; it must never synthesize another
+    mechanism graph.
+    """
+
+    planning = dict(scenario_planning_input or {})
+    graph = dict(planning.get("event_mechanism_graph") or {})
+    events = [
+        dict(item)
+        for item in (planning.get("normalized_user_events") or [])
+        if isinstance(item, dict)
+    ]
+    titles = [str(item.get("name") or "").strip() for item in events]
+    titles = [item for item in titles if item]
+    descriptions = [str(item.get("description") or "").strip() for item in events]
+    descriptions = [item for item in descriptions if item]
+    core_processes = [
+        str(item.get("label_zh") or "").strip()
+        for item in (graph.get("nodes") or [])
+        if isinstance(item, dict) and str(item.get("label_zh") or "").strip()
+    ]
+    model = {
+        "architecture": str(planning.get("simulation_architecture") or "llm_mechanism_v1"),
+        "source": "scenario_planner",
+        "planning_input_id": str(planning.get("planning_input_id") or ""),
+        "planning_content_hash": str(planning.get("content_hash") or ""),
+        "event_mechanism_graph_id": str(graph.get("graph_id") or ""),
+        "scenario_title": " → ".join(titles[:4]) or "Step 2 场景规划",
+        "scenario_summary": "；".join(descriptions[:4]) or "场景由 Step 2 事件机制图定义。",
+        "core_processes": list(dict.fromkeys(core_processes))[:16],
+        "assumptions": list(planning.get("assumptions") or []),
+        "temporal_plan": dict(planning.get("temporal_plan") or {}),
+    }
+    return dict(
+        build_scenario_planner_display_projection(
+            planning,
+            scenario_model=model,
+        )["scenario_model"]
+    )
 
 
 class SimulationStatus(str, Enum):
@@ -82,6 +142,7 @@ class SimulationState:
     configured_minutes_per_round: int = 60
     time_plan_mode: str = "auto"
     time_plan: Dict[str, Any] = field(default_factory=dict)
+    temporal_plan: Dict[str, Any] = field(default_factory=dict)
     reference_time: str = ""
     diffusion_provider: str = "auto"
     status: SimulationStatus = SimulationStatus.CREATED
@@ -96,6 +157,12 @@ class SimulationState:
     primary_risk_object_id: str = ""
     source_mode: str = "graph"
     map_seed_id: Optional[str] = None
+    effort_snapshot: Dict[str, Any] = field(default_factory=dict)
+    semantic_artifact_ref: Dict[str, Any] = field(default_factory=dict)
+    planning_input_id: str = ""
+    planning_content_hash: str = ""
+    agent_plan_source: str = ""
+    prepare_task_id: str = ""
     artifact_mode: str = "live"
     artifact_root: str = ""
     golden_case_id: str = ""
@@ -129,6 +196,7 @@ class SimulationState:
             "configured_minutes_per_round": self.configured_minutes_per_round,
             "time_plan_mode": self.time_plan_mode,
             "time_plan": self.time_plan,
+            "temporal_plan": self.temporal_plan,
             "reference_time": self.reference_time,
             "diffusion_provider": self.diffusion_provider,
             "status": self.status.value,
@@ -143,6 +211,12 @@ class SimulationState:
             "primary_risk_object_id": self.primary_risk_object_id,
             "source_mode": self.source_mode,
             "map_seed_id": self.map_seed_id,
+            "effort_snapshot": self.effort_snapshot,
+            "semantic_artifact_ref": self.semantic_artifact_ref,
+            "planning_input_id": self.planning_input_id,
+            "planning_content_hash": self.planning_content_hash,
+            "agent_plan_source": self.agent_plan_source,
+            "prepare_task_id": self.prepare_task_id,
             "artifact_mode": self.artifact_mode,
             "artifact_root": self.artifact_root,
             "golden_case_id": self.golden_case_id,
@@ -174,6 +248,7 @@ class SimulationState:
             "configured_minutes_per_round": self.configured_minutes_per_round,
             "time_plan_mode": self.time_plan_mode,
             "time_plan": self.time_plan,
+            "temporal_plan": self.temporal_plan,
             "reference_time": self.reference_time,
             "diffusion_provider": self.diffusion_provider,
             "status": self.status.value,
@@ -185,6 +260,11 @@ class SimulationState:
             "primary_risk_object_id": self.primary_risk_object_id,
             "source_mode": self.source_mode,
             "map_seed_id": self.map_seed_id,
+            "effort_snapshot": self.effort_snapshot,
+            "planning_input_id": self.planning_input_id,
+            "planning_content_hash": self.planning_content_hash,
+            "agent_plan_source": self.agent_plan_source,
+            "prepare_task_id": self.prepare_task_id,
             "artifact_mode": self.artifact_mode,
             "artifact_root": self.artifact_root,
             "golden_case_id": self.golden_case_id,
@@ -275,6 +355,7 @@ class SimulationManager:
             configured_minutes_per_round=data.get("configured_minutes_per_round", 60),
             time_plan_mode=data.get("time_plan_mode", "auto"),
             time_plan=data.get("time_plan", {}),
+            temporal_plan=data.get("temporal_plan", {}),
             reference_time=data.get("reference_time", ""),
             diffusion_provider=data.get("diffusion_provider", "auto"),
             status=SimulationStatus(data.get("status", "created")),
@@ -289,6 +370,19 @@ class SimulationManager:
             primary_risk_object_id=data.get("primary_risk_object_id", ""),
             source_mode=data.get("source_mode", "graph"),
             map_seed_id=data.get("map_seed_id"),
+            effort_snapshot=normalize_effort_snapshot(
+                data.get("effort_snapshot")
+                or build_effort_snapshot(
+                    "high",
+                    effort_snapshot_id=f"effort_legacy_{simulation_id}",
+                    locked_at=data.get("created_at") or datetime.now().isoformat(),
+                )
+            ),
+            semantic_artifact_ref=dict(data.get("semantic_artifact_ref") or {}),
+            planning_input_id=data.get("planning_input_id", ""),
+            planning_content_hash=data.get("planning_content_hash", ""),
+            agent_plan_source=data.get("agent_plan_source", ""),
+            prepare_task_id=data.get("prepare_task_id", ""),
             artifact_mode=data.get("artifact_mode", "live"),
             artifact_root=data.get("artifact_root", ""),
             golden_case_id=data.get("golden_case_id", ""),
@@ -302,6 +396,8 @@ class SimulationManager:
             error=data.get("error"),
         )
         self._simulations[simulation_id] = state
+        if not data.get("effort_snapshot"):
+            self._save_simulation_state(state)
         return state
 
     def create_simulation(
@@ -325,6 +421,8 @@ class SimulationManager:
         diffusion_provider: str = "auto",
         source_mode: str = "graph",
         map_seed_id: Optional[str] = None,
+        effort_snapshot: Optional[Dict[str, Any]] = None,
+        semantic_artifact_ref: Optional[Dict[str, Any]] = None,
         artifact_mode: str = "live",
         artifact_root: str = "",
         golden_case_id: str = "",
@@ -365,6 +463,8 @@ class SimulationManager:
             diffusion_provider=diffusion_provider or "auto",
             source_mode=source_mode or "graph",
             map_seed_id=map_seed_id,
+            effort_snapshot=normalize_effort_snapshot(effort_snapshot),
+            semantic_artifact_ref=dict(semantic_artifact_ref or {}),
             artifact_mode=str(artifact_mode or "live"),
             artifact_root=str(artifact_root or ""),
             golden_case_id=str(golden_case_id or ""),
@@ -398,20 +498,46 @@ class SimulationManager:
         target_agent_count: Optional[int] = None,
         search_profile_overrides: Optional[Dict[str, Any]] = None,
         simulation_architecture: str = LEGACY_SIMULATION_ARCHITECTURE,
+        scenario_planning_input: Optional[Dict[str, Any]] = None,
+        agent_plan_source: str = "",
     ) -> SimulationState:
         state = self._load_simulation_state(simulation_id)
         if not state:
-            raise ValueError(f"Simulation not found: {simulation_id}")
+            raise ValueError(f"模拟不存在: {simulation_id}")
 
-        normalized_family = normalize_transport_family(diffusion_template or state.diffusion_template)
-        normalized_time_plan = normalize_time_plan(
-            time_plan,
-            total_rounds=(temporal_profile or {}).get("total_rounds") or state.configured_total_rounds,
-            minutes_per_round=(temporal_profile or {}).get("minutes_per_round") or state.configured_minutes_per_round,
-            preset=(temporal_profile or {}).get("preset") or state.temporal_preset,
-            reference_time=reference_time or state.reference_time,
-            source=time_plan_mode or state.time_plan_mode or "auto",
+        has_scenario_plan = bool(scenario_planning_input)
+        authoritative_temporal_plan = dict(
+            (scenario_planning_input or {}).get("temporal_plan") or {}
         )
+        authoritative_mechanism_graph = dict(
+            (scenario_planning_input or {}).get("event_mechanism_graph") or {}
+        )
+        authoritative_transport_profile: Dict[str, Any] = {}
+        authoritative_time_config: Dict[str, Any] = {}
+        if has_scenario_plan:
+            if not authoritative_temporal_plan:
+                raise ValueError("Step 2 场景规划缺少时间计划")
+            normalized_family = "generic"
+            normalized_time_plan, authoritative_temporal_profile, authoritative_time_config = (
+                build_scenario_temporal_runtime_projection(
+                    authoritative_temporal_plan,
+                    reference_time=reference_time or state.reference_time,
+                )
+            )
+            authoritative_transport_profile = build_mechanism_transport_profile(
+                authoritative_mechanism_graph
+            )
+        else:
+            normalized_family = normalize_transport_family(diffusion_template or state.diffusion_template)
+            normalized_time_plan = normalize_time_plan(
+                time_plan,
+                total_rounds=(temporal_profile or {}).get("total_rounds") or state.configured_total_rounds,
+                minutes_per_round=(temporal_profile or {}).get("minutes_per_round") or state.configured_minutes_per_round,
+                preset=(temporal_profile or {}).get("preset") or state.temporal_preset,
+                reference_time=reference_time or state.reference_time,
+                source=time_plan_mode or state.time_plan_mode or "auto",
+            )
+            authoritative_temporal_profile = {}
         state.status = SimulationStatus.PREPARING
         state.scenario_mode = scenario_mode or state.scenario_mode
         state.simulation_architecture = normalize_simulation_architecture(
@@ -419,13 +545,30 @@ class SimulationManager:
         )
         state.diffusion_template = normalized_family
         state.hazard_template_id = hazard_template_id or state.hazard_template_id or default_hazard_template_for_family(normalized_family)
-        state.hazard_template_mode = hazard_template_mode or state.hazard_template_mode or "auto"
+        state.hazard_template_mode = (
+            "compatibility_projection"
+            if has_scenario_plan
+            else (hazard_template_mode or state.hazard_template_mode or "auto")
+        )
+        if has_scenario_plan:
+            state.hazard_template_reasoning = (
+                "兼容字段，仅供旧运行时识别；复合事件及传播路径以 Step 2 事件机制图为准。"
+            )
+            state.transport_profile = dict(authoritative_transport_profile)
         state.search_mode = normalize_search_mode(search_mode or state.search_mode)
         state.temporal_preset = str(normalized_time_plan.get("preset") or state.temporal_preset or "standard")
-        state.configured_total_rounds = max(4, int(normalized_time_plan.get("total_rounds") or state.configured_total_rounds or 12))
+        state.configured_total_rounds = max(
+            1 if has_scenario_plan else 4,
+            int(normalized_time_plan.get("total_rounds") or state.configured_total_rounds or 12),
+        )
         state.configured_minutes_per_round = max(10, int(normalized_time_plan.get("minutes_per_round") or state.configured_minutes_per_round or 60))
-        state.time_plan_mode = time_plan_mode or state.time_plan_mode or "auto"
+        state.time_plan_mode = (
+            "scenario_planner"
+            if has_scenario_plan
+            else (time_plan_mode or state.time_plan_mode or "auto")
+        )
         state.time_plan = normalized_time_plan
+        state.temporal_plan = dict(authoritative_temporal_plan) if has_scenario_plan else {}
         state.reference_time = str(reference_time or state.reference_time or "")
         state.diffusion_provider = str(diffusion_provider or state.diffusion_provider or "auto")
         state.error = None
@@ -436,8 +579,13 @@ class SimulationManager:
             variables = [InjectedVariable.from_dict(item, default_index=index + 1) for index, item in enumerate(injected_variables or [])]
             state.active_variables_count = len(variables)
             dump_json(os.path.join(sim_dir, "injected_variables.json"), [variable.to_dict() for variable in variables])
+            scenario_plan_path = os.path.join(sim_dir, "scenario_planning_input.json")
+            if scenario_planning_input:
+                dump_json(scenario_plan_path, scenario_planning_input)
+            elif os.path.exists(scenario_plan_path):
+                os.remove(scenario_plan_path)
             if progress_callback:
-                progress_callback("reading", 5, "Connecting to graph...")
+                progress_callback("reading", 5, "正在连接图谱")
 
             if state.source_mode == "map_seed" and state.map_seed_id:
                 filtered = self._load_map_seed_entities(state.map_seed_id, defined_entity_types)
@@ -454,10 +602,10 @@ class SimulationManager:
             self._save_simulation_state(state)
 
             if filtered.filtered_count == 0:
-                raise ValueError("No usable entities found in the graph.")
+                raise ValueError("图谱中没有可用于场景生成的实体")
 
             if progress_callback:
-                progress_callback("reading", 100, f"Loaded {filtered.filtered_count} entities")
+                progress_callback("reading", 100, f"已读取 {filtered.filtered_count} 个可用实体")
 
             generator = EnvProfileGenerator()
             profiles_full_path = os.path.join(sim_dir, "profiles_full.json")
@@ -492,6 +640,20 @@ class SimulationManager:
             profile_map_seed_id = (
                 state.map_seed_id if state.source_mode == "map_seed" else None
             )
+            planned_agent_limit = int(
+                effort_operation_limit(
+                    state.effort_snapshot,
+                    "step2",
+                    "planned_agent_limit",
+                )
+            )
+            relationship_candidates_per_agent = int(
+                effort_operation_limit(
+                    state.effort_snapshot,
+                    "step2",
+                    "relationship_candidates_per_agent",
+                )
+            )
 
             result = generator.generate_from_entities(
                 entities=filtered.entities,
@@ -508,16 +670,183 @@ class SimulationManager:
                 profile_created_callback=profile_created,
                 parallel_count=parallel_profile_count,
                 target_agent_count=target_agent_count,
+                max_agent_count=planned_agent_limit,
+                relationship_candidates_per_agent=relationship_candidates_per_agent,
                 map_seed_id=profile_map_seed_id,
             )
+
+            result.generation_summary = {
+                **(result.generation_summary or {}),
+                "effort_limits": {
+                    "planned_agent_limit": planned_agent_limit,
+                    "relationship_candidates_per_agent": relationship_candidates_per_agent,
+                },
+            }
+
+            if agent_plan_source:
+                result.generation_summary = {
+                    **(result.generation_summary or {}),
+                    "agent_plan_source": agent_plan_source,
+                }
 
             state.profiles_count = len(result.profiles)
             state.region_count = len(result.regions)
 
             mechanism_artifacts = None
-            if is_llm_mechanism_architecture(state.simulation_architecture):
+            has_scenario_plan = bool(scenario_planning_input)
+            authoritative_mechanism_graph: Dict[str, Any] = {}
+            authoritative_scenario_model: Dict[str, Any] = {}
+            authoritative_agent_blueprints: List[Dict[str, Any]] = []
+            authoritative_validated_relation_graph: Dict[str, Any] = {}
+            authoritative_scenario_state_schema: Dict[str, Any] = {}
+            authoritative_simulation_audit: Dict[str, Any] = {}
+            agent_plan_artifact: Dict[str, Any] = {}
+            agent_placement_plan: Dict[str, Any] = {}
+            resolution_plan: Dict[str, Any] = {}
+            policy_execution_plan: Dict[str, Any] = {}
+            spatial_anchor_candidates: List[Dict[str, Any]] = []
+            normalized_role_demands: List[Dict[str, Any]] = list(
+                (scenario_planning_input or {}).get("role_demands") or []
+            )
+            agent_archetypes_v2: List[Dict[str, Any]] = []
+
+            if has_scenario_plan:
+                # Step 2's EventMechanismGraph is the sole scenario fact source.
+                # The older mechanism planner used to run afterwards and replace
+                # this graph with a second LLM-generated interpretation.  That
+                # made config, risks and runtime disagree with the reviewed
+                # Step 2 artifact, so a supplied plan now bypasses it entirely.
+                authoritative_mechanism_graph = dict(
+                    (scenario_planning_input or {}).get("event_mechanism_graph") or {}
+                )
+                authoritative_scenario_model = _scenario_model_from_planning_input(
+                    scenario_planning_input
+                )
+                authoritative_simulation_audit = {
+                    "mechanism_graph_source": "scenario_planner",
+                    "temporal_plan_source": "scenario_planner",
+                    "transport_plan_source": "event_mechanism_graph",
+                    "hazard_template_role": "legacy_projection",
+                    "propagation_media": list(
+                        authoritative_transport_profile.get("propagation_media") or []
+                    ),
+                    "planning_input_id": str(
+                        (scenario_planning_input or {}).get("planning_input_id") or ""
+                    ),
+                    "planning_content_hash": str(
+                        (scenario_planning_input or {}).get("content_hash") or ""
+                    ),
+                    "legacy_mechanism_planner_used": False,
+                    "说明": "配置、风险定义与运行时共同使用 Step 2 已审阅的事件机制图。",
+                }
+                dump_json(
+                    os.path.join(sim_dir, "mechanism_graph.json"),
+                    authoritative_mechanism_graph,
+                )
+                dump_json(
+                    os.path.join(sim_dir, "temporal_plan.json"),
+                    authoritative_temporal_plan,
+                )
+                dump_json(
+                    os.path.join(sim_dir, "scenario_model.json"),
+                    authoritative_scenario_model,
+                )
+                dump_json(
+                    os.path.join(sim_dir, "simulation_audit.json"),
+                    authoritative_simulation_audit,
+                )
+                result.generation_summary = {
+                    **(result.generation_summary or {}),
+                    "simulation_architecture": state.simulation_architecture,
+                    "mechanism_graph_source": "scenario_planner",
+                    "mechanism_node_count": len(
+                        authoritative_mechanism_graph.get("nodes") or []
+                    ),
+                    "mechanism_edge_count": len(
+                        authoritative_mechanism_graph.get("edges") or []
+                    ),
+                }
+
                 if progress_callback:
-                    progress_callback("generating_config", 4, "Discovering scenario mechanisms...", current=1, total=4)
+                    progress_callback(
+                        "generating_profiles",
+                        92,
+                        "正在匹配角色需求、空间锚点与代理体档案",
+                    )
+                agent_planning = AgentPlannerV2().plan(
+                    candidate_profiles=result.profiles,
+                    entities=filtered.entities,
+                    regions=result.regions,
+                    subregions=result.subregions,
+                    role_demands=(scenario_planning_input or {}).get("role_demands") or [],
+                    mechanism_graph=authoritative_mechanism_graph,
+                    policy_plan=(scenario_planning_input or {}).get("policy_plan") or [],
+                    effort_snapshot=state.effort_snapshot,
+                    planning_input_ref=scenario_planning_input or {},
+                )
+                result.profiles = list(agent_planning.profiles)
+                result.agent_relationships = list(agent_planning.relationships)
+                result.region_agent_index = generator.rebuild_region_agent_index(
+                    regions=result.regions,
+                    subregions=result.subregions,
+                    profiles=result.profiles,
+                )
+                result.generation_summary = {
+                    **(result.generation_summary or {}),
+                    **agent_planning.generation_summary,
+                }
+                authoritative_agent_blueprints = list(agent_planning.agent_archetypes)
+                authoritative_validated_relation_graph = dict(
+                    agent_planning.validated_relation_graph
+                )
+                agent_plan_artifact = dict(agent_planning.agent_plan)
+                agent_placement_plan = dict(agent_planning.placement_plan)
+                resolution_plan = dict(agent_planning.resolution_plan)
+                policy_execution_plan = dict(agent_planning.policy_execution_plan)
+                spatial_anchor_candidates = list(
+                    agent_planning.spatial_anchor_candidates
+                )
+                normalized_role_demands = list(agent_planning.role_demands)
+                agent_archetypes_v2 = list(agent_planning.agent_archetypes)
+                agent_plan_source = "agent_v2"
+                state.agent_plan_source = agent_plan_source
+                state.profiles_count = len(result.profiles)
+                authoritative_simulation_audit.update({
+                    "agent_plan_source": agent_plan_source,
+                    "agent_plan_id": str(agent_plan_artifact.get("agent_plan_id") or ""),
+                    "agent_plan_contract_version": str(
+                        agent_plan_artifact.get("contract_version") or ""
+                    ),
+                    "target_agent_count_used": False,
+                    "policy_execution_summary": dict(
+                        policy_execution_plan.get("summary") or {}
+                    ),
+                })
+                dump_json(os.path.join(sim_dir, "agent_plan.json"), agent_plan_artifact)
+                dump_json(
+                    os.path.join(sim_dir, "agent_placement_plan.json"),
+                    agent_placement_plan,
+                )
+                dump_json(os.path.join(sim_dir, "resolution_plan.json"), resolution_plan)
+                dump_json(
+                    os.path.join(sim_dir, "policy_execution_plan.json"),
+                    policy_execution_plan,
+                )
+                dump_json(
+                    os.path.join(sim_dir, "spatial_anchor_candidates.json"),
+                    spatial_anchor_candidates,
+                )
+                dump_json(
+                    os.path.join(sim_dir, "agent_archetypes_v2.json"),
+                    agent_archetypes_v2,
+                )
+                dump_json(
+                    os.path.join(sim_dir, "simulation_audit.json"),
+                    authoritative_simulation_audit,
+                )
+            elif is_llm_mechanism_architecture(state.simulation_architecture):
+                if progress_callback:
+                    progress_callback("generating_config", 4, "正在识别场景机制...", current=1, total=4)
                 mechanism_artifacts = MechanismSimulationPlanner().build_prepare_artifacts(
                     sim_dir=sim_dir,
                     simulation_id=simulation_id,
@@ -544,6 +873,16 @@ class SimulationManager:
                     "mechanism_fallback_used": bool(mechanism_artifacts.simulation_audit.get("fallback_used")),
                     "mechanism_quality_flags": list(mechanism_artifacts.simulation_audit.get("quality_flags") or []),
                 }
+                authoritative_mechanism_graph = dict(mechanism_artifacts.mechanism_graph or {})
+                authoritative_scenario_model = dict(mechanism_artifacts.scenario_model or {})
+                authoritative_agent_blueprints = list(mechanism_artifacts.agent_blueprints or [])
+                authoritative_validated_relation_graph = dict(
+                    mechanism_artifacts.validated_relation_graph or {}
+                )
+                authoritative_scenario_state_schema = dict(
+                    mechanism_artifacts.scenario_state_schema or {}
+                )
+                authoritative_simulation_audit = dict(mechanism_artifacts.simulation_audit or {})
 
             dump_json(os.path.join(sim_dir, "region_graph_snapshot.json"), [region.to_dict() for region in result.regions])
             dump_json(os.path.join(sim_dir, "subregion_graph_snapshot.json"), [region.to_dict() for region in result.subregions])
@@ -562,12 +901,15 @@ class SimulationManager:
 
             risk_builder = RiskDefinitionBuilder()
             risk_result = risk_builder.build(
+                risk_contract_version=Config.RISK_OBJECT_CONTRACT_VERSION,
                 simulation_requirement=simulation_requirement,
                 document_text=document_text,
                 entities=filtered.entities,
                 regions=result.regions,
                 subregions=result.subregions,
                 profiles=result.profiles,
+                agent_relationships=result.agent_relationships,
+                transport_edges=result.transport_edges,
                 injected_variables=variables,
                 scenario_mode=state.scenario_mode,
                 diffusion_template=state.diffusion_template,
@@ -577,6 +919,20 @@ class SimulationManager:
                     "total_rounds": state.configured_total_rounds,
                     "minutes_per_round": state.configured_minutes_per_round,
                 },
+                mechanism_graph=authoritative_mechanism_graph,
+                validated_relation_graph=authoritative_validated_relation_graph,
+                scenario_state_schema=authoritative_scenario_state_schema,
+                data_grounding_summary=result.grounding_summary,
+                agent_plan=agent_plan_artifact,
+                role_demands=normalized_role_demands,
+                candidate_scan_limit=int(
+                    effort_operation_limit(
+                        state.effort_snapshot,
+                        "step2",
+                        "risk_candidate_scan_limit",
+                    )
+                ),
+                max_active_risks=8,
             )
             runtime_tracker = RiskRuntimeTracker()
             latest_risk_runtime_state = runtime_tracker.build_initial_bundle(
@@ -591,6 +947,9 @@ class SimulationManager:
                 generation_notes=risk_result.generation_notes,
                 risk_events=[],
                 rewrite_runtime_history=[latest_risk_runtime_state],
+                risk_contract_version=risk_result.risk_contract_version,
+                generation_audit=risk_result.generation_audit,
+                candidate_ledger=risk_result.candidate_ledger,
             )
             state.risk_objects_count = len(risk_artifacts["risk_objects"])
             state.primary_risk_object_id = (
@@ -599,7 +958,7 @@ class SimulationManager:
             )
 
             if progress_callback:
-                progress_callback("generating_config", 10, "Synthesizing EnvFish config...", current=1, total=3)
+                progress_callback("generating_config", 10, "正在生成推演配置...", current=1, total=3)
 
             config_generator = EnvSimulationConfigGenerator()
             config = config_generator.generate_config(
@@ -633,21 +992,76 @@ class SimulationManager:
                 search_profile_overrides=search_profile_overrides,
                 data_grounding_summary=result.grounding_summary,
                 risk_definitions=risk_artifacts["risk_definitions"],
+                risk_contract_version=risk_result.risk_contract_version,
+                risk_generation_audit=risk_result.generation_audit,
                 latest_risk_runtime_state=risk_artifacts["latest_risk_runtime_state"],
                 risk_objects=risk_artifacts["risk_objects"],
                 primary_risk_object_id=state.primary_risk_object_id,
                 primary_active_risk_id=risk_artifacts["latest_risk_runtime_state"].get("primary_active_risk_id", ""),
                 simulation_architecture=state.simulation_architecture,
-                scenario_model=mechanism_artifacts.scenario_model if mechanism_artifacts else None,
-                mechanism_graph=mechanism_artifacts.mechanism_graph if mechanism_artifacts else None,
-                agent_blueprints=mechanism_artifacts.agent_blueprints if mechanism_artifacts else None,
-                validated_relation_graph=mechanism_artifacts.validated_relation_graph if mechanism_artifacts else None,
-                simulation_audit=mechanism_artifacts.simulation_audit if mechanism_artifacts else None,
-                scenario_state_schema=mechanism_artifacts.scenario_state_schema if mechanism_artifacts else None,
+                scenario_model=authoritative_scenario_model,
+                mechanism_graph=authoritative_mechanism_graph,
+                agent_blueprints=authoritative_agent_blueprints,
+                validated_relation_graph=authoritative_validated_relation_graph,
+                simulation_audit=authoritative_simulation_audit,
+                scenario_state_schema=authoritative_scenario_state_schema,
+                scenario_planning_input=scenario_planning_input,
             )
+            # Keep the final persisted config pinned to the reviewed planning
+            # artifact even if a legacy config generator applies defaults.
+            config.scenario_model = dict(authoritative_scenario_model)
+            config.mechanism_graph = dict(authoritative_mechanism_graph)
+            config.agent_blueprints = list(authoritative_agent_blueprints)
+            config.validated_relation_graph = dict(authoritative_validated_relation_graph)
+            config.simulation_audit = dict(authoritative_simulation_audit)
+            config.scenario_state_schema = dict(authoritative_scenario_state_schema)
+            config.effort_snapshot = dict(state.effort_snapshot or {})
+            config.scenario_planning_input = dict(scenario_planning_input or {})
+            config.agent_plan_source = str(agent_plan_source or "")
+            config.agent_plan_contract_version = str(
+                agent_plan_artifact.get("contract_version") or ""
+            )
+            config.agent_plan = dict(agent_plan_artifact)
+            config.agent_placement_plan = dict(agent_placement_plan)
+            config.resolution_plan = dict(resolution_plan)
+            config.spatial_anchor_candidates = list(spatial_anchor_candidates)
+            config.role_demands = list(normalized_role_demands)
+            if agent_archetypes_v2:
+                config.agent_archetypes = list(agent_archetypes_v2)
+            config.policy_plan = list((scenario_planning_input or {}).get("policy_plan") or [])
+            config.policy_execution_plan = dict(policy_execution_plan)
+            if has_scenario_plan:
+                config.temporal_plan = dict(authoritative_temporal_plan)
+                config.time_plan = dict(normalized_time_plan)
+                config.temporal_profile = dict(authoritative_temporal_profile)
+                config.time_config = dict(authoritative_time_config)
+                config.time_plan_mode = "scenario_planner"
+                config.transport_profile = dict(authoritative_transport_profile)
+                config.diffusion_template = "generic"
+                config.hazard_template_mode = "compatibility_projection"
+                config.hazard_template_reasoning = state.hazard_template_reasoning
+                config.hazard_template_recommendation = {
+                    "hazard_template_id": config.hazard_template_id,
+                    "authoritative": False,
+                    "projection_only": True,
+                    "mechanism_graph_id": str(
+                        authoritative_mechanism_graph.get("graph_id") or ""
+                    ),
+                    "propagation_media": list(
+                        authoritative_transport_profile.get("propagation_media") or []
+                    ),
+                    "reasoning_summary": state.hazard_template_reasoning,
+                }
+                config.round_policies = {
+                    **dict(config.round_policies or {}),
+                    "diffusion_decay": authoritative_transport_profile.get("default_decay", 0.88),
+                    "default_lag_rounds": authoritative_transport_profile.get("default_lag_rounds", 1),
+                    "default_persistence": authoritative_transport_profile.get("default_persistence", 55),
+                    "max_neighbor_spread": authoritative_transport_profile.get("max_neighbor_spread", 2),
+                }
 
             if progress_callback:
-                progress_callback("generating_config", 70, "Saving simulation config...", current=2, total=3)
+                progress_callback("generating_config", 70, "正在保存推演配置", current=2, total=3)
 
             write_text_file(os.path.join(sim_dir, "simulation_config.json"), config.to_json())
 
@@ -663,12 +1077,16 @@ class SimulationManager:
             state.configured_minutes_per_round = int(config.temporal_profile.get("minutes_per_round", state.configured_minutes_per_round))
             state.time_plan_mode = config.time_plan_mode or state.time_plan_mode
             state.time_plan = dict(config.time_plan or state.time_plan)
+            state.temporal_plan = dict(config.temporal_plan or state.temporal_plan)
             state.diffusion_template = config.diffusion_template or state.diffusion_template
+            state.planning_input_id = str((scenario_planning_input or {}).get("planning_input_id") or "")
+            state.planning_content_hash = str((scenario_planning_input or {}).get("content_hash") or "")
+            state.agent_plan_source = str(agent_plan_source or "")
             state.status = SimulationStatus.READY
             state.error = None
 
             if progress_callback:
-                progress_callback("generating_config", 100, "EnvFish config ready", current=3, total=3)
+                progress_callback("generating_config", 100, "推演配置已生成", current=3, total=3)
 
             self._save_simulation_state(state)
             logger.info(
@@ -697,7 +1115,7 @@ class SimulationManager:
     ) -> FilteredEntities:
         graph_snapshot = MapSeedManager.get_graph_snapshot(map_seed_id)
         if not graph_snapshot:
-            raise ValueError(f"Map seed graph snapshot missing: {map_seed_id}")
+            raise ValueError(f"地图种子缺少图谱快照: {map_seed_id}")
 
         graph_data = graph_snapshot.get("graph_data") or graph_snapshot
         nodes = list(graph_data.get("nodes") or [])
@@ -792,7 +1210,7 @@ class SimulationManager:
     def get_profiles(self, simulation_id: str, platform: str = "reddit") -> List[Dict[str, Any]]:
         state = self._load_simulation_state(simulation_id)
         if not state:
-            raise ValueError(f"Simulation not found: {simulation_id}")
+            raise ValueError(f"模拟不存在: {simulation_id}")
 
         sim_dir = self.resolve_artifact_dir(state, create_if_missing=False)
         if not sim_dir:

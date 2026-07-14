@@ -15,6 +15,7 @@ from app.services.scene_material_generator import (
     _normalize_initial_variables,
     _split_variables_by_role,
 )
+from app.services.semantic_input import SemanticInputNormalizer
 
 
 def _generator():
@@ -69,10 +70,8 @@ def test_bare_observation_without_change_semantics_is_demoted():
     assert roles["限行政策"] == "perturbation"
 
 
-def test_fallback_skeleton_labels_missing_sections_and_omits_fabricated_prose():
-    """The no-LLM fallback must be an honest skeleton: it labels synthesis sections
-    as not-generated and must NOT contain the old fabricated generic relationship /
-    subject / metric prose that downstream extraction would treat as fact."""
+def test_deterministic_report_returns_business_content_without_processing_status():
+    """The deterministic path returns source-grounded business content only."""
     gen = _generator()
     assert gen.llm_client is None  # no-LLM path guaranteed
 
@@ -98,15 +97,21 @@ def test_fallback_skeleton_labels_missing_sections_and_omits_fabricated_prose():
         "created_at": "2026-06-15T00:00:00",
     }
 
-    generated = gen._fallback_generate(input_bundle)
+    semantic_artifact = SemanticInputNormalizer(use_llm=False).normalize_scene(payload={
+        "location": input_bundle["location"],
+        "time_scope": input_bundle["time_scope"],
+        "event_or_baseline": input_bundle["event_or_baseline"],
+        "known_entities": input_bundle["known_entities"],
+        "initial_variables": input_bundle["initial_variables"],
+    })
+    generated = gen._fallback_generate(input_bundle, semantic_artifact)
     report = generated["report_markdown"]
 
-    # Honest skeleton marker present, and synthesis sections are explicitly labeled.
+    # Processing state remains internal and never becomes report copy.
     assert generated.get("fallback_mode") == "honest_skeleton"
-    assert smg.SceneMaterialGenerator._LLM_REQUIRED_SECTION_LABEL in report
-    assert "关键关系网络" in report
-    # The relation section line must carry the not-generated label, not real prose.
-    assert "## 7. 关键关系网络: 未生成（需 LLM）" in report
+    assert "未生成" not in report
+    assert "LLM" not in report
+    assert "污染泄漏" in report
 
     # The OLD fabricated generic prose must be gone (would pollute downstream facts).
     fabricated_phrases = [
@@ -119,7 +124,7 @@ def test_fallback_skeleton_labels_missing_sections_and_omits_fabricated_prose():
     for phrase in fabricated_phrases:
         assert phrase not in report, f"fallback still fabricates: {phrase}"
 
-    # User-confirmed input IS echoed (the only thing the skeleton is allowed to assert).
+    # User-confirmed input is preserved as source-grounded business content.
     assert "测试湖区" in report
     assert "湖区管理处" in report
 
@@ -127,9 +132,8 @@ def test_fallback_skeleton_labels_missing_sections_and_omits_fabricated_prose():
     assert any(v["name"] == "污染泄漏" for v in generated["initial_variables"])
 
 
-def test_compose_no_llm_persists_honest_skeleton(monkeypatch, tmp_path):
-    """End-to-end no-LLM compose() yields a seed whose initial_variables passed the
-    gate and whose report is the honest skeleton (additive keys present)."""
+def test_compose_no_llm_persists_editable_business_result(monkeypatch, tmp_path):
+    """End-to-end deterministic compose persists an editable semantic result."""
     seeds_dir = os.path.join(str(tmp_path), "scene_seeds")
     monkeypatch.setattr(SceneMaterialGenerator, "SCENE_SEEDS_DIR", seeds_dir)
 
@@ -151,7 +155,9 @@ def test_compose_no_llm_persists_honest_skeleton(monkeypatch, tmp_path):
     assert "基线湿度" in context_names
 
     assert seed.get("fallback_mode") == "honest_skeleton"
-    assert SceneMaterialGenerator._LLM_REQUIRED_SECTION_LABEL in seed["report_markdown"]
+    assert "未生成" not in seed["report_markdown"]
+    assert "LLM" not in seed["report_markdown"]
+    assert seed["semantic_artifact_ref"]["contract_version"] == "semantic-input.v1"
 
     # Seed was persisted and is re-readable via the public accessor.
     reloaded = SceneMaterialGenerator.get_seed(seed["scene_id"])

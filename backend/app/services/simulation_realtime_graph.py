@@ -61,6 +61,7 @@ class SimulationRealtimeGraphBuilder:
         transport_edges = self._load_json("transport_edges.json", [])
         latest_snapshot = self._load_json("latest_round_snapshot.json", {}) or {}
         simulation_config = self._load_json("simulation_config.json", {})
+        mechanism_graph = self._load_json("mechanism_graph.json", {}) or {}
 
         # Fallback to config if prepare snapshots are not ready yet.
         if not regions:
@@ -73,6 +74,8 @@ class SimulationRealtimeGraphBuilder:
             transport_edges = list(simulation_config.get("transport_edges") or [])
         if not profiles:
             profiles = self._profiles_from_config(simulation_config)
+        if not mechanism_graph:
+            mechanism_graph = dict(simulation_config.get("mechanism_graph") or {})
 
         dynamic_edges = list(latest_snapshot.get("dynamic_edges") or [])
         latest_agents = list(latest_snapshot.get("agents") or [])
@@ -82,6 +85,8 @@ class SimulationRealtimeGraphBuilder:
         node_ids: Set[str] = set()
         edge_ids: Set[str] = set()
         agent_node_by_id: Dict[int, str] = {}
+        mechanism_nodes = list(mechanism_graph.get("nodes") or [])
+        mechanism_edges = list(mechanism_graph.get("edges") or [])
 
         for region in regions:
             node_id = self._region_node_id(region.get("region_id"))
@@ -91,7 +96,7 @@ class SimulationRealtimeGraphBuilder:
             nodes.append(
                 {
                     "uuid": node_id,
-                    "name": region.get("name") or region.get("region_id") or "Region",
+                    "name": region.get("name") or "未命名区域",
                     "labels": ["Entity", "Region"],
                     "summary": region.get("description") or "",
                     "attributes": {
@@ -113,7 +118,7 @@ class SimulationRealtimeGraphBuilder:
             nodes.append(
                 {
                     "uuid": node_id,
-                    "name": subregion.get("name") or subregion.get("region_id") or "Subregion",
+                    "name": subregion.get("name") or "未命名子区域",
                     "labels": ["Entity", "Region", "Subregion"],
                     "summary": subregion.get("description") or "",
                     "attributes": {
@@ -129,6 +134,29 @@ class SimulationRealtimeGraphBuilder:
                 }
             )
 
+        for mechanism_node in mechanism_nodes:
+            node_id = str(mechanism_node.get("id") or mechanism_node.get("node_id") or "").strip()
+            if not node_id or node_id in node_ids:
+                continue
+            node_type = str(mechanism_node.get("node_type") or mechanism_node.get("type") or "process").strip().lower()
+            node_ids.add(node_id)
+            nodes.append(
+                {
+                    "uuid": node_id,
+                    "name": mechanism_node.get("name") or mechanism_node.get("label") or "未命名机制节点",
+                    "labels": ["Entity", "MechanismNode", f"mechanism_{node_type}"],
+                    "summary": mechanism_node.get("description") or "",
+                    "attributes": {
+                        "mechanism_node_id": node_id,
+                        "node_type": node_type,
+                        "confidence": mechanism_node.get("confidence"),
+                        "evidence": list(mechanism_node.get("evidence") or []),
+                        "origin": "mechanism_graph",
+                        "map_hidden": True,
+                    },
+                }
+            )
+
         for profile in profiles:
             agent_id = self._to_int(profile.get("agent_id"))
             if agent_id is None:
@@ -139,10 +167,11 @@ class SimulationRealtimeGraphBuilder:
             node_ids.add(node_id)
             agent_node_by_id[agent_id] = node_id
             labels = self._agent_labels(profile)
+            runtime_lifecycle = dict(profile.get("runtime_lifecycle") or {})
             nodes.append(
                 {
                     "uuid": node_id,
-                    "name": profile.get("name") or profile.get("username") or f"Agent {agent_id}",
+                    "name": profile.get("name") or profile.get("username") or f"代理体 {agent_id}",
                     "labels": labels,
                     "summary": profile.get("bio") or profile.get("persona") or "",
                     "attributes": {
@@ -156,6 +185,12 @@ class SimulationRealtimeGraphBuilder:
                         "home_subregion_id": profile.get("home_subregion_id"),
                         "primary_region": profile.get("primary_region"),
                         "is_synthesized": bool(profile.get("is_synthesized")),
+                        "generation_mode": profile.get("generation_mode"),
+                        "runtime_lifecycle": runtime_lifecycle,
+                        "created_round": runtime_lifecycle.get("created_round"),
+                        "activation_round": runtime_lifecycle.get("activation_round"),
+                        "lifecycle_status": runtime_lifecycle.get("lifecycle_status") or "active",
+                        "parent_agent_id": runtime_lifecycle.get("parent_agent_id"),
                         "source_entity_uuid": profile.get("source_entity_uuid"),
                         "lat": profile.get("lat"),
                         "lon": profile.get("lon"),
@@ -180,7 +215,7 @@ class SimulationRealtimeGraphBuilder:
             nodes.append(
                 {
                     "uuid": node_id,
-                    "name": actor.get("name") or actor.get("agent_name") or f"Agent {agent_id}",
+                    "name": actor.get("name") or actor.get("agent_name") or f"代理体 {agent_id}",
                     "labels": labels,
                     "summary": "",
                     "attributes": {
@@ -256,6 +291,40 @@ class SimulationRealtimeGraphBuilder:
                     "strength": edge.get("strength"),
                     "confidence": edge.get("confidence"),
                 },
+            )
+
+        mechanism_status_by_id = self._mechanism_epistemic_index(relationships)
+        for mechanism_edge in mechanism_edges:
+            edge_id = str(mechanism_edge.get("id") or mechanism_edge.get("edge_id") or "").strip()
+            source_id = str(mechanism_edge.get("source") or mechanism_edge.get("source_id") or "").strip()
+            target_id = str(mechanism_edge.get("target") or mechanism_edge.get("target_id") or "").strip()
+            if not edge_id or source_id not in node_ids or target_id not in node_ids:
+                continue
+            evidence = list(mechanism_edge.get("evidence") or [])
+            self._append_edge(
+                edges=edges,
+                edge_ids=edge_ids,
+                edge_id=edge_id,
+                source_node_uuid=source_id,
+                target_node_uuid=target_id,
+                name=mechanism_edge.get("relation_label") or mechanism_edge.get("label") or "机制传导",
+                fact_type="mechanism_edge",
+                fact=mechanism_edge.get("mechanism") or "",
+                attributes={
+                    "mechanism_edge_id": edge_id,
+                    "mechanism": mechanism_edge.get("mechanism") or "",
+                    "trigger_conditions": list(mechanism_edge.get("trigger_conditions") or []),
+                    "latency": mechanism_edge.get("latency"),
+                    "direction": mechanism_edge.get("direction"),
+                    "scope": mechanism_edge.get("scope"),
+                    "evidence": evidence,
+                    "confidence": mechanism_edge.get("confidence"),
+                    "origin": "mechanism_graph",
+                    "epistemic_status": mechanism_status_by_id.get(edge_id) or ("inferred" if mechanism_edge.get("mechanism") else "speculative"),
+                    "kind": "mechanism_path",
+                    "map_hidden": True,
+                },
+                edge_layer="causal",
             )
 
         for profile in profiles:
@@ -378,6 +447,8 @@ class SimulationRealtimeGraphBuilder:
                 "agent_count": len(agent_node_by_id),
                 "relationship_count": len(relationships),
                 "dynamic_edge_count": len(dynamic_edges),
+                "mechanism_node_count": len([item for item in mechanism_nodes if str(item.get("id") or item.get("node_id") or "").strip() in node_ids]),
+                "mechanism_edge_count": len([item for item in edges if item.get("fact_type") == "mechanism_edge"]),
                 "node_count": len(nodes),
                 "edge_count": len(edges),
                 # Additive: lets the frontend separate skeleton from coupling.
@@ -385,6 +456,26 @@ class SimulationRealtimeGraphBuilder:
                 "causal_edge_count": causal_edge_count,
             },
         }
+
+    def _mechanism_epistemic_index(self, relationships: List[Dict[str, Any]]) -> Dict[str, str]:
+        ranks = {"speculative": 0, "inferred": 1, "observed": 2}
+        result: Dict[str, str] = {}
+        for relationship in relationships:
+            status = str(relationship.get("epistemic_status") or "").strip().lower()
+            validation = str(relationship.get("validation_status") or "").strip().lower()
+            origin = str(relationship.get("origin") or "").strip().lower()
+            if "fallback" in validation or "fallback" in origin:
+                status = "speculative"
+            if status not in ranks:
+                status = "inferred" if relationship.get("mechanism") else "speculative"
+            for mechanism_edge_id in relationship.get("mechanism_edge_ids") or []:
+                edge_id = str(mechanism_edge_id or "").strip()
+                if not edge_id:
+                    continue
+                current = result.get(edge_id)
+                if current is None or ranks[status] > ranks[current]:
+                    result[edge_id] = status
+        return result
 
     def _load_json(self, filename: str, fallback: Any) -> Any:
         path = os.path.join(self.sim_dir, filename)

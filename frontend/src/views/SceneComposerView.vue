@@ -3,7 +3,14 @@
     <header class="topbar">
       <KaleidoNavBrand to="/" />
 
-      <WorkflowStepMenu :current-step="1" current-name="背景生成" />
+      <div class="topbar-meta">
+        <WorkflowStepMenu :current-step="1" current-name="背景定义" />
+        <span class="topbar-divider" aria-hidden="true"></span>
+        <span class="scene-status" :class="`is-${stepStatusTone}`">
+          <span class="scene-status-dot" aria-hidden="true"></span>
+          {{ stepStatusText }}
+        </span>
+      </div>
     </header>
 
     <main class="workspace-shell" :class="{ 'report-finished-layout': reportStepDone }">
@@ -102,7 +109,65 @@
             <div class="setup-actions">
               <p v-if="message" class="message">{{ message }}</p>
 
-              <div class="button-row">
+              <div class="button-row setup-action-row">
+                <details ref="effortMenuRef" class="effort-menu" @keydown.esc.stop="closeEffortMenu">
+                  <summary
+                    class="effort-trigger"
+                    :title="`分析强度：${effortLabel}`"
+                    :aria-label="`分析强度：${effortLabel}`"
+                  >
+                    <svg class="brain-icon" aria-hidden="true" viewBox="0 0 24 24" fill="none">
+                      <path d="M9.5 4A2.5 2.5 0 0 1 12 6.5v11a2.5 2.5 0 0 1-4.96.44A2.5 2.5 0 0 1 6.5 13H6a2.5 2.5 0 0 1-.8-4.87A3 3 0 0 1 9.5 4Z" />
+                      <path d="M14.5 4A2.5 2.5 0 0 0 12 6.5v11a2.5 2.5 0 0 0 4.96.44A2.5 2.5 0 0 0 17.5 13h.5a2.5 2.5 0 0 0 .8-4.87A3 3 0 0 0 14.5 4Z" />
+                      <path d="M9 13h3M12 6.5h2M6.5 13H9M5.2 8.13H8M14 17.5h3M14 13h3.5M14 8.5h4" />
+                    </svg>
+                    <span class="effort-trigger-label">分析强度</span>
+                    <span class="effort-trigger-value">{{ effortLabel }}</span>
+                    <svg class="effort-chevron" aria-hidden="true" viewBox="0 0 16 16" fill="none">
+                      <path d="m4 6 4 4 4-4" />
+                    </svg>
+                  </summary>
+
+                  <div class="effort-popover" @click.stop>
+                    <div class="effort-popover-head">
+                      <span>分析强度</span>
+                      <span class="effort-current-level">
+                        <svg class="brain-icon" aria-hidden="true" viewBox="0 0 24 24" fill="none">
+                          <path d="M9.5 4A2.5 2.5 0 0 1 12 6.5v11a2.5 2.5 0 0 1-4.96.44A2.5 2.5 0 0 1 6.5 13H6a2.5 2.5 0 0 1-.8-4.87A3 3 0 0 1 9.5 4Z" />
+                          <path d="M14.5 4A2.5 2.5 0 0 0 12 6.5v11a2.5 2.5 0 0 0 4.96.44A2.5 2.5 0 0 0 17.5 13h.5a2.5 2.5 0 0 0 .8-4.87A3 3 0 0 0 14.5 4Z" />
+                          <path d="M9 13h3M12 6.5h2M6.5 13H9M5.2 8.13H8M14 17.5h3M14 13h3.5M14 8.5h4" />
+                        </svg>
+                        <strong>{{ effortLabel }}</strong>
+                      </span>
+                    </div>
+
+                    <div class="effort-track-shell">
+                      <div class="effort-track-rail" aria-hidden="true">
+                        <div class="effort-track-fill" :style="{ width: effortFillWidth }"></div>
+                      </div>
+                      <input
+                        class="effort-slider"
+                        type="range"
+                        min="0"
+                        :max="EFFORT_OPTIONS.length - 1"
+                        step="1"
+                        :value="effortIndex"
+                        :disabled="effortLocked"
+                        aria-label="分析强度"
+                        :aria-valuetext="effortLabel"
+                        @input="handleEffortSliderInput"
+                      />
+                      <span
+                        v-for="(option, index) in EFFORT_OPTIONS"
+                        :key="option.value"
+                        class="effort-track-dot"
+                        :class="{ 'is-active': index <= effortIndex }"
+                        aria-hidden="true"
+                      ></span>
+                    </div>
+                  </div>
+                </details>
+
                 <button class="primary-btn" type="button" :disabled="composeDisabled" @click="composeBackground">
                   {{ backgroundActionLabel }}
                 </button>
@@ -119,17 +184,25 @@
                 <h2>背景素材报告</h2>
               </div>
               <div class="panel-head-actions">
+                <span v-if="effortLocked" class="effort-lock-badge">
+                  <svg class="brain-icon" aria-hidden="true" viewBox="0 0 24 24" fill="none">
+                    <path d="M9.5 4A2.5 2.5 0 0 1 12 6.5v11a2.5 2.5 0 0 1-4.96.44A2.5 2.5 0 0 1 6.5 13H6a2.5 2.5 0 0 1-.8-4.87A3 3 0 0 1 9.5 4Z" />
+                    <path d="M14.5 4A2.5 2.5 0 0 0 12 6.5v11a2.5 2.5 0 0 0 4.96.44A2.5 2.5 0 0 0 17.5 13h.5a2.5 2.5 0 0 0 .8-4.87A3 3 0 0 0 14.5 4Z" />
+                    <path d="M9 13h3M12 6.5h2M6.5 13H9M5.2 8.13H8M14 17.5h3M14 13h3.5M14 8.5h4" />
+                  </svg>
+                  分析强度 {{ effortLabel }} · 已锁定
+                </span>
                 <span class="status-pill">{{ reportStageLabel }}</span>
               </div>
             </div>
 
-            <div class="task-stepper">
+            <div v-if="!reportStepDone" class="task-stepper">
               <div class="task-step" :class="getStepClass('map')">
                 <div class="task-step-head" @click="toggleTask('map')">
                   <div class="task-step-icon">
-                    <span v-if="mapSeedStatus === 'ready'">✓</span>
+                    <span v-if="mapEvidenceUnavailable || mapSeedStatus === 'failed'">!</span>
+                    <span v-else-if="mapSeedStatus === 'ready'">✓</span>
                     <span v-else-if="mapSeedStatus === 'processing' || mapSeedLoading" class="spinner"></span>
-                    <span v-else-if="mapSeedStatus === 'failed'">!</span>
                     <span v-else>1</span>
                   </div>
                   <strong>区域定位与地理分析</strong>
@@ -137,7 +210,21 @@
                   <button class="expand-btn">{{ expandedTask === 'map' ? '↑' : '↓' }}</button>
                 </div>
                 <div class="task-step-body" v-show="expandedTask === 'map'">
-                  <p>{{ mapSeedMessage || '提取区域内特征锚点和空间网络' }}</p>
+                  <template v-if="mapEvidenceUnavailable">
+                    <p class="spatial-failure-summary">
+                      当前展示您圈定的分析范围和底图；区域类型、地点节点与代理位置将在地理数据更新后补充。
+                    </p>
+                    <button
+                      class="map-retry-btn"
+                      type="button"
+                      :disabled="composing || mapSeedLoading"
+                      @click.stop="retrySpatialData"
+                    >
+                      {{ composing || mapSeedLoading ? '正在处理...' : '重新获取地理数据' }}
+                    </button>
+                    <small class="map-retry-note">完成后会同步更新背景报告。</small>
+                  </template>
+                  <p v-else>{{ sanitizeDisplayCopy(mapSeedMessage, '正在提取区域内特征锚点和空间网络') }}</p>
                 </div>
               </div>
 
@@ -181,7 +268,7 @@
                 v-html="renderedReportMarkdown"
               ></div>
               <div v-else class="report-preview-empty">
-                背景生成完成后，报告会显示在这里。
+                背景报告将在这里呈现。
               </div>
             </div>
 
@@ -236,13 +323,21 @@
                 :zoom="selectedPoint ? 12 : 10"
                 :selected-point="selectedPoint"
                 :radius-meters="radiusMeters"
-                :layers="mapLayers"
+                :layers="displayMapLayers"
                 :read-only="showReportStage"
                 @pick="handlePickPoint"
               />
             </div>
 
-            <div v-if="showMapAnalysisSummary" class="map-overlay map-analysis-summary">
+            <div v-if="showMapDataFailure" class="map-overlay map-data-failure">
+              <strong>未取得可靠地理数据</strong>
+              <p>仅显示您圈定的分析范围和底图；本轮没有生成区域类型判断。</p>
+              <button type="button" :disabled="composing || mapSeedLoading" @click="retrySpatialData">
+                {{ composing || mapSeedLoading ? '正在处理...' : '重新获取' }}
+              </button>
+            </div>
+
+            <div v-else-if="showMapAnalysisSummary" class="map-overlay map-analysis-summary">
               <div class="analysis-summary-head">
                 <span>区域类型分析</span>
                 <strong>{{ primarySceneLabel }}</strong>
@@ -288,15 +383,39 @@ import { setPendingUpload } from '../store/pendingUpload'
 import {
   clearSceneComposerSnapshot,
   getSceneComposerSnapshot,
+  getWorkflowSteps,
   markWorkflowStep,
   resetWorkflowNavigation,
   saveSceneComposerSnapshot
 } from '../store/workflowNavigation'
 import { renderMarkdown } from '../utils/markdown'
+import { buildSpatialProviderRows, isSpatialEvidenceUnavailable } from '../utils/mapDataQuality'
+import { safeDisplayError, safeDisplayText, sanitizeDisplayCopy } from '../utils/displayText'
 
 const router = useRouter()
 const route = useRoute()
 const DEFAULT_CENTER = [22.5431, 114.0579]
+const EFFORT_OPTIONS = [
+  { value: 'light', label: 'Light' },
+  { value: 'medium', label: 'Medium' },
+  { value: 'high', label: 'High' },
+  { value: 'extra_high', label: 'Extra High' },
+  { value: 'ultra', label: 'Ultra' }
+]
+const EFFORT_DISPLAY_LABELS = Object.freeze({
+  light: 'Light',
+  medium: 'Medium',
+  high: 'High',
+  extra_high: 'Extra High',
+  ultra: 'Ultra'
+})
+const EFFORT_FILL_WIDTHS = [
+  '1rem',
+  'calc(25% + 0.5rem)',
+  '50%',
+  'calc(75% - 0.5rem)',
+  'calc(100% - 1rem)'
+]
 
 const form = ref({
   location: '',
@@ -322,6 +441,7 @@ const mapSeedStatus = ref('idle')
 const mapSeedLoading = ref(false)
 const mapSeedMessage = ref('等待背景生成时触发区域地理分析')
 const mapSceneClassification = ref(null)
+const mapSeedDataQuality = ref(null)
 const locationSyncMode = ref('empty')
 const locationResolving = ref(false)
 const locationMessage = ref('输入地点会自动定位地图，也可以直接在地图上选点。')
@@ -339,36 +459,72 @@ const message = ref('')
 const composeErrorMessage = ref('')
 const showReportStage = ref(false)
 const reportTyping = ref(false)
+const effortLevel = ref('high')
+const effortLocked = ref(false)
+const effortSnapshot = ref(null)
+const effortMenuRef = ref(null)
+
+const effortIndex = computed(() => {
+  const index = EFFORT_OPTIONS.findIndex((option) => option.value === effortLevel.value)
+  return index >= 0 ? index : 2
+})
+const effortOption = computed(() => EFFORT_OPTIONS[effortIndex.value] || EFFORT_OPTIONS[2])
+const effortLabel = computed(() => EFFORT_DISPLAY_LABELS[effortOption.value.value] || 'High')
+const effortFillWidth = computed(() => EFFORT_FILL_WIDTHS[effortIndex.value] || '50%')
+const effortSnapshotId = computed(() => String(
+  effortSnapshot.value?.effort_snapshot_id
+  || effortSnapshot.value?.snapshot_id
+  || ''
+).trim())
 
 // --- Task Stepper Logic ---
 const expandedTask = ref('map')
+const mapEvidenceUnavailable = computed(() => isSpatialEvidenceUnavailable(mapSeedDataQuality.value))
+const spatialProviderRows = computed(() => buildSpatialProviderRows(mapSeedDataQuality.value))
 const toggleTask = (task) => {
   expandedTask.value = expandedTask.value === task ? '' : task
 }
 
-const planStepDone = computed(() => reportTyping.value || (!composing.value && reportMarkdown.value.length > 0))
-const planStepActive = computed(() => composing.value && mapSeedStatus.value === 'ready' && !reportTyping.value)
+const hasReportArtifact = computed(() => reportMarkdown.value.trim().length > 0)
+const planStepDone = computed(() => reportTyping.value || hasReportArtifact.value || (composing.value && mapSeedStatus.value === 'ready'))
+const planStepActive = computed(() => composing.value && mapSeedStatus.value === 'ready' && !reportTyping.value && !hasReportArtifact.value)
 const planStepStatusLabel = computed(() => {
-  if (planStepDone.value) return '已完成'
+  if (planStepDone.value) return ''
   if (planStepActive.value) return '规划中'
   return '待开始'
 })
 
-const reportStepDone = computed(() => !composing.value && !reportTyping.value && reportMarkdown.value.length > 0)
-const reportStepActive = computed(() => reportTyping.value || (composing.value && planStepDone.value))
+const reportStepDone = computed(() => !composing.value && !reportTyping.value && hasReportArtifact.value)
+const reportStepActive = computed(() => reportTyping.value || (composing.value && mapSeedStatus.value === 'ready'))
 const hasComposeError = computed(() => !composing.value && !reportStepDone.value && (
   mapSeedStatus.value === 'failed' || String(composeErrorMessage.value || '').trim().length > 0
 ))
 const reportStepStatusLabel = computed(() => {
-  if (hasComposeError.value) return '失败'
-  if (reportStepDone.value) return '已完成'
+  if (hasComposeError.value) return '待调整'
+  if (reportStepDone.value) return ''
   if (reportStepActive.value) return '生成中'
   return '待开始'
 })
 
+const stepStatusTone = computed(() => {
+  if (hasComposeError.value) return 'error'
+  if (composing.value || reportTyping.value || mapSeedLoading.value || mapSeedStatus.value === 'processing') return 'processing'
+  return 'ready'
+})
+
+const stepStatusText = computed(() => {
+  if (hasComposeError.value) return '输入已保留'
+  if (composing.value || reportTyping.value) return '背景生成中'
+  if (mapSeedLoading.value || mapSeedStatus.value === 'processing') return '区域分析中'
+  if (reportStepDone.value) return '背景报告'
+  return '等待配置'
+})
+
 const getStepClass = (step) => {
   if (step === 'map') {
-    if (mapSeedStatus.value === 'ready') return 'done'
+    if (mapSeedStatus.value === 'ready') {
+      return mapEvidenceUnavailable.value ? 'failed' : 'done'
+    }
     if (mapSeedStatus.value === 'failed') return 'failed'
     if (mapSeedStatus.value === 'processing' || mapSeedLoading.value) return 'active'
     return 'pending'
@@ -411,6 +567,81 @@ const radiusMetersDisplay = computed(() => {
   return `${radiusMeters.value} m`
 })
 
+function normalizeEffortLevel(value, fallback = 'high') {
+  const normalized = String(value || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[\s-]+/g, '_')
+  return EFFORT_OPTIONS.some((option) => option.value === normalized)
+    ? normalized
+    : fallback
+}
+
+function selectEffort(level) {
+  if (effortLocked.value) return
+  effortLevel.value = normalizeEffortLevel(level, effortLevel.value)
+}
+
+function handleEffortSliderInput(event) {
+  if (effortLocked.value) return
+  const index = Math.max(0, Math.min(
+    EFFORT_OPTIONS.length - 1,
+    Number(event?.target?.value) || 0
+  ))
+  selectEffort(EFFORT_OPTIONS[index].value)
+}
+
+function closeEffortMenu() {
+  if (effortMenuRef.value) effortMenuRef.value.open = false
+}
+
+function handleEffortMenuOutsideClick(event) {
+  if (!effortMenuRef.value?.open || effortMenuRef.value.contains(event.target)) return
+  closeEffortMenu()
+}
+
+function syncEffortFromPayload(payload, { lockOnSuccess = false } = {}) {
+  const source = payload?.data && typeof payload.data === 'object' ? payload.data : payload
+  const rawSnapshot = source?.effort_snapshot && typeof source.effort_snapshot === 'object'
+    ? source.effort_snapshot
+    : null
+  const snapshotId = String(
+    rawSnapshot?.effort_snapshot_id
+    || rawSnapshot?.snapshot_id
+    || source?.effort_snapshot_id
+    || ''
+  ).trim()
+  const responseLevel = normalizeEffortLevel(
+    rawSnapshot?.effort_level
+    || rawSnapshot?.level
+    || source?.effort_level,
+    effortLevel.value
+  )
+
+  if (rawSnapshot || snapshotId) {
+    effortSnapshot.value = {
+      ...(effortSnapshot.value || {}),
+      ...(rawSnapshot || {}),
+      ...(snapshotId ? { effort_snapshot_id: snapshotId } : {}),
+      effort_level: responseLevel,
+      locked: rawSnapshot?.locked !== false
+    }
+  }
+  effortLevel.value = responseLevel
+  if (lockOnSuccess || rawSnapshot?.locked === true || snapshotId) {
+    effortLocked.value = true
+    if (!effortSnapshot.value) {
+      effortSnapshot.value = {
+        effort_level: responseLevel,
+        effort_label: effortLabel.value,
+        locked: true,
+        source: 'accepted_without_snapshot'
+      }
+    }
+    saveComposerSnapshot()
+  }
+}
+
 function formatCurrentTimeScope(date = new Date()) {
   const pad = (value) => String(value).padStart(2, '0')
   const year = date.getFullYear()
@@ -433,6 +664,26 @@ const derivedSimulationRequirement = computed(() => {
   )
 })
 
+const mapSeedFocusText = computed(() => {
+  const sections = [
+    ['推演要求', form.value.simulationRequirement],
+    ['重点关注', form.value.focus],
+    ['补充背景', form.value.additionalContext],
+    ['事件或稳态基线', form.value.eventOrBaseline],
+    ['报告问题', form.value.reportQuestions]
+  ]
+  const seen = new Set()
+  return sections
+    .map(([label, value]) => [label, String(value || '').trim()])
+    .filter(([, value]) => {
+      if (!value || seen.has(value)) return false
+      seen.add(value)
+      return true
+    })
+    .map(([label, value]) => `${label}：${value}`)
+    .join('\n')
+})
+
 const composeDisabled = computed(() => {
   if (composing.value || locationResolving.value) return true
   if (!selectedPoint.value) return true
@@ -451,13 +702,21 @@ const composeDisabled = computed(() => {
 })
 
 const backgroundActionLabel = computed(() => {
-  if (composing.value) return '背景生成中...'
-  if (reportMarkdown.value.trim()) return '重新生成背景'
-  return '背景生成'
+  if (composing.value) return '生成中...'
+  return '生成背景'
 })
 
+const GENERIC_AREA_LABELS = new Set(['其他', '其他区域', '未知区域', '未命名区域', '暂无摘要'])
+
+function concreteAreaLabel(value, fallback = '') {
+  const candidate = safeDisplayText(value, '').trim()
+  return candidate && !GENERIC_AREA_LABELS.has(candidate) ? candidate : String(fallback || '').trim()
+}
+
 const areaNamePreview = computed(() => {
-  return autoAreaLabel.value || form.value.location.trim() || '尚未确定分析区域'
+  const userLocation = form.value.location.trim()
+  if (userLocation && locationSyncMode.value === 'manual') return userLocation
+  return autoAreaLabel.value || userLocation || '尚未确定分析区域'
 })
 
 const mapPointLabel = computed(() => {
@@ -467,6 +726,9 @@ const mapPointLabel = computed(() => {
 
 const mapMetaHint = computed(() => {
   if (showReportStage.value && selectedPoint.value) {
+    if (mapEvidenceUnavailable.value) {
+      return `${radiusMetersDisplay.value} 分析范围 · 仅显示圈定范围与底图`
+    }
     return `${radiusMetersDisplay.value} 分析范围 · 点击区域或节点查看详情`
   }
   if (selectedPoint.value) return `${radiusMetersDisplay.value} 分析范围 · ${selectedPoint.value.lat.toFixed(5)}, ${selectedPoint.value.lon.toFixed(5)}`
@@ -475,15 +737,17 @@ const mapMetaHint = computed(() => {
 
 const mapSeedStatusLabel = computed(() => {
   if (mapSeedLoading.value || mapSeedStatus.value === 'processing') return '分析中'
-  if (mapSeedStatus.value === 'ready') return '已完成'
-  if (mapSeedStatus.value === 'failed') return '失败'
+  if (mapSeedStatus.value === 'ready') {
+    return mapEvidenceUnavailable.value ? '可重新获取地理数据' : '地理数据'
+  }
+  if (mapSeedStatus.value === 'failed') return '可重新获取地理数据'
   return '待开始'
 })
 
 const reportStageLabel = computed(() => {
   if (composing.value) return '生成中'
   if (reportTyping.value) return '排版中'
-  if (reportMarkdown.value.trim()) return `${reportMarkdown.value.length} chars`
+  if (reportMarkdown.value.trim()) return `${reportMarkdown.value.length} 字`
   return '待开始'
 })
 
@@ -493,12 +757,13 @@ const SCENE_TYPE_LABELS = {
   wetland: '湿地生态',
   urban_edge: '城市边缘',
   agricultural: '农业空间',
-  mixed: '混合区域'
+  mixed: '混合区域',
+  unknown: '暂不判断'
 }
 
 const primarySceneLabel = computed(() => {
   const key = String(mapSceneClassification.value?.primary_scene || '').trim()
-  return SCENE_TYPE_LABELS[key] || key || '待判定'
+  return SCENE_TYPE_LABELS[key] || (key ? '其他区域' : '待判定')
 })
 
 const sceneScoreItems = computed(() => {
@@ -506,7 +771,7 @@ const sceneScoreItems = computed(() => {
   return Object.entries(scores)
     .map(([key, value]) => ({
       key,
-      label: SCENE_TYPE_LABELS[key] || key,
+      label: SCENE_TYPE_LABELS[key] || '其他区域',
       score: Number(value) || 0
     }))
     .filter((item) => item.score > 0)
@@ -515,14 +780,27 @@ const sceneScoreItems = computed(() => {
 })
 
 const showMapAnalysisSummary = computed(() => (
-  Boolean(mapSceneClassification.value?.primary_scene)
+  !mapEvidenceUnavailable.value
+  && mapSeedDataQuality.value?.formal_ready === true
+  && mapSceneClassification.value?.classification_ready === true
+  && Boolean(mapSceneClassification.value?.primary_scene)
   && (showReportStage.value || mapSeedStatus.value === 'ready')
 ))
 
+const showMapDataFailure = computed(() => (
+  mapEvidenceUnavailable.value
+  && (showReportStage.value || mapSeedStatus.value === 'ready')
+))
+
+const displayMapLayers = computed(() => {
+  if (!mapEvidenceUnavailable.value) return mapLayers.value
+  return mapLayers.value.filter((layer) => layer.id === 'analysis-area')
+})
+
 const previewReportMarkdown = computed(() => {
-  if (displayedReportMarkdown.value.trim()) return displayedReportMarkdown.value
-  if (reportMarkdown.value.trim()) return reportMarkdown.value
-  if (showReportStage.value) return buildPendingReportDraft()
+  if (reportMarkdown.value.trim()) {
+    return displayedReportMarkdown.value.trim() ? displayedReportMarkdown.value : reportMarkdown.value
+  }
   return ''
 })
 
@@ -573,41 +851,6 @@ function startReportTyping(targetText, { reset = true, interval = 16 } = {}) {
   }
 
   tick()
-}
-
-function buildPendingReportDraft() {
-  const location = areaNamePreview.value
-  const pointText = selectedPoint.value
-    ? `${selectedPoint.value.lat.toFixed(5)}, ${selectedPoint.value.lon.toFixed(5)}`
-    : '待定位'
-  const variableItems = parseVariables(initialVariablesText.value)
-    .slice(0, 4)
-    .map((item) => `- **${item.name || '变量'}**：${item.description || item.name || '正在整理变量影响链路'}`)
-  const stableDescription = form.value.eventOrBaseline.trim() || '系统正在根据输入与地图范围整理该区域的稳态描述。'
-
-  return [
-    `# ${location} 背景素材报告`,
-    '',
-    '> 系统已进入背景报告步骤，正在把地图分析、输入约束和上传材料整理成正式 Markdown 报告。',
-    '',
-    '## 区域范围',
-    `- **地点 / 区域**：${location}`,
-    `- **分析半径**：${radiusMetersDisplay.value}`,
-    `- **中心点**：${pointText}`,
-    '',
-    '## 时间背景',
-    formatCurrentTimeScope(),
-    '',
-    '## 当前稳态',
-    stableDescription,
-    '',
-    '## 初始变量',
-    variableItems.length ? variableItems.join('\n') : '- 正在根据输入变量生成影响链与敏感对象。',
-    '',
-    '## 生成状态',
-    `- **地图分析**：${mapSeedStatusLabel.value} / ${mapSeedMessage.value}`,
-    '- **背景报告**：正在生成结构化章节、主体关系和后续推演入口。'
-  ].join('\n')
 }
 
 function clearTimers() {
@@ -673,42 +916,46 @@ function normalizeLayers(source) {
   )
   const rawLayers = source?.layers || source?.geojson_layers || source?.items || source?.data || []
   if (!Array.isArray(rawLayers)) return []
-  return rawLayers.map((layer, index) => ({
-    id: layer.id || layer.layer_id || `layer_${index}`,
-    name: layer.name || layer.title || `Layer ${index + 1}`,
-    type: layer.type || layer.kind || (Array.isArray(layer.points) ? 'points' : 'geojson'),
-    color: layer.color || ['#1f5d45', '#0f766e', '#d97706', '#2563eb'][index % 4],
-    visible: layer.visible !== false,
-    note: layer.note || layer.description || '',
-    data: Array.isArray(layer.data || layer.geojson || layer.features || layer.geometry || layer.points)
-      ? (layer.data || layer.geojson || layer.features || layer.geometry || layer.points).map((item) => {
-        if (!item || typeof item !== 'object') return item
-        const lat = Number(item.lat ?? item.latitude ?? item.y)
-        const lon = Number(item.lon ?? item.lng ?? item.longitude ?? item.x)
-        const matchedFeature = Number.isFinite(lat) && Number.isFinite(lon)
-          ? featurePointMap.get(detailKey(item.label || item.name, lat, lon))
-          : null
-        const matchedGraph = Number.isFinite(lat) && Number.isFinite(lon)
-          ? graphNodeMap.get(detailKey(item.label || item.name, lat, lon))
-          : null
-        return {
-          ...item,
-          popupTitle: item.popupTitle || item.label || item.name || layer.name,
-          popupSummary: item.popupSummary || layer.note || '',
-          popupMeta: {
-            layerName: layer.name || '',
-            layerNote: layer.note || '',
-            featureCategory: matchedFeature?.category || '',
-            featureSubtype: matchedFeature?.subtype || '',
-            featureSourceKind: matchedFeature?.source_kind || matchedGraph?.source_kind || '',
-            nodeLabel: matchedGraph?.label || '',
-            nodeCategory: matchedGraph?.category || '',
-            nodeConfidence: matchedGraph?.confidence,
+  return rawLayers.map((layer, index) => {
+    const layerName = safeDisplayText(layer.name || layer.title, `地图图层 ${index + 1}`)
+    const layerNote = safeDisplayText(layer.note || layer.description, '')
+    return {
+      id: layer.id || layer.layer_id || `layer_${index}`,
+      name: layerName,
+      type: layer.type || layer.kind || (Array.isArray(layer.points) ? 'points' : 'geojson'),
+      color: layer.color || ['#1f5d45', '#0f766e', '#d97706', '#2563eb'][index % 4],
+      visible: layer.visible !== false,
+      note: layerNote,
+      data: Array.isArray(layer.data || layer.geojson || layer.features || layer.geometry || layer.points)
+        ? (layer.data || layer.geojson || layer.features || layer.geometry || layer.points).map((item) => {
+          if (!item || typeof item !== 'object') return item
+          const lat = Number(item.lat ?? item.latitude ?? item.y)
+          const lon = Number(item.lon ?? item.lng ?? item.longitude ?? item.x)
+          const matchedFeature = Number.isFinite(lat) && Number.isFinite(lon)
+            ? featurePointMap.get(detailKey(item.label || item.name, lat, lon))
+            : null
+          const matchedGraph = Number.isFinite(lat) && Number.isFinite(lon)
+            ? graphNodeMap.get(detailKey(item.label || item.name, lat, lon))
+            : null
+          return {
+            ...item,
+            popupTitle: safeDisplayText(item.popupTitle || item.label || item.name || layerName, '地图节点'),
+            popupSummary: safeDisplayText(item.popupSummary || layerNote, ''),
+            popupMeta: {
+              layerName,
+              layerNote,
+              featureCategory: matchedFeature?.category || '',
+              featureSubtype: matchedFeature?.subtype || '',
+              featureSourceKind: matchedFeature?.source_kind || matchedGraph?.source_kind || '',
+              nodeLabel: matchedGraph?.label || '',
+              nodeCategory: matchedGraph?.category || '',
+              nodeConfidence: matchedGraph?.confidence,
+            }
           }
-        }
-      })
-      : (layer.data || layer.geojson || layer.features || layer.geometry || layer.points || [])
-  }))
+        })
+        : (layer.data || layer.geojson || layer.features || layer.geometry || layer.points || [])
+    }
+  })
 }
 
 function resetMapAnalysis(statusMessage = '等待背景生成时触发区域地理分析') {
@@ -719,6 +966,7 @@ function resetMapAnalysis(statusMessage = '等待背景生成时触发区域地�
   mapSeedLoading.value = false
   mapSeedMessage.value = statusMessage
   mapSceneClassification.value = null
+  mapSeedDataQuality.value = null
 }
 
 function updateLocationValue(nextValue, mode = 'auto') {
@@ -758,7 +1006,7 @@ async function resolveLocationQuery(query) {
 
     const primary = res.data?.primary
     if (!primary) {
-      locationMessage.value = `没有找到“${query}”对应的位置`
+      locationMessage.value = `请补充“${query}”的行政区或附近地标`
       return
     }
 
@@ -767,13 +1015,14 @@ async function resolveLocationQuery(query) {
       lon: Number(primary.lon)
     }
     mapCenter.value = [selectedPoint.value.lat, selectedPoint.value.lon]
-    autoAreaLabel.value = primary.area_label || primary.display_name || query
+    const resolvedAreaLabel = concreteAreaLabel(primary.area_label || primary.display_name, query)
+    autoAreaLabel.value = resolvedAreaLabel
     resolvedAdminContext.value = primary.admin_context || null
     resetMapAnalysis('地点已定位，背景生成时会启动区域分析')
-    locationMessage.value = `已定位到 ${primary.area_label || primary.display_name || query}`
+    locationMessage.value = `地图范围：${resolvedAreaLabel}`
   } catch (error) {
     if (requestId !== geocodeRequestId) return
-    locationMessage.value = error.message || '地点定位失败'
+    locationMessage.value = '地点输入已保留，可以补充行政区或在地图上选点'
   } finally {
     if (requestId === geocodeRequestId) {
       locationResolving.value = false
@@ -796,17 +1045,17 @@ async function resolveAreaNameFromPoint({ updateField = false } = {}) {
     if (requestId !== reverseRequestId) return
     if (!res.success || !res.data) return
 
-    autoAreaLabel.value = res.data.area_label || ''
+    autoAreaLabel.value = concreteAreaLabel(res.data.area_label, form.value.location)
     resolvedAdminContext.value = res.data.admin_context || null
     if (updateField) {
       updateLocationValue(autoAreaLabel.value || form.value.location || '', 'auto')
     }
     locationMessage.value = autoAreaLabel.value
-      ? `已根据点位和半径锁定区域：${autoAreaLabel.value}`
-      : '已根据点位分析区域名称'
+      ? `区域范围：${autoAreaLabel.value}`
+      : '当前地图点位与分析半径'
   } catch (error) {
     if (requestId !== reverseRequestId) return
-    locationMessage.value = error.message || '区域名称分析失败'
+    locationMessage.value = '点位已保留，可以直接使用当前范围'
   } finally {
     if (requestId === reverseRequestId) {
       locationResolving.value = false
@@ -837,6 +1086,7 @@ async function waitForMapSeedReady() {
     }
     const status = String(res.data.status || '').toLowerCase()
     mapSeedMessage.value = res.data.message || mapSeedMessage.value
+    if (res.data.data_quality) mapSeedDataQuality.value = res.data.data_quality
     if (status === 'ready' || status === 'completed') {
       mapSeedStatus.value = 'ready'
       return
@@ -845,6 +1095,15 @@ async function waitForMapSeedReady() {
       mapSeedStatus.value = 'failed'
       mapSeedLoading.value = false
       throw new Error(res.data.error || (status === 'cancelled' ? '区域分析已停止' : '区域分析失败'))
+    }
+    if (status === 'unavailable') {
+      mapSeedStatus.value = 'failed'
+      mapSeedLoading.value = false
+      throw new Error(
+        res.data.availability?.message
+        || res.data.message
+        || '未取得可靠地理数据，请重新获取。'
+      )
     }
     await sleep(2200)
   }
@@ -865,6 +1124,7 @@ async function loadMapSeedArtifacts() {
 
   if (seedRes.status === 'fulfilled' && seedRes.value?.success) {
     const seed = seedRes.value.data || {}
+    syncEffortFromPayload(seed)
     const input = seed.input || {}
     if (!selectedPoint.value && input.lat && input.lon) {
       selectedPoint.value = { lat: Number(input.lat), lon: Number(input.lon) }
@@ -876,10 +1136,12 @@ async function loadMapSeedArtifacts() {
     if (seed.scene_classification) {
       mapSceneClassification.value = seed.scene_classification
     }
+    mapSeedDataQuality.value = seed.data_quality || null
     if (seed.area_of_interest?.label) {
-      autoAreaLabel.value = seed.area_of_interest.label
+      const areaLabel = concreteAreaLabel(seed.area_of_interest.label, form.value.location || autoAreaLabel.value)
+      autoAreaLabel.value = areaLabel
       if (!form.value.location.trim() || locationSyncMode.value === 'auto') {
-        updateLocationValue(seed.area_of_interest.label, 'auto')
+        updateLocationValue(areaLabel || form.value.location, 'auto')
       }
     }
   }
@@ -903,7 +1165,14 @@ async function ensureMapSeedReady() {
       lon: selectedPoint.value.lon,
       radius_m: Number(radiusMeters.value),
       title: areaNamePreview.value,
-      simulation_requirement: derivedSimulationRequirement.value
+      simulation_requirement: derivedSimulationRequirement.value,
+      requested_location: form.value.location.trim() || autoAreaLabel.value,
+      focus_text: mapSeedFocusText.value,
+      known_entities: form.value.knownEntities.trim(),
+      analysis_boundaries: form.value.analysisBoundaries.trim(),
+      focus_mode: 'auto',
+      effort_level: effortLevel.value,
+      ...(effortSnapshotId.value ? { effort_snapshot_id: effortSnapshotId.value } : {})
     })
     if (!res.success || !res.data) {
       throw new Error(res.error || '区域分析任务启动失败')
@@ -911,9 +1180,16 @@ async function ensureMapSeedReady() {
 
     mapSeedId.value = res.data.seed_id
     mapSeedTaskId.value = res.data.task_id || ''
+    syncEffortFromPayload(res.data, { lockOnSuccess: true })
     await waitForMapSeedReady()
     await loadMapSeedArtifacts()
-    mapSeedMessage.value = '区域地理分析已完成'
+    if (mapEvidenceUnavailable.value) {
+      mapSeedMessage.value = '当前展示用户圈定范围和底图；区域节点将在地理数据更新后补充。'
+    } else if (mapSeedDataQuality.value?.status === 'partial') {
+      mapSeedMessage.value = '当前空间骨架依据地点、边界与交通数据形成。'
+    } else {
+      mapSeedMessage.value = '区域地理数据'
+    }
     return mapSeedId.value
   } finally {
     mapSeedLoading.value = false
@@ -933,7 +1209,10 @@ function buildFormData() {
   data.append('analysis_boundaries', form.value.analysisBoundaries)
   data.append('report_questions', form.value.reportQuestions)
   data.append('simulation_requirement', derivedSimulationRequirement.value)
+  data.append('initial_variables_text', initialVariablesText.value)
   data.append('initial_variables', JSON.stringify(parseVariables(initialVariablesText.value)))
+  data.append('effort_level', effortLevel.value)
+  if (effortSnapshotId.value) data.append('effort_snapshot_id', effortSnapshotId.value)
   if (selectedPoint.value) {
     data.append('selected_points', JSON.stringify([
       {
@@ -954,7 +1233,10 @@ async function composeBackground() {
   composing.value = true
   composeErrorMessage.value = ''
   showReportStage.value = true
-  startReportTyping(buildPendingReportDraft(), { reset: true, interval: 14 })
+  clearReportTyping()
+  if (!hasReportArtifact.value) {
+    displayedReportMarkdown.value = ''
+  }
   message.value = '正在准备区域背景...'
 
   try {
@@ -962,21 +1244,32 @@ async function composeBackground() {
       updateField: !form.value.location.trim() || locationSyncMode.value === 'auto'
     })
     await ensureMapSeedReady()
+    expandedTask.value = 'report'
     message.value = '正在生成背景素材报告...'
 
     const res = await composeSceneMaterial(buildFormData())
     if (res.success && res.data) {
+      const nextReportMarkdown = sanitizeDisplayCopy(res.data.report_markdown || '', '').trim()
+      if (!nextReportMarkdown) {
+        throw new Error('missing_scene_report_markdown')
+      }
+      syncEffortFromPayload(res.data, { lockOnSuccess: true })
       applySceneSeed(res.data)
-      message.value = '背景报告已生成，可以继续修改或进入场景配置。'
+      message.value = ''
+      return
     }
+    throw new Error('missing_scene_material_payload')
   } catch (error) {
     clearReportTyping()
-    composeErrorMessage.value = error.message || '背景生成失败'
+    composeErrorMessage.value = '输入已保留，可以重新生成背景。'
+    if (!hasReportArtifact.value) {
+      displayedReportMarkdown.value = ''
+    }
     if (mapSeedStatus.value === 'processing') {
       mapSeedStatus.value = 'failed'
+      mapSeedMessage.value = '区域范围已保留，可以重新分析。'
     }
-    mapSeedMessage.value = error.message || '背景生成失败'
-    message.value = error.message || '背景生成失败'
+    message.value = composeErrorMessage.value
     expandedTask.value = mapSeedStatus.value === 'failed' ? 'map' : 'report'
   } finally {
     composing.value = false
@@ -990,6 +1283,12 @@ function retryComposeBackground() {
   composeBackground()
 }
 
+function retrySpatialData() {
+  if (composing.value || mapSeedLoading.value) return
+  expandedTask.value = 'map'
+  retryComposeBackground()
+}
+
 async function reviseReport() {
   if (!sceneId.value || revising.value || !revisionInstruction.value.trim()) return
   revising.value = true
@@ -999,28 +1298,34 @@ async function reviseReport() {
     const res = await reviseSceneMaterial(sceneId.value, {
       instruction: revisionInstruction.value,
       current_report: reportMarkdown.value,
-      initial_variables: parseVariables(initialVariablesText.value)
+      initial_variables_text: initialVariablesText.value,
+      initial_variables: parseVariables(initialVariablesText.value),
+      semantic_artifact_ref: sceneSeed.value?.semantic_artifact_ref || undefined,
+      effort_level: effortLevel.value,
+      effort_snapshot_id: effortSnapshotId.value || undefined
     })
     if (res.success && res.data) {
+      syncEffortFromPayload(res.data)
       applySceneSeed(res.data)
       revisionInstruction.value = ''
-      message.value = '背景报告已按说明修改。'
+      message.value = ''
     }
   } catch (error) {
-    message.value = error.message || '背景报告修改失败'
+    message.value = '修改内容已保留，可以重新应用。'
   } finally {
     revising.value = false
   }
 }
 
 function applySceneSeed(seed) {
+  syncEffortFromPayload(seed)
   sceneSeed.value = seed
   sceneId.value = seed.scene_id || sceneId.value
-  reportMarkdown.value = seed.report_markdown || ''
+  reportMarkdown.value = sanitizeDisplayCopy(seed.report_markdown || '', '')
   showReportStage.value = true
   startReportTyping(reportMarkdown.value, { reset: true, interval: 10 })
   if (seed.recommended_simulation_requirement && !form.value.simulationRequirement.trim()) {
-    form.value.simulationRequirement = seed.recommended_simulation_requirement
+    form.value.simulationRequirement = safeDisplayText(seed.recommended_simulation_requirement, '')
   }
 }
 
@@ -1029,6 +1334,20 @@ function returnToSetup() {
 }
 
 function enterProcess() {
+  const step2 = getWorkflowSteps().find(item => Number(item.step) === 2)
+  const cachedRoute = step2?.visited && step2.route?.name ? step2.route : null
+  const cachedProjectId = cachedRoute?.params?.projectId
+  const canReuseCachedStep2 = Boolean(cachedRoute) && (
+    cachedRoute.name === 'Simulation' ||
+    (cachedRoute.name === 'Process' && cachedProjectId && cachedProjectId !== 'new')
+  )
+
+  if (canReuseCachedStep2) {
+    saveComposerSnapshot()
+    router.push(cachedRoute)
+    return
+  }
+
   const title = sceneSeed.value?.title || areaNamePreview.value || 'scene_material'
   const filename = `${title.replace(/[^\u4e00-\u9fa5a-zA-Z0-9_-]+/g, '_').slice(0, 48) || 'scene_material'}.md`
   const file = new File([reportMarkdown.value], filename, { type: 'text/markdown' })
@@ -1043,10 +1362,19 @@ function enterProcess() {
     : []
   setPendingUpload([file], sceneSeed.value?.recommended_simulation_requirement || derivedSimulationRequirement.value, {
     initialVariables: Array.isArray(sceneSeed.value?.initial_variables) ? sceneSeed.value.initial_variables : [],
+    normalizedEventInputs: Array.isArray(sceneSeed.value?.normalized_event_inputs) ? sceneSeed.value.normalized_event_inputs : [],
+    normalizedPolicyInputs: Array.isArray(sceneSeed.value?.normalized_policy_inputs) ? sceneSeed.value.normalized_policy_inputs : [],
     selectedPoints,
     mapSeedId: mapSeedId.value || sceneSeed.value?.map_seed_id || '',
     areaLabel: areaNamePreview.value || autoAreaLabel.value || form.value.location || '',
-    radiusMeters: Number(radiusMeters.value) || 0
+    radiusMeters: Number(radiusMeters.value) || 0,
+    effortLevel: effortLevel.value,
+    effortLocked: effortLocked.value,
+    effortSnapshotId: effortSnapshotId.value,
+    effortSnapshot: effortSnapshot.value ? { ...effortSnapshot.value } : null,
+    sceneId: sceneId.value,
+    semanticArtifactRef: sceneSeed.value?.semantic_artifact_ref || null,
+    semanticRevision: Number(sceneSeed.value?.semantic_revision || 0)
   })
   saveComposerSnapshot()
   router.push({ name: 'Process', params: { projectId: 'new' } })
@@ -1086,6 +1414,9 @@ function resetComposer() {
   message.value = ''
   composeErrorMessage.value = ''
   showReportStage.value = false
+  effortLevel.value = 'high'
+  effortLocked.value = false
+  effortSnapshot.value = null
   clearReportTyping()
   clearSceneComposerSnapshot()
   resetWorkflowNavigation()
@@ -1114,6 +1445,7 @@ function buildComposerSnapshot() {
     mapSeedStatus: mapSeedStatus.value,
     mapSeedMessage: mapSeedMessage.value,
     mapSceneClassification: mapSceneClassification.value,
+    mapSeedDataQuality: mapSeedDataQuality.value,
     autoAreaLabel: autoAreaLabel.value,
     resolvedAdminContext: resolvedAdminContext.value,
     sceneId: sceneId.value,
@@ -1126,7 +1458,11 @@ function buildComposerSnapshot() {
     showReportStage: showReportStage.value,
     advancedOpen: advancedOpen.value,
     locationSyncMode: locationSyncMode.value,
-    locationMessage: locationMessage.value
+    locationMessage: locationMessage.value,
+    effortLevel: effortLevel.value,
+    effortLocked: effortLocked.value,
+    effortSnapshot: effortSnapshot.value ? { ...effortSnapshot.value } : null,
+    effortSnapshotId: effortSnapshotId.value
   }
 }
 
@@ -1160,21 +1496,59 @@ function restoreComposerSnapshot() {
   mapSeedId.value = snapshot.mapSeedId || ''
   mapSeedTaskId.value = snapshot.mapSeedTaskId || ''
   mapSeedStatus.value = snapshot.mapSeedStatus || 'idle'
-  mapSeedMessage.value = snapshot.mapSeedMessage || '等待背景生成时触发区域地理分析'
+  mapSeedMessage.value = safeDisplayText(snapshot.mapSeedMessage, '等待背景生成时触发区域地理分析')
   mapSceneClassification.value = snapshot.mapSceneClassification || null
+  mapSeedDataQuality.value = snapshot.mapSeedDataQuality || null
   autoAreaLabel.value = snapshot.autoAreaLabel || ''
   resolvedAdminContext.value = snapshot.resolvedAdminContext || null
   sceneId.value = snapshot.sceneId || ''
   sceneSeed.value = snapshot.sceneSeed || null
-  reportMarkdown.value = snapshot.reportMarkdown || ''
-  displayedReportMarkdown.value = snapshot.reportMarkdown || snapshot.displayedReportMarkdown || ''
+  reportMarkdown.value = sanitizeDisplayCopy(snapshot.reportMarkdown || '', '')
+  displayedReportMarkdown.value = sanitizeDisplayCopy(snapshot.reportMarkdown || snapshot.displayedReportMarkdown || '', '')
   revisionInstruction.value = snapshot.revisionInstruction || ''
-  message.value = snapshot.message || ''
-  composeErrorMessage.value = snapshot.composeErrorMessage || ''
+  message.value = safeDisplayText(snapshot.message, '')
+  composeErrorMessage.value = safeDisplayError(snapshot.composeErrorMessage, '')
   showReportStage.value = Boolean(snapshot.showReportStage || snapshot.reportMarkdown)
   advancedOpen.value = Boolean(snapshot.advancedOpen)
   locationSyncMode.value = snapshot.locationSyncMode || 'empty'
-  locationMessage.value = snapshot.locationMessage || '输入地点会自动定位地图，也可以直接在地图上选点。'
+  locationMessage.value = safeDisplayText(snapshot.locationMessage, '输入地点会自动定位地图，也可以直接在地图上选点。')
+  const restoredEffortSnapshot = snapshot.effortSnapshot && typeof snapshot.effortSnapshot === 'object'
+    ? snapshot.effortSnapshot
+    : null
+  effortLevel.value = normalizeEffortLevel(
+    snapshot.effortLevel
+    || restoredEffortSnapshot?.effort_level
+    || restoredEffortSnapshot?.level,
+    'high'
+  )
+  const hasLegacyGeneratedArtifact = Boolean(
+    snapshot.mapSeedId
+    || snapshot.sceneId
+    || String(snapshot.reportMarkdown || '').trim()
+  )
+  effortLocked.value = Boolean(
+    snapshot.effortLocked
+    || snapshot.effortSnapshotId
+    || restoredEffortSnapshot?.effort_snapshot_id
+    || restoredEffortSnapshot?.snapshot_id
+    || restoredEffortSnapshot?.locked
+    || hasLegacyGeneratedArtifact
+  )
+  effortSnapshot.value = restoredEffortSnapshot
+    ? {
+        ...restoredEffortSnapshot,
+        effort_level: effortLevel.value,
+        locked: effortLocked.value
+      }
+    : effortLocked.value
+      ? {
+          ...(snapshot.effortSnapshotId ? { effort_snapshot_id: snapshot.effortSnapshotId } : {}),
+          effort_level: effortLevel.value,
+          effort_label: effortLabel.value,
+          locked: true,
+          source: hasLegacyGeneratedArtifact ? 'legacy_migration' : 'restored_snapshot'
+        }
+      : null
   window.setTimeout(() => {
     restoringSnapshot = false
   }, 0)
@@ -1226,6 +1600,7 @@ watch(
     mapSeedTaskId,
     mapSeedStatus,
     mapSeedMessage,
+    mapSeedDataQuality,
     autoAreaLabel,
     resolvedAdminContext,
     sceneId,
@@ -1237,13 +1612,17 @@ watch(
     showReportStage,
     advancedOpen,
     locationSyncMode,
-    locationMessage
+    locationMessage,
+    effortLevel,
+    effortLocked,
+    effortSnapshot
   ],
   saveComposerSnapshot,
   { deep: true }
 )
 
 onMounted(() => {
+  document.addEventListener('click', handleEffortMenuOutsideClick)
   if (route.query.restore === '1') {
     restoreComposerSnapshot()
   } else {
@@ -1252,6 +1631,7 @@ onMounted(() => {
 })
 
 onBeforeUnmount(() => {
+  document.removeEventListener('click', handleEffortMenuOutsideClick)
   saveComposerSnapshot()
   clearTimers()
   clearReportTyping()
@@ -1282,6 +1662,42 @@ onBeforeUnmount(() => {
   border-bottom: 1px solid rgba(16, 35, 29, 0.08);
   backdrop-filter: blur(14px);
 }
+
+.topbar-meta {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 14px;
+}
+
+.topbar-divider {
+  width: 1px;
+  height: 18px;
+  background: rgba(16, 35, 29, 0.12);
+}
+
+.scene-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: max-content;
+  color: #64756e;
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.scene-status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  background: currentColor;
+}
+
+.scene-status.is-ready { color: #3d8a61; }
+.scene-status.is-processing { color: #2f6f57; }
+.scene-status.is-error { color: #b94a43; }
+.scene-status.is-processing .scene-status-dot { animation: pulse-dot 1.4s ease-in-out infinite; }
 .panel-kicker,
 .field-hint,
 .status-label {
@@ -1355,9 +1771,9 @@ onBeforeUnmount(() => {
 
 .workspace-shell {
   display: grid;
-  grid-template-columns: minmax(420px, 520px) minmax(0, 1fr);
-  gap: 1rem;
-  padding: 1rem;
+  grid-template-columns: minmax(520px, 1.25fr) minmax(420px, 1fr);
+  gap: 0.75rem;
+  padding: 0.75rem;
   height: calc(100vh - 60px);
   overflow: hidden;
   align-items: stretch;
@@ -1365,41 +1781,37 @@ onBeforeUnmount(() => {
 }
 
 .workspace-shell.report-finished-layout {
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: minmax(520px, 1.25fr) minmax(420px, 1fr);
 }
 
 .setup-column {
+  grid-column: 2;
+  grid-row: 1;
   min-width: 0;
   height: 100%;
-  overflow-y: auto;
-  scrollbar-width: thin;
-  scrollbar-color: rgba(16, 35, 29, 0.2) transparent;
-}
-
-.setup-column::-webkit-scrollbar {
-  width: 6px;
-}
-
-.setup-column::-webkit-scrollbar-track {
-  background: transparent;
-}
-
-.setup-column::-webkit-scrollbar-thumb {
-  background-color: rgba(16, 35, 29, 0.15);
-  border-radius: 10px;
+  overflow: hidden;
 }
 
 .setup-scroll {
   display: flex;
   flex-direction: column;
   gap: 1rem;
+  height: 100%;
+  min-height: 100%;
+  overflow: hidden;
 }
 
 .setup-scroll:not(.has-report) {
-  overflow: visible;
+  overflow: hidden;
+}
+
+.setup-scroll.has-report {
+  overflow: hidden;
 }
 
 .map-column {
+  grid-column: 1;
+  grid-row: 1;
   min-width: 0;
 }
 
@@ -1418,10 +1830,14 @@ onBeforeUnmount(() => {
 .setup-panel {
   display: flex;
   flex-direction: column;
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
 }
 
 .setup-panel.compact-mode {
-  min-height: 100%;
+  height: 100%;
+  min-height: 0;
 }
 
 .panel-head,
@@ -1489,15 +1905,333 @@ onBeforeUnmount(() => {
   display: flex;
   flex: 1;
   flex-direction: column;
+  min-height: 0;
+  margin-right: -0.35rem;
+  padding-right: 0.35rem;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(16, 35, 29, 0.2) transparent;
+}
+
+.setup-form::-webkit-scrollbar,
+.setup-scroll.has-report::-webkit-scrollbar {
+  width: 6px;
+}
+
+.setup-form::-webkit-scrollbar-track,
+.setup-scroll.has-report::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.setup-form::-webkit-scrollbar-thumb,
+.setup-scroll.has-report::-webkit-scrollbar-thumb {
+  border-radius: 10px;
+  background-color: rgba(16, 35, 29, 0.15);
+}
+
+.effort-lock-badge {
+  display: inline-flex;
+  align-items: center;
+  min-height: 2rem;
+  gap: 0.35rem;
+  padding: 0 0.72rem;
+  border-radius: 999px;
+  background: rgba(23, 76, 58, 0.09);
+  color: #174c3a;
+  font-size: 0.8rem;
+  font-weight: 800;
+  white-space: nowrap;
+}
+
+.effort-menu {
+  position: relative;
+  flex: none;
+}
+
+.effort-menu > summary {
+  list-style: none;
+}
+
+.effort-menu > summary::-webkit-details-marker {
+  display: none;
+}
+
+.effort-trigger {
+  display: inline-flex;
+  height: 2.25rem;
+  align-items: center;
+  gap: 0.32rem;
+  padding: 0 0.55rem;
+  border: 1px solid rgba(16, 35, 29, 0.12);
+  border-radius: 11px;
+  background: rgba(242, 245, 243, 0.98);
+  color: #173126;
+  cursor: pointer;
+  transition: transform 0.18s ease, border-color 0.18s ease, background 0.18s ease, box-shadow 0.18s ease;
+}
+
+.brain-icon {
+  width: 0.9rem;
+  height: 0.9rem;
+  flex: none;
+  stroke: currentColor;
+  stroke-width: 1.7;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.effort-trigger .brain-icon {
+  color: #1f7d5d;
+}
+
+.effort-trigger-label,
+.effort-trigger-value {
+  font-size: 0.72rem;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.effort-trigger-label {
+  font-weight: 750;
+}
+
+.effort-trigger-value {
+  color: rgba(16, 35, 29, 0.55);
+  font-weight: 650;
+}
+
+.effort-chevron {
+  width: 0.7rem;
+  height: 0.7rem;
+  flex: none;
+  color: rgba(16, 35, 29, 0.5);
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  transition: transform 0.18s ease;
+}
+
+.effort-menu[open] .effort-chevron {
+  transform: rotate(180deg);
+}
+
+.effort-trigger:hover,
+.effort-menu[open] .effort-trigger {
+  border-color: rgba(31, 125, 93, 0.28);
+  background: #edf5f0;
+  box-shadow: 0 8px 20px rgba(18, 86, 62, 0.12);
+  transform: translateY(-1px);
+}
+
+.effort-trigger:active {
+  transform: translateY(0) scale(0.98);
+}
+
+.effort-trigger:focus-visible {
+  outline: 3px solid rgba(36, 151, 243, 0.2);
+  outline-offset: 2px;
+}
+
+.effort-popover {
+  position: absolute;
+  right: 0;
+  bottom: calc(100% + 0.5rem);
+  z-index: 30;
+  width: min(16rem, calc(100vw - 1.5rem));
+  padding: 0.68rem 0.75rem 0.78rem;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 16px;
+  background: #2a2a2a;
+  color: #f4f7f5;
+  box-shadow: 0 16px 34px rgba(0, 0, 0, 0.28);
+  transform-origin: bottom right;
+  animation: effort-popover-in 0.18s ease-out;
+}
+
+@keyframes effort-popover-in {
+  from { opacity: 0; transform: translateY(6px) scale(0.98); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+.effort-popover-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  margin-bottom: 0.58rem;
+}
+
+.effort-popover-head > span:first-child {
+  color: rgba(255, 255, 255, 0.55);
+  font-size: 0.78rem;
+  font-weight: 500;
+}
+
+.effort-current-level {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.28rem;
+  color: #56aef6;
+}
+
+.effort-current-level .brain-icon {
+  width: 0.82rem;
+  height: 0.82rem;
+  filter: drop-shadow(0 0 10px rgba(45, 157, 244, 0.3));
+}
+
+.effort-current-level strong {
+  color: rgba(255, 255, 255, 0.9);
+  font-size: 0.72rem;
+  font-weight: 650;
+  white-space: nowrap;
+}
+
+.effort-track-shell {
+  position: relative;
+  height: 2rem;
+  isolation: isolate;
+}
+
+.effort-track-rail {
+  position: absolute;
+  z-index: 0;
+  top: 50%;
+  right: 0;
+  left: 0;
+  height: 1.75rem;
+  overflow: hidden;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 999px;
+  background: #454545;
+  transform: translateY(-50%);
+  box-shadow: inset 0 1px 2px rgba(255, 255, 255, 0.06), inset 0 -8px 22px rgba(0, 0, 0, 0.08);
+}
+
+.effort-track-fill {
+  position: relative;
+  height: 100%;
+  overflow: hidden;
+  border-radius: 999px;
+  background: linear-gradient(102deg, #2497f3 0%, #43a5ff 52%, #7668f7 100%);
+  box-shadow: 0 0 22px rgba(54, 154, 255, 0.34);
+  transition: width 0.22s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.effort-track-fill::after {
+  position: absolute;
+  inset: 0;
+  content: '';
+  background:
+    radial-gradient(circle at 11% 35%, rgba(255, 255, 255, 0.95) 0 1.4px, transparent 1.8px),
+    radial-gradient(circle at 18% 68%, rgba(255, 255, 255, 0.72) 0 2px, transparent 2.5px),
+    radial-gradient(circle at 33% 26%, rgba(255, 255, 255, 0.7) 0 1px, transparent 1.5px),
+    radial-gradient(circle at 48% 63%, rgba(255, 255, 255, 0.88) 0 1.5px, transparent 2px),
+    radial-gradient(circle at 62% 32%, rgba(255, 255, 255, 0.62) 0 1px, transparent 1.5px),
+    radial-gradient(circle at 79% 57%, rgba(255, 255, 255, 0.78) 0 1.2px, transparent 1.7px);
+  animation: effort-stars-float 3.8s ease-in-out infinite alternate;
+}
+
+@keyframes effort-stars-float {
+  to { transform: translate3d(5px, -2px, 0); opacity: 0.78; }
+}
+
+.effort-slider {
+  position: relative;
+  z-index: 2;
+  width: 100%;
+  height: 2rem;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  box-shadow: none;
+  cursor: pointer;
+  appearance: none;
+}
+
+.effort-slider:focus {
+  outline: none;
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.effort-slider:focus-visible::-webkit-slider-thumb {
+  box-shadow: 0 0 0 5px rgba(45, 157, 244, 0.2), 0 7px 20px rgba(0, 0, 0, 0.25);
+}
+
+.effort-slider::-webkit-slider-runnable-track {
+  height: 1.75rem;
+  border-radius: 999px;
+  background: transparent;
+}
+
+.effort-slider::-webkit-slider-thumb {
+  width: 2rem;
+  height: 2rem;
+  margin-top: -0.125rem;
+  border: 0;
+  border-radius: 50%;
+  background: #ffffff;
+  box-shadow: 0 7px 20px rgba(0, 0, 0, 0.24);
+  appearance: none;
+}
+
+.effort-slider::-moz-range-track {
+  height: 1.75rem;
+  border-radius: 999px;
+  background: transparent;
+}
+
+.effort-slider::-moz-range-progress {
+  height: 1.75rem;
+  border-radius: 999px;
+  background: transparent;
+}
+
+.effort-slider::-moz-range-thumb {
+  width: 2rem;
+  height: 2rem;
+  border: 0;
+  border-radius: 50%;
+  background: #ffffff;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.25);
+}
+
+.effort-track-dot {
+  position: absolute;
+  z-index: 1;
+  top: 50%;
+  width: 0.3rem;
+  height: 0.3rem;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.36);
+  transform: translate(-50%, -50%);
+  pointer-events: none;
+}
+
+.effort-track-dot:nth-of-type(1) { left: 1rem; }
+.effort-track-dot:nth-of-type(2) { left: calc(25% + 0.5rem); }
+.effort-track-dot:nth-of-type(3) { left: 50%; }
+.effort-track-dot:nth-of-type(4) { left: calc(75% - 0.5rem); }
+.effort-track-dot:nth-of-type(5) { left: calc(100% - 1rem); }
+
+.effort-track-dot.is-active {
+  background: rgba(255, 255, 255, 0.82);
 }
 
 .field-grow {
-  flex: 1;
-  min-height: 0;
+  flex: 0 0 auto;
+  min-height: auto;
 }
 
 .field-grow textarea {
-  flex: 1;
+  flex: none;
   min-height: 150px;
 }
 
@@ -1586,8 +2320,13 @@ textarea {
 }
 
 .setup-actions {
+  position: relative;
+  z-index: 8;
+  flex: none;
   margin-top: auto;
-  padding-top: 1rem;
+  padding: 0.8rem 0 0.1rem;
+  border-top: 1px solid rgba(16, 35, 29, 0.1);
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.72), #ffffff 32%);
 }
 
 .map-meta strong {
@@ -1606,6 +2345,24 @@ textarea {
   margin-top: 1rem;
 }
 
+.setup-actions .button-row,
+.report-actions {
+  justify-content: flex-end;
+}
+
+.setup-action-row {
+  align-items: center;
+  gap: 0.5rem;
+  margin-top: 0.65rem;
+}
+
+.setup-action-row .primary-btn {
+  min-height: 2.25rem;
+  padding: 0 0.8rem;
+  border-radius: 10px;
+  font-size: 0.78rem;
+}
+
 .message {
   margin: 1rem 0 0;
   color: #174c3a;
@@ -1613,7 +2370,12 @@ textarea {
 }
 
 .report-panel {
-  margin-bottom: 2rem;
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+  margin-bottom: 0;
+  overflow: hidden;
 }
 
 .report-title-row {
@@ -1741,6 +2503,56 @@ textarea {
   line-height: 1.5;
 }
 
+.spatial-failure-summary {
+  margin: 0;
+  color: #991b1b;
+  font-weight: 650;
+}
+
+.provider-status-list {
+  display: grid;
+  gap: 0.55rem;
+  margin: 0.75rem 0;
+  padding: 0;
+  list-style: none;
+}
+
+.provider-status-list li {
+  display: grid;
+  grid-template-columns: minmax(8.5rem, 0.34fr) 1fr;
+  gap: 0.65rem;
+  padding-top: 0.55rem;
+  border-top: 1px solid rgba(153, 27, 27, 0.12);
+}
+
+.provider-status-list strong {
+  color: #7f1d1d;
+}
+
+.map-retry-btn,
+.map-data-failure button {
+  min-height: 2.2rem;
+  padding: 0 0.85rem;
+  border: 1px solid rgba(153, 27, 27, 0.22);
+  border-radius: 10px;
+  background: #fff;
+  color: #991b1b;
+  font: inherit;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.map-retry-btn:disabled,
+.map-data-failure button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.map-retry-note {
+  margin-left: 0.65rem;
+  color: rgba(16, 35, 29, 0.55);
+}
+
 @keyframes spin {
   to { transform: rotate(360deg); }
 }
@@ -1755,9 +2567,13 @@ textarea {
 }
 
 .report-surface {
-  min-height: 380px;
+  flex: 1 1 auto;
+  min-height: 0;
   margin-top: 1rem;
   padding: 1.15rem 1.2rem;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
   border-radius: 22px;
   border: 1px solid rgba(16, 35, 29, 0.08);
   background: rgba(248, 251, 247, 0.92);
@@ -1790,7 +2606,15 @@ textarea {
 }
 
 .report-actions {
+  position: sticky;
+  bottom: -1px;
+  z-index: 8;
+  flex: none;
   align-items: center;
+  margin-top: auto;
+  padding: 0.8rem 0 0.1rem;
+  border-top: 1px solid rgba(16, 35, 29, 0.1);
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.72), #ffffff 32%);
 }
 
 .prose-markdown :deep(.md-p) {
@@ -1933,6 +2757,28 @@ textarea {
   box-shadow: 0 14px 32px rgba(16, 35, 29, 0.14);
 }
 
+.map-data-failure {
+  left: 1rem;
+  bottom: 1rem;
+  width: min(27rem, calc(100% - 2rem));
+  padding: 0.9rem 1rem;
+  border-radius: 14px;
+  background: rgba(255, 247, 247, 0.95);
+  border: 1px solid rgba(153, 27, 27, 0.2);
+  box-shadow: 0 14px 32px rgba(72, 19, 19, 0.14);
+}
+
+.map-data-failure strong {
+  color: #991b1b;
+}
+
+.map-data-failure p {
+  margin: 0.35rem 0 0.65rem;
+  color: rgba(69, 10, 10, 0.72);
+  font-size: 0.84rem;
+  line-height: 1.5;
+}
+
 .analysis-summary-head {
   display: flex;
   align-items: center;
@@ -1960,7 +2806,8 @@ textarea {
   min-height: 1.6rem;
   padding: 0 0.55rem;
   border-radius: 999px;
-  background: rgba(23, 76, 58, 0.08);
+  background: transparent;
+  border: 1px solid rgba(23, 76, 58, 0.22);
   color: #174c3a;
   font-size: 0.78rem;
   font-weight: 700;
@@ -1995,15 +2842,35 @@ textarea {
 @media (max-width: 1180px) {
   .workspace-shell {
     grid-template-columns: 1fr;
+    height: auto;
+    min-height: calc(100dvh - 60px);
+    overflow: visible;
   }
 
+  .setup-column,
+  .map-column {
+    grid-column: auto;
+    grid-row: auto;
+  }
+
+  .setup-column { overflow: visible; }
+
   .setup-scroll {
+    height: auto;
     min-height: auto;
     overflow: visible;
   }
 
   .setup-panel.compact-mode {
+    height: auto;
     min-height: auto;
+    overflow: visible;
+  }
+
+  .setup-form {
+    margin-right: 0;
+    padding-right: 0;
+    overflow: visible;
   }
 
   .map-stage {
@@ -2045,5 +2912,69 @@ textarea {
     width: 100%;
     justify-content: flex-start;
   }
+
+  .setup-action-row {
+    flex-direction: row;
+    justify-content: flex-end;
+  }
 }
+
+/* Step 1 typography contract: one shared scale, no browser-default body copy. */
+.scene-composer-page {
+  font-family: var(--k-font-sans);
+  font-size: var(--k-text-body);
+  line-height: var(--k-leading-body);
+}
+
+.panel-head h2,
+.map-head h2 {
+  font-size: var(--k-text-title);
+  line-height: var(--k-leading-tight);
+}
+
+.panel-kicker,
+.field-hint,
+.status-label,
+.scene-status,
+.effort-trigger-label,
+.effort-trigger-value,
+.eyebrow {
+  font-size: var(--k-text-meta);
+}
+
+.field > span,
+.advanced-toggle,
+.primary-btn,
+.secondary-btn,
+.ghost-link {
+  font-size: var(--k-text-ui);
+  line-height: var(--k-leading-ui);
+}
+
+.setup-action-row .primary-btn,
+.upload-box strong,
+.map-meta strong {
+  font-size: var(--k-text-ui);
+  line-height: var(--k-leading-ui);
+}
+
+.map-meta small {
+  font-size: var(--k-text-meta);
+  line-height: var(--k-leading-ui);
+}
+
+.setup-form input,
+.setup-form textarea,
+.setup-form p,
+.prose-markdown,
+.map-analysis-summary,
+.map-data-failure {
+  font-size: var(--k-text-body);
+  line-height: var(--k-leading-body);
+}
+
+.prose-markdown :deep(.md-h2) { font-size: var(--k-text-title); }
+.prose-markdown :deep(.md-h3) { font-size: var(--k-text-section); }
+.prose-markdown :deep(.md-h4),
+.prose-markdown :deep(.md-h5) { font-size: var(--k-text-ui); }
 </style>

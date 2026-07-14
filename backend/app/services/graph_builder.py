@@ -194,7 +194,7 @@ class GraphBuilderService:
             self.task_manager.update_task(
                 task_id,
                 progress=60,
-                message="等待Zep处理数据..."
+                message="等待图谱引擎处理数据…"
             )
             
             self._wait_for_episodes(
@@ -243,7 +243,7 @@ class GraphBuilderService:
             lambda: self.client.graph.create(
                 graph_id=graph_id,
                 name=name,
-                description="Envfish Social Simulation Graph"
+                description="Envfish 生态社会推演图谱"
             ),
             f"create graph {graph_id}"
         )

@@ -1,28 +1,14 @@
 <template>
-  <div class="main-view">
-    <!-- Header -->
-    <header class="app-header">
-      <div class="header-left">
-        <KaleidoNavBrand to="/" />
-      </div>
-
-      <div class="header-right">
-        <button class="layout-toggle" @click="toggleGraphCollapse">
-          {{ viewMode === 'workbench' ? '◧ 展开图谱' : '▣ 收起图谱' }}
-        </button>
-        <WorkflowStepMenu :current-step="currentStep" :current-name="stepNames[currentStep - 1]" />
-        <div class="step-divider"></div>
-        <span class="status-indicator" :class="statusClass">
-          <span class="dot"></span>
-          {{ statusText }}
-        </span>
-      </div>
-    </header>
-
-    <!-- Main Content Area -->
-    <main class="content-area">
-      <!-- Left Panel: Graph -->
-      <div class="panel-wrapper left" :style="leftPanelStyle">
+  <KaleidoWorkflowShell
+    :step="currentStep"
+    :step-name="stepNames[currentStep - 1]"
+    :status-text="statusText"
+    :status-tone="shellStatusTone"
+    :view-mode="viewMode"
+    :visual-ratio="42"
+    @toggle-visual="toggleGraphCollapse"
+  >
+    <template #visual>
         <GraphPanel 
           :graphData="graphData"
           :mapData="mapProjection"
@@ -31,33 +17,28 @@
           @refresh="refreshGraph"
           @toggle-maximize="toggleMaximize('graph')"
         />
-      </div>
+    </template>
 
-      <!-- Right Panel: Step Components -->
-      <div class="panel-wrapper right" :style="rightPanelStyle">
-        <!-- Step 2: 场景设计 -->
-        <Step2EnvSetup
-          v-if="currentStep === 2"
+    <Step2EnvSetup
+      v-if="currentStep === 2"
           :simulationId="currentSimulationId"
           :projectData="projectData"
           :graphData="graphData"
+          :sceneSeedContext="currentSceneSeedContext"
           :systemLogs="systemLogs"
-          :initialInjectedVariables="initialInjectedVariables"
-          @go-back="handleGoBack"
-          @next-step="handleNextStep"
-          @add-log="addLog"
-          @update-status="updateStepStatus"
-        />
-      </div>
-    </main>
-  </div>
+      :initialInjectedVariables="initialInjectedVariables"
+      @go-back="handleGoBack"
+      @next-step="handleNextStep"
+      @add-log="addLog"
+      @update-status="updateStepStatus"
+    />
+  </KaleidoWorkflowShell>
 </template>
 
 <script setup>
 import { ref, computed, onMounted, onUnmounted, nextTick } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import KaleidoNavBrand from '../components/KaleidoNavBrand.vue'
-import WorkflowStepMenu from '../components/WorkflowStepMenu.vue'
+import KaleidoWorkflowShell from '../components/KaleidoWorkflowShell.vue'
 import GraphPanel from '../components/GraphPanel.vue'
 import Step2EnvSetup from '../components/Step2EnvSetup.vue'
 import { generateOntology, getProject, buildGraph, getTaskStatus, getGraphData } from '../api/graph'
@@ -65,16 +46,17 @@ import { getPendingUpload, clearPendingUpload } from '../store/pendingUpload'
 import { createSimulation, getSimulationGraphRealtime, listSimulations } from '../api/simulation'
 import { attachSceneSeedContextToProject, attachSceneSeedContextToSimulation, getSceneSeedContextByProject } from '../store/sceneSeedBridge'
 import { markWorkflowStep } from '../store/workflowNavigation'
+import { safeDisplayError, safeDisplayText } from '../utils/displayText'
 
 const route = useRoute()
 const router = useRouter()
 
 // Layout State
-const viewMode = ref('workbench') // graph | split | workbench — 默认全宽，图谱可一键展开
+const viewMode = ref('split') // Step 2 默认保留地图与配置的双栏语境
 
 // Step State
 const currentStep = ref(2) // 1: 背景生成, 2: 场景设计, 3: 开始模拟, 4: 报告互动
-const stepNames = ['背景生成', '场景设计', '开始模拟', '报告互动']
+const stepNames = ['背景定义', '场景生成', '推演运行', '分析与报告']
 
 // Data State
 const currentProjectId = ref(route.params.projectId)
@@ -86,6 +68,7 @@ const graphData = ref(null)
 const realtimeMapProjection = ref(null)
 const currentSimulationId = ref('')
 const initialInjectedVariables = ref([])
+const currentSceneSeedContext = ref(null)
 const stepStatus = ref('idle')
 const currentPhase = ref(-1) // -1: Upload, 0: Ontology, 1: Build, 2: Complete
 const ontologyProgress = ref(null)
@@ -261,12 +244,18 @@ const statusClass = computed(() => {
   return 'processing'
 })
 
+const shellStatusTone = computed(() => {
+  if (statusClass.value === 'error') return 'error'
+  if (statusClass.value === 'processing') return 'processing'
+  return 'ready'
+})
+
 const statusText = computed(() => {
-  if (error.value) return '错误'
+  if (error.value) return '场景配置'
   if (stepStatus.value === 'processing') return '生成配置中'
-  if (stepStatus.value === 'completed') return '配置就绪'
-  if (stepStatus.value === 'error') return '配置错误'
-  if (currentPhase.value >= 2) return '就绪'
+  if (stepStatus.value === 'completed') return '场景配置'
+  if (stepStatus.value === 'error') return '场景配置'
+  if (currentPhase.value >= 2) return '场景配置'
   if (currentPhase.value === 1) return '构建图谱中'
   if (currentPhase.value === 0) return '生成本体中'
   return '初始化中'
@@ -275,7 +264,7 @@ const statusText = computed(() => {
 // --- Helpers ---
 const addLog = (msg) => {
   const time = new Date().toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' }) + '.' + new Date().getMilliseconds().toString().padStart(3, '0')
-  systemLogs.value.push({ time, msg })
+  systemLogs.value.push({ time, msg: safeDisplayText(msg, '状态已更新') })
   // Keep last 100 logs
   if (systemLogs.value.length > 100) {
     systemLogs.value.shift()
@@ -320,7 +309,7 @@ const buildSimulationRunRoute = (simulationId, params = {}) => {
 const handleNextStep = async (params = {}) => {
   const simulationId = currentSimulationId.value || await ensureSimulationForProject()
   if (!simulationId) {
-    addLog('进入 Step 3 失败：模拟入口尚未就绪')
+    addLog('进入推演运行失败：模拟入口尚未就绪')
     return
   }
 
@@ -328,7 +317,7 @@ const handleNextStep = async (params = {}) => {
   markWorkflowStep(2, {
     visited: true,
     status: 'done',
-    summary: '场景配置已完成',
+    summary: '场景配置',
     route: { name: 'Process', params: { projectId: currentProjectId.value || route.params.projectId || 'new' } }
   })
   markWorkflowStep(3, {
@@ -338,7 +327,7 @@ const handleNextStep = async (params = {}) => {
     route: routeParams
   })
 
-  addLog('进入 Step 3: 开始模拟')
+  addLog('进入推演运行')
   if (params.maxRounds) {
     addLog(`自定义模拟轮数: ${params.maxRounds} 轮`)
   }
@@ -349,7 +338,7 @@ const handleGoBack = () => {
   if (currentStep.value > 2) {
     currentStep.value--
     markCurrentWorkflowStep()
-    addLog(`返回 Step ${currentStep.value}: ${stepNames[currentStep.value - 1]}`)
+    addLog(`返回${stepNames[currentStep.value - 1]}`)
   } else {
     // 返回到背景生成页
     router.push({ name: 'SceneComposer', query: { restore: '1' } })
@@ -383,17 +372,64 @@ const getLatestProjectSimulation = async () => {
       .filter(item => item?.simulation_id)
       .sort((a, b) => String(b.created_at || '').localeCompare(String(a.created_at || '')))[0] || null
   } catch (err) {
-    addLog(`读取已有模拟入口失败: ${err.message}`)
+    addLog(safeDisplayError(err, '读取已有模拟入口失败'))
     return null
   }
+}
+
+const buildProjectSceneSeedContext = (project, recoveryContext = null) => {
+  if (!project || typeof project !== 'object') return recoveryContext || null
+
+  const semanticInput = project.semantic_input
+  const hasPersistedSemanticInput = semanticInput && typeof semanticInput === 'object'
+  const context = recoveryContext && typeof recoveryContext === 'object' ? recoveryContext : {}
+
+  if (!hasPersistedSemanticInput && !Object.keys(context).length) return null
+
+  return {
+    initialVariables: hasPersistedSemanticInput ? [] : (context.initialVariables || []),
+    normalizedEventInputs: hasPersistedSemanticInput
+      ? (Array.isArray(semanticInput.events) ? semanticInput.events : [])
+      : (context.normalizedEventInputs || []),
+    normalizedPolicyInputs: hasPersistedSemanticInput
+      ? (Array.isArray(semanticInput.policies) ? semanticInput.policies : [])
+      : (context.normalizedPolicyInputs || []),
+    selectedPoints: context.selectedPoints || [],
+    mapSeedId: project.map_seed_id || context.mapSeedId || '',
+    areaLabel: semanticInput?.scene?.location || context.areaLabel || project.name || '',
+    radiusMeters: context.radiusMeters || 0,
+    semanticArtifactRef: project.semantic_artifact_ref || context.semanticArtifactRef || null,
+    semanticRevision: Number(semanticInput?.revision || context.semanticRevision || 0),
+    effortSnapshot: project.effort_snapshot || context.effortSnapshot || null,
+    effortSnapshotId: project.effort_snapshot?.effort_snapshot_id || context.effortSnapshotId || '',
+    effortLevel: project.effort_snapshot?.effort_level || context.effortLevel || 'high',
+    effortLocked: Boolean(project.effort_snapshot || context.effortLocked),
+    sceneId: project.scene_id || context.sceneId || ''
+  }
+}
+
+const applyProjectSceneSeedContext = (project, recoveryContext = null) => {
+  const sceneSeedContext = buildProjectSceneSeedContext(project, recoveryContext)
+  currentSceneSeedContext.value = sceneSeedContext
+  initialInjectedVariables.value = sceneSeedContext?.normalizedEventInputs?.length || sceneSeedContext?.normalizedPolicyInputs?.length
+    ? [
+        ...(sceneSeedContext?.normalizedEventInputs || []).map(item => ({ ...item, type: 'disaster' })),
+        ...(sceneSeedContext?.normalizedPolicyInputs || []).map(item => ({ ...item, type: 'policy' }))
+      ]
+    : sceneSeedContext?.initialVariables || []
+
+  if (project?.project_id && sceneSeedContext) {
+    attachSceneSeedContextToProject(project.project_id, sceneSeedContext)
+  }
+  return sceneSeedContext
 }
 
 const ensureSimulationForProject = async () => {
   if (currentSimulationId.value) return currentSimulationId.value
   if (!projectData.value?.project_id || !projectData.value?.graph_id) return ''
 
-  const sceneSeedContext = getSceneSeedContextByProject(projectData.value.project_id)
-  initialInjectedVariables.value = sceneSeedContext?.initialVariables || []
+  const recoveryContext = getSceneSeedContextByProject(projectData.value.project_id)
+  const sceneSeedContext = applyProjectSceneSeedContext(projectData.value, recoveryContext)
 
   const existing = await getLatestProjectSimulation()
   if (existing?.simulation_id) {
@@ -401,7 +437,7 @@ const ensureSimulationForProject = async () => {
     if (sceneSeedContext) {
       attachSceneSeedContextToSimulation(existing.simulation_id, sceneSeedContext)
     }
-    addLog(`已复用模拟入口: ${existing.simulation_id}`)
+    addLog('已连接已有模拟入口')
     await refreshMapProjection()
     return existing.simulation_id
   }
@@ -412,7 +448,8 @@ const ensureSimulationForProject = async () => {
     enable_twitter: true,
     enable_reddit: true,
     source_mode: sceneSeedContext?.mapSeedId ? 'map_seed' : 'graph',
-    map_seed_id: sceneSeedContext?.mapSeedId || undefined
+    map_seed_id: sceneSeedContext?.mapSeedId || undefined,
+    semantic_artifact_ref: sceneSeedContext?.semanticArtifactRef || undefined
   })
 
   if (res.success && res.data?.simulation_id) {
@@ -420,12 +457,12 @@ const ensureSimulationForProject = async () => {
     if (sceneSeedContext) {
       attachSceneSeedContextToSimulation(res.data.simulation_id, sceneSeedContext)
     }
-    addLog(`已创建模拟入口: ${res.data.simulation_id}`)
+    addLog('模拟入口创建完成')
     await refreshMapProjection()
     return res.data.simulation_id
   }
 
-  error.value = res.error || '创建模拟入口失败'
+  error.value = safeDisplayError(res.error, '创建模拟入口失败')
   addLog(`创建模拟入口失败: ${error.value}`)
   return ''
 }
@@ -433,7 +470,7 @@ const ensureSimulationForProject = async () => {
 // --- Data Logic ---
 
 const initProject = async () => {
-  addLog('Project view initialized.')
+  addLog('场景设计页已初始化')
   if (currentProjectId.value === 'new') {
     await handleNewProject()
   } else {
@@ -444,48 +481,62 @@ const initProject = async () => {
 const handleNewProject = async () => {
   const pending = getPendingUpload()
   if (!pending.isPending || pending.files.length === 0) {
-    error.value = 'No pending files found.'
-    addLog('Error: No pending files found for new project.')
+    error.value = '未找到待处理的场景资料。'
+    addLog(error.value)
     return
   }
   
   try {
     loading.value = true
     currentPhase.value = 0
-    ontologyProgress.value = { message: 'Uploading and analyzing docs...' }
-    addLog('Starting ontology generation: Uploading files...')
+    ontologyProgress.value = { message: '正在读取并分析场景资料…' }
+    addLog('正在生成场景本体')
     
     const formData = new FormData()
     pending.files.forEach(f => formData.append('files', f))
     formData.append('simulation_requirement', pending.simulationRequirement)
+    if (pending.mapSeedId) formData.append('map_seed_id', pending.mapSeedId)
+    if (pending.sceneId) formData.append('scene_id', pending.sceneId)
+    if (pending.semanticArtifactRef) {
+      formData.append('semantic_artifact_ref', JSON.stringify(pending.semanticArtifactRef))
+    }
+    formData.append('effort_level', pending.effortLevel || 'high')
+    if (pending.effortSnapshotId) formData.append('effort_snapshot_id', pending.effortSnapshotId)
     
     const res = await generateOntology(formData)
     if (res.success) {
-      if (res.data?.project_id) {
-        attachSceneSeedContextToProject(res.data.project_id, {
-          initialVariables: pending.initialVariables,
-          selectedPoints: pending.selectedPoints,
-          mapSeedId: pending.mapSeedId,
-          areaLabel: pending.areaLabel,
-          radiusMeters: pending.radiusMeters
-        })
-      }
-      clearPendingUpload()
       currentProjectId.value = res.data.project_id
       projectData.value = res.data
+      applyProjectSceneSeedContext(res.data, {
+        initialVariables: pending.initialVariables,
+        normalizedEventInputs: pending.normalizedEventInputs,
+        normalizedPolicyInputs: pending.normalizedPolicyInputs,
+        selectedPoints: pending.selectedPoints,
+        mapSeedId: pending.mapSeedId,
+        areaLabel: pending.areaLabel,
+        radiusMeters: pending.radiusMeters,
+        effortLevel: pending.effortLevel,
+        effortLocked: pending.effortLocked,
+        effortSnapshotId: pending.effortSnapshotId,
+        effortSnapshot: pending.effortSnapshot,
+        sceneId: pending.sceneId,
+        semanticArtifactRef: pending.semanticArtifactRef,
+        semanticRevision: pending.semanticRevision
+      })
+      clearPendingUpload()
       
       router.replace({ name: 'Process', params: { projectId: res.data.project_id } })
       markCurrentWorkflowStep()
       ontologyProgress.value = null
-      addLog(`Ontology generated successfully for project ${res.data.project_id}`)
+      addLog('场景本体生成完成')
       await startBuildGraph()
     } else {
-      error.value = res.error || 'Ontology generation failed'
-      addLog(`Error generating ontology: ${error.value}`)
+      error.value = safeDisplayError(res.error, '场景本体生成失败')
+      addLog(error.value)
     }
   } catch (err) {
-    error.value = err.message
-    addLog(`Exception in handleNewProject: ${err.message}`)
+    error.value = safeDisplayError(err, '场景本体生成失败')
+    addLog(error.value)
   } finally {
     loading.value = false
   }
@@ -494,12 +545,13 @@ const handleNewProject = async () => {
 const loadProject = async () => {
   try {
     loading.value = true
-    addLog(`Loading project ${currentProjectId.value}...`)
+    addLog('正在读取场景')
     const res = await getProject(currentProjectId.value)
     if (res.success) {
       projectData.value = res.data
+      applyProjectSceneSeedContext(res.data, getSceneSeedContextByProject(res.data.project_id))
       updatePhaseByStatus(res.data.status)
-      addLog(`Project loaded. Status: ${res.data.status}`)
+      addLog('场景读取完成')
       
       if (res.data.status === 'ontology_generated' && !res.data.graph_id) {
         await startBuildGraph()
@@ -513,12 +565,12 @@ const loadProject = async () => {
         await ensureSimulationForProject()
       }
     } else {
-      error.value = res.error
-      addLog(`Error loading project: ${res.error}`)
+      error.value = safeDisplayError(res.error, '场景读取失败')
+      addLog(error.value)
     }
   } catch (err) {
-    error.value = err.message
-    addLog(`Exception in loadProject: ${err.message}`)
+    error.value = safeDisplayError(err, '场景读取失败')
+    addLog(error.value)
   } finally {
     loading.value = false
   }
@@ -540,7 +592,7 @@ const updatePhaseByStatus = (status) => {
       currentPhase.value = 2
       break;
     case 'failed':
-      error.value = projectData.value?.error || '图谱构建失败'
+      error.value = safeDisplayError(projectData.value?.error, '图谱构建失败')
       stopGraphPolling()
       stopPolling()
       break;
@@ -551,27 +603,27 @@ const startBuildGraph = async () => {
   try {
     error.value = ''
     currentPhase.value = 1
-    buildProgress.value = { progress: 0, message: 'Starting build...' }
-    addLog('Initiating graph build...')
+    buildProgress.value = { progress: 0, message: '正在启动图谱构建…' }
+    addLog('正在启动图谱构建')
     
     const res = await buildGraph({ project_id: currentProjectId.value })
     if (res.success) {
-      addLog(`Graph build task started. Task ID: ${res.data.task_id}`)
+      addLog('图谱构建任务已启动')
       startGraphPolling()
       startPollingTask(res.data.task_id)
     } else {
-      error.value = res.error
-      addLog(`Error starting build: ${res.error}`)
+      error.value = safeDisplayError(res.error, '图谱构建启动失败')
+      addLog(error.value)
     }
   } catch (err) {
-    error.value = err.message
-    addLog(`Exception in startBuildGraph: ${err.message}`)
+    error.value = safeDisplayError(err, '图谱构建启动失败')
+    addLog(error.value)
   }
 }
 
 const startGraphPolling = () => {
   stopGraphPolling()
-  addLog('Started polling for graph data...')
+  addLog('正在同步图谱数据')
   fetchGraphData()
   graphPollTimer = setInterval(fetchGraphData, 10000)
 }
@@ -582,8 +634,8 @@ const fetchGraphData = async () => {
     const projRes = await getProject(currentProjectId.value)
     if (projRes.success && projRes.data?.status === 'failed') {
       projectData.value = projRes.data
-      error.value = projRes.data.error || '图谱构建失败'
-      addLog(`Graph build failed: ${error.value}`)
+      error.value = safeDisplayError(projRes.data.error, '图谱构建失败')
+      addLog(`图谱构建失败：${error.value}`)
       stopGraphPolling()
       return
     }
@@ -594,7 +646,7 @@ const fetchGraphData = async () => {
         graphData.value = gRes.data
         const nodeCount = gRes.data.node_count || gRes.data.nodes?.length || 0
         const edgeCount = gRes.data.edge_count || gRes.data.edges?.length || 0
-        addLog(`Graph data refreshed. Nodes: ${nodeCount}, Edges: ${edgeCount}`)
+        addLog(`图谱已刷新：${nodeCount} 个节点，${edgeCount} 条关系`)
       }
     }
   } catch (err) {
@@ -622,7 +674,7 @@ const pollTaskStatus = async (taskId) => {
       buildProgress.value = { progress: task.progress || 0, message: task.message }
       
       if (task.status === 'completed') {
-        addLog('Graph build task completed.')
+        addLog('图谱构建完成')
         stopPolling()
         stopGraphPolling() // Stop polling, do final load
         currentPhase.value = 2
@@ -637,10 +689,13 @@ const pollTaskStatus = async (taskId) => {
       } else if (task.status === 'failed' || task.status === 'cancelled') {
         stopPolling()
         stopGraphPolling()
-        error.value = task.message || task.error || (task.status === 'cancelled' ? '用户强制停止' : '未知错误')
+        error.value = safeDisplayError(
+          task.message || task.error,
+          task.status === 'cancelled' ? '用户强制停止' : '图谱构建失败',
+        )
         addLog(task.status === 'cancelled'
-          ? `Graph build task cancelled: ${error.value}`
-          : `Graph build task failed: ${error.value}`)
+          ? `图谱构建已停止：${error.value}`
+          : `图谱构建失败：${error.value}`)
       }
     }
   } catch (e) {
@@ -650,20 +705,20 @@ const pollTaskStatus = async (taskId) => {
 
 const loadGraph = async (graphId) => {
   graphLoading.value = true
-  addLog(`Loading full graph data: ${graphId}`)
+  addLog('正在读取完整图谱')
   try {
     const res = await getGraphData(graphId)
     if (res.success) {
       graphData.value = res.data
-      addLog('Graph data loaded successfully.')
+      addLog('完整图谱读取完成')
       if (projectData.value?.graph_id) {
         await ensureSimulationForProject()
       }
     } else {
-      addLog(`Failed to load graph data: ${res.error}`)
+      addLog(safeDisplayError(res.error, '完整图谱读取失败'))
     }
   } catch (e) {
-    addLog(`Exception loading graph: ${e.message}`)
+    addLog(safeDisplayError(e, '完整图谱读取失败'))
   } finally {
     graphLoading.value = false
   }
@@ -680,8 +735,7 @@ const refreshMapProjection = async () => {
     if (res.success && projection && Array.isArray(projection.nodes)) {
       realtimeMapProjection.value = projection
       const nodeCount = projection.meta?.node_count || projection.nodes.length
-      const source = projection.source_mode || res.data?.source || 'map_projection'
-      addLog(`地图投影已刷新: ${nodeCount} 个节点 / ${source}`)
+      addLog(`地图投影已刷新：${nodeCount} 个节点`)
     }
   } catch (err) {
     console.warn('Map projection refresh failed:', err)
@@ -690,7 +744,7 @@ const refreshMapProjection = async () => {
 
 const refreshGraph = () => {
   if (projectData.value?.graph_id) {
-    addLog('Manual graph refresh triggered.')
+    addLog('正在手动刷新图谱')
     loadGraph(projectData.value.graph_id)
   }
   refreshMapProjection()
@@ -707,7 +761,7 @@ const stopGraphPolling = () => {
   if (graphPollTimer) {
     clearInterval(graphPollTimer)
     graphPollTimer = null
-    addLog('Graph polling stopped.')
+    addLog('图谱同步已停止')
   }
 }
 

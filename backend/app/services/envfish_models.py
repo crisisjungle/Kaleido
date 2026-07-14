@@ -49,44 +49,44 @@ POLICY_MODES = {
 
 STATE_VECTOR_SCHEMA = {
     "exposure_score": {
-        "label": "Exposure",
-        "description": "Regional or actor exposure to the hazard.",
+        "label": "暴露强度",
+        "description": "区域或主体对风险源的接触与承压程度。",
     },
     "spread_pressure": {
-        "label": "Spread Pressure",
-        "description": "Local pressure that can propagate to neighbors.",
+        "label": "扩散压力",
+        "description": "本地压力向相邻区域或主体继续传导的强度。",
     },
     "ecosystem_integrity": {
-        "label": "Ecosystem Integrity",
-        "description": "Overall ecological health and resilience.",
+        "label": "生态完整性",
+        "description": "生态健康、韧性与关键受体稳定性的综合状态。",
     },
     "livelihood_stability": {
-        "label": "Livelihood Stability",
-        "description": "Stability of jobs, fisheries, farming, and incomes.",
+        "label": "生计稳定性",
+        "description": "就业、渔业、农业、经营收入等生计基础的稳定程度。",
     },
     "public_trust": {
-        "label": "Public Trust",
-        "description": "Trust in institutions and public information.",
+        "label": "公众信任",
+        "description": "公众对机构响应、信息发布和公共沟通的信任水平。",
     },
     "panic_level": {
-        "label": "Panic Level",
-        "description": "Social fear, rumor, and emotional escalation.",
+        "label": "恐慌水平",
+        "description": "社会恐惧、谣言传播和情绪升级的强度。",
     },
     "service_capacity": {
-        "label": "Service Capacity",
-        "description": "Capacity of infrastructure and public services.",
+        "label": "服务能力",
+        "description": "基础设施与公共服务承载当前压力的能力。",
     },
     "response_capacity": {
-        "label": "Response Capacity",
-        "description": "Operational response capacity of authorities and organizations.",
+        "label": "响应能力",
+        "description": "治理主体、组织和协作网络的实际处置能力。",
     },
     "economic_stress": {
-        "label": "Economic Stress",
-        "description": "Pressure on production, trade, and consumption.",
+        "label": "经济压力",
+        "description": "生产、贸易、消费和经营活动受到的压力。",
     },
     "vulnerability_score": {
-        "label": "Vulnerability",
-        "description": "Composite fragility of the actor or region.",
+        "label": "脆弱性",
+        "description": "区域或主体在多重压力下的综合脆弱程度。",
     },
 }
 
@@ -240,22 +240,22 @@ DEFAULT_TEMPLATE_RULES = {
 
 TEMPORAL_PRESET_DEFAULTS = {
     "rapid": {
-        "label": "Rapid",
+        "label": "快速",
         "minutes_per_round": 20,
         "recommended_templates": ["air"],
-        "description": "Short response windows for fast-moving atmospheric or immediate-response scenarios.",
+        "description": "适合大气扩散、即时响应等快速变化场景的短时间步长。",
     },
     "standard": {
-        "label": "Standard",
+        "label": "标准",
         "minutes_per_round": 60,
         "recommended_templates": ["air", "inland_water", "marine"],
-        "description": "Balanced hour-scale stepping for most region-level simulations.",
+        "description": "适合多数区域级推演的小时级均衡步长。",
     },
     "slow": {
-        "label": "Slow",
+        "label": "慢速",
         "minutes_per_round": 180,
         "recommended_templates": ["marine"],
-        "description": "Longer steps for slower hydrological and coastal propagation.",
+        "description": "适合水文、近岸等较慢传播过程的较长时间步长。",
     },
 }
 
@@ -1014,6 +1014,30 @@ class EnvAgentProfile:
     evidence_confidence: float = 0.0
     review_status: str = ""
     grounding_reason: str = ""
+    capability_keys: List[str] = field(default_factory=list)
+    permission_keys: List[str] = field(default_factory=list)
+    resource_types: List[str] = field(default_factory=list)
+    action_space_zh: List[str] = field(default_factory=list)
+    lifecycle_status: str = "active"
+    representation_level: str = ""
+    coverage_region_ids: List[str] = field(default_factory=list)
+    spatial_anchor_refs: List[str] = field(default_factory=list)
+    represented_entity_ids: List[str] = field(default_factory=list)
+    parent_agent_id: Optional[int] = None
+    aggregation_weight: float = 1.0
+    spatial_precision: str = ""
+    role_demand_refs: List[str] = field(default_factory=list)
+    resource_uncertainty: Dict[str, List[float]] = field(default_factory=dict)
+    initial_relationship_refs: List[str] = field(default_factory=list)
+    activation_triggers: List[Dict[str, Any]] = field(default_factory=list)
+    created_round: int = 0
+    activation_round: Optional[int] = 0
+    scenario_version_ref: Dict[str, Any] = field(default_factory=dict)
+    profile_confidence: float = 0.0
+    generation_reason: str = ""
+    is_aggregate: bool = False
+    runtime_lifecycle: Dict[str, Any] = field(default_factory=dict)
+    authority_evidence_refs: List[str] = field(default_factory=list)
     created_at: str = field(default_factory=lambda: datetime.now().strftime("%Y-%m-%d"))
 
     def to_dict(self) -> Dict[str, Any]:
@@ -1029,17 +1053,33 @@ class EnvAgentProfile:
         payload["capabilities"] = list(dict.fromkeys(self.capabilities))
         payload["constraints"] = list(dict.fromkeys(self.constraints))
         payload["action_space"] = list(dict.fromkeys(self.action_space))
+        payload["action_space_zh"] = list(dict.fromkeys(self.action_space_zh))
         payload["goals"] = list(dict.fromkeys(self.goals))
         payload["sensitivities"] = list(dict.fromkeys(self.sensitivities))
         payload["spawn_weight"] = clamp_probability(self.spawn_weight)
         payload["evidence_refs"] = list(dict.fromkeys(self.evidence_refs))
         payload["evidence_confidence"] = clamp_probability(self.evidence_confidence)
+        payload["capability_keys"] = list(dict.fromkeys(self.capability_keys))
+        payload["permission_keys"] = list(dict.fromkeys(self.permission_keys))
+        payload["resource_types"] = list(dict.fromkeys(self.resource_types))
+        payload["coverage_region_ids"] = list(dict.fromkeys(self.coverage_region_ids))
+        payload["spatial_anchor_refs"] = list(dict.fromkeys(self.spatial_anchor_refs))
+        payload["represented_entity_ids"] = list(dict.fromkeys(self.represented_entity_ids))
+        payload["role_demand_refs"] = list(dict.fromkeys(self.role_demand_refs))
+        payload["initial_relationship_refs"] = list(dict.fromkeys(self.initial_relationship_refs))
+        payload["authority_evidence_refs"] = list(dict.fromkeys(self.authority_evidence_refs))
+        payload["aggregation_weight"] = max(0.0, float(self.aggregation_weight or 0.0))
+        payload["profile_confidence"] = clamp_probability(
+            self.profile_confidence or self.evidence_confidence
+        )
+        payload["lifecycle_status"] = self.lifecycle_status or "active"
+        payload["is_aggregate"] = bool(self.is_aggregate)
         return payload
 
     def to_agent_config(self) -> Dict[str, Any]:
         return {
             "agent_id": self.agent_id,
-            "agent_name": self.username,
+            "agent_name": self.name or self.username,
             "name": self.name,
             "node_family": self.node_family,
             "role_type": self.role_type,
@@ -1055,8 +1095,12 @@ class EnvAgentProfile:
             "sensitivities": self.sensitivities,
             "motivation_stack": self.motivation_stack,
             "capabilities": self.capabilities,
+            "capability_keys": list(dict.fromkeys(self.capability_keys)),
+            "permission_keys": list(dict.fromkeys(self.permission_keys)),
+            "resource_types": list(dict.fromkeys(self.resource_types)),
             "constraints": self.constraints,
             "action_space": self.action_space,
+            "action_space_zh": list(dict.fromkeys(self.action_space_zh)),
             "decision_policy": self.decision_policy,
             "impact_profile": self.impact_profile,
             "stance_profile": self.stance_profile,
@@ -1077,6 +1121,28 @@ class EnvAgentProfile:
             "evidence_confidence": clamp_probability(self.evidence_confidence),
             "review_status": self.review_status,
             "grounding_reason": self.grounding_reason,
+            "lifecycle_status": self.lifecycle_status or "active",
+            "representation_level": self.representation_level,
+            "coverage_region_ids": list(dict.fromkeys(self.coverage_region_ids)),
+            "spatial_anchor_refs": list(dict.fromkeys(self.spatial_anchor_refs)),
+            "represented_entity_ids": list(dict.fromkeys(self.represented_entity_ids)),
+            "parent_agent_id": self.parent_agent_id,
+            "aggregation_weight": max(0.0, float(self.aggregation_weight or 0.0)),
+            "spatial_precision": self.spatial_precision,
+            "role_demand_refs": list(dict.fromkeys(self.role_demand_refs)),
+            "resource_uncertainty": self.resource_uncertainty,
+            "initial_relationship_refs": list(dict.fromkeys(self.initial_relationship_refs)),
+            "activation_triggers": self.activation_triggers,
+            "created_round": max(0, int(self.created_round or 0)),
+            "activation_round": self.activation_round,
+            "scenario_version_ref": self.scenario_version_ref,
+            "profile_confidence": clamp_probability(
+                self.profile_confidence or self.evidence_confidence
+            ),
+            "generation_reason": self.generation_reason,
+            "is_aggregate": bool(self.is_aggregate),
+            "runtime_lifecycle": self.runtime_lifecycle,
+            "authority_evidence_refs": list(dict.fromkeys(self.authority_evidence_refs)),
         }
 
     def to_reddit_format(self) -> Dict[str, Any]:
@@ -1150,6 +1216,15 @@ class AgentRelationshipEdge:
     validation_status: str = ""
     epistemic_status: str = "inferred"  # observed | inferred | speculative
     evidence_anchors: List[str] = field(default_factory=list)
+    relationship_contract_id: str = ""
+    contract_version: str = ""
+    initial_trust: float = 0.5
+    initial_dependency: float = 0.5
+    initial_coordination: float = 0.5
+    required_capabilities: List[str] = field(default_factory=list)
+    required_permissions: List[str] = field(default_factory=list)
+    source_role_demand_refs: List[str] = field(default_factory=list)
+    target_role_demand_refs: List[str] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -1175,6 +1250,15 @@ class AgentRelationshipEdge:
             "validation_status": self.validation_status,
             "epistemic_status": self.epistemic_status or "inferred",
             "evidence_anchors": list(dict.fromkeys(self.evidence_anchors)),
+            "relationship_contract_id": self.relationship_contract_id or self.edge_id,
+            "contract_version": self.contract_version,
+            "initial_trust": clamp_probability(self.initial_trust),
+            "initial_dependency": clamp_probability(self.initial_dependency),
+            "initial_coordination": clamp_probability(self.initial_coordination),
+            "required_capabilities": list(dict.fromkeys(self.required_capabilities)),
+            "required_permissions": list(dict.fromkeys(self.required_permissions)),
+            "source_role_demand_refs": list(dict.fromkeys(self.source_role_demand_refs)),
+            "target_role_demand_refs": list(dict.fromkeys(self.target_role_demand_refs)),
         }
 
 

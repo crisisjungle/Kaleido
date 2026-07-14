@@ -2,12 +2,17 @@ import { reactive } from 'vue'
 
 const STORAGE_KEY = 'kaleido.workflow.navigation.v1'
 const SCENE_SNAPSHOT_KEY = 'kaleido.sceneComposer.snapshot.v1'
+const STATUS_PRIORITY = {
+  todo: 0,
+  active: 1,
+  done: 2
+}
 
 const createDefaultSteps = () => [
-  { step: 1, name: '背景生成', route: { name: 'SceneComposer', query: { restore: '1' } }, visited: false, status: 'todo', summary: '' },
-  { step: 2, name: '场景设计', route: null, visited: false, status: 'todo', summary: '' },
-  { step: 3, name: '开始模拟', route: null, visited: false, status: 'todo', summary: '' },
-  { step: 4, name: '报告互动', route: null, visited: false, status: 'todo', summary: '' }
+  { step: 1, name: '背景定义', route: { name: 'SceneComposer', query: { restore: '1' } }, visited: false, status: 'todo', summary: '' },
+  { step: 2, name: '场景生成', route: null, visited: false, status: 'todo', summary: '' },
+  { step: 3, name: '推演运行', route: null, visited: false, status: 'todo', summary: '' },
+  { step: 4, name: '分析与报告', route: null, visited: false, status: 'todo', summary: '' }
 ]
 
 function safeParse(value, fallback) {
@@ -28,6 +33,7 @@ function loadState() {
     steps: defaultSteps.map((item) => ({
       ...item,
       ...(savedByStep.get(item.step) || {}),
+      name: item.name,
       route: savedByStep.get(item.step)?.route ?? item.route
     }))
   }
@@ -43,11 +49,25 @@ function persist() {
 export function markWorkflowStep(step, updates = {}) {
   const index = state.steps.findIndex((item) => item.step === Number(step))
   if (index === -1) return
+  const current = state.steps[index]
+  const nextUpdates = { ...updates }
+  const requestedStatus = nextUpdates.status
+  const currentPriority = STATUS_PRIORITY[current.status] ?? 0
+  const requestedPriority = STATUS_PRIORITY[requestedStatus] ?? currentPriority
+
+  if (requestedStatus && requestedPriority < currentPriority && !nextUpdates.forceStatus) {
+    nextUpdates.status = current.status
+    if (current.summary && nextUpdates.summary) {
+      nextUpdates.summary = current.summary
+    }
+  }
+  delete nextUpdates.forceStatus
+
   state.steps[index] = {
-    ...state.steps[index],
-    ...updates,
+    ...current,
+    ...nextUpdates,
     step: Number(step),
-    visited: updates.visited ?? true,
+    visited: nextUpdates.visited ?? true,
     updatedAt: new Date().toISOString()
   }
   persist()

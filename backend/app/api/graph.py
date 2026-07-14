@@ -3,6 +3,7 @@
 采用项目上下文机制，服务端持久化状态
 """
 
+import json
 import os
 import traceback
 from flask import request, jsonify
@@ -11,6 +12,15 @@ from . import graph_bp
 from ..config import Config
 from ..services.ontology_generator import OntologyGenerator
 from ..services.graph_builder import GraphBuilderService
+from ..services.display_localization import public_error_message, sanitize_public_dto
+from ..services.effort_contract import (
+    EffortContractError,
+    assert_effort_reference,
+    build_effort_snapshot,
+    normalize_effort_snapshot,
+)
+from ..services.map_seed_manager import MapSeedManager
+from ..services.semantic_input import SemanticArtifactStore
 from ..services.task_executor import TaskExecutor
 from ..services.text_processor import TextProcessor
 from ..utils.file_parser import FileParser
@@ -20,6 +30,22 @@ from ..models.project import ProjectManager, ProjectStatus
 
 # 获取日志器
 logger = get_logger('envfish.api')
+
+
+def _public_success(data, **metadata):
+    payload = {"success": True, "data": sanitize_public_dto(data)}
+    payload.update(metadata)
+    return jsonify(payload)
+
+
+def _public_failure(error, fallback: str, status: int = 500, *, code: str | None = None):
+    payload = {
+        "success": False,
+        "error": public_error_message(error, fallback),
+    }
+    if code:
+        payload["code"] = code
+    return jsonify(payload), status
 
 
 def allowed_file(filename: str) -> bool:
@@ -42,13 +68,14 @@ def get_project(project_id: str):
     if not project:
         return jsonify({
             "success": False,
-            "error": f"项目不存在: {project_id}"
+            "error": "项目不存在"
         }), 404
     
-    return jsonify({
-        "success": True,
-        "data": project.to_dict()
-    })
+    payload = project.to_dict()
+    semantic_artifact = SemanticArtifactStore.get_by_ref(project.semantic_artifact_ref)
+    if semantic_artifact:
+        payload["semantic_input"] = semantic_artifact.model_dump(mode="json")
+    return _public_success(payload)
 
 
 @graph_bp.route('/project/list', methods=['GET'])
@@ -59,11 +86,7 @@ def list_projects():
     limit = request.args.get('limit', 50, type=int)
     projects = ProjectManager.list_projects(limit=limit)
     
-    return jsonify({
-        "success": True,
-        "data": [p.to_dict() for p in projects],
-        "count": len(projects)
-    })
+    return _public_success([p.to_dict() for p in projects], count=len(projects))
 
 
 @graph_bp.route('/project/<project_id>', methods=['DELETE'])
@@ -76,12 +99,12 @@ def delete_project(project_id: str):
     if not success:
         return jsonify({
             "success": False,
-            "error": f"项目不存在或删除失败: {project_id}"
+            "error": "项目不存在或删除失败"
         }), 404
     
     return jsonify({
         "success": True,
-        "message": f"项目已删除: {project_id}"
+        "message": "项目已删除"
     })
 
 
@@ -95,7 +118,7 @@ def reset_project(project_id: str):
     if not project:
         return jsonify({
             "success": False,
-            "error": f"项目不存在: {project_id}"
+            "error": "项目不存在"
         }), 404
     
     # 重置到本体已生成状态
@@ -111,8 +134,8 @@ def reset_project(project_id: str):
     
     return jsonify({
         "success": True,
-        "message": f"项目已重置: {project_id}",
-        "data": project.to_dict()
+        "message": "项目已重置",
+        "data": sanitize_public_dto(project.to_dict())
     })
 
 
@@ -151,8 +174,18 @@ def generate_ontology():
         
         # 获取参数
         simulation_requirement = request.form.get('simulation_requirement', '')
-        project_name = request.form.get('project_name', 'Unnamed Project')
+        project_name = request.form.get('project_name', '未命名项目')
         additional_context = request.form.get('additional_context', '')
+        map_seed_id = str(request.form.get('map_seed_id') or '').strip()
+        scene_id = str(request.form.get('scene_id') or '').strip()
+        semantic_artifact_ref = {}
+        if request.form.get('semantic_artifact_ref'):
+            try:
+                semantic_artifact_ref = json.loads(request.form.get('semantic_artifact_ref') or '{}')
+            except (TypeError, ValueError, json.JSONDecodeError):
+                semantic_artifact_ref = {}
+        requested_effort_snapshot_id = str(request.form.get('effort_snapshot_id') or '').strip()
+        requested_effort_level = str(request.form.get('effort_level') or 'high').strip()
         
         logger.debug(f"项目名称: {project_name}")
         logger.debug(f"模拟需求: {simulation_requirement[:100]}...")
@@ -160,7 +193,7 @@ def generate_ontology():
         if not simulation_requirement:
             return jsonify({
                 "success": False,
-                "error": "请提供模拟需求描述 (simulation_requirement)"
+                "error": "请提供模拟需求描述"
             }), 400
         
         # 获取上传的文件
@@ -171,9 +204,31 @@ def generate_ontology():
                 "error": "请至少上传一个文档文件"
             }), 400
         
+        seed = MapSeedManager.get_seed(map_seed_id) if map_seed_id else None
+        if map_seed_id and not seed:
+            return jsonify({"success": False, "error": "地图种子不存在"}), 400
+        if seed and seed.get("effort_snapshot"):
+            effort_snapshot = normalize_effort_snapshot(seed.get("effort_snapshot"))
+            if requested_effort_snapshot_id:
+                assert_effort_reference(
+                    effort_snapshot,
+                    effort_snapshot_id=requested_effort_snapshot_id,
+                    requested_level=requested_effort_level,
+                )
+        else:
+            effort_snapshot = build_effort_snapshot(
+                requested_effort_level,
+                effort_snapshot_id=requested_effort_snapshot_id or None,
+            )
+
         # 创建项目
-        project = ProjectManager.create_project(name=project_name)
+        project = ProjectManager.create_project(name=project_name, effort_snapshot=effort_snapshot)
         project.simulation_requirement = simulation_requirement
+        project.map_seed_id = map_seed_id or None
+        project.scene_id = scene_id or None
+        project.semantic_artifact_ref = (
+            semantic_artifact_ref if isinstance(semantic_artifact_ref, dict) else {}
+        )
         logger.info(f"创建项目: {project.project_id}")
         
         # 保存文件并提取文本
@@ -234,24 +289,21 @@ def generate_ontology():
         ProjectManager.save_project(project)
         logger.info(f"=== 本体生成完成 === 项目ID: {project.project_id}")
         
-        return jsonify({
-            "success": True,
-            "data": {
+        return _public_success({
                 "project_id": project.project_id,
                 "project_name": project.name,
                 "ontology": project.ontology,
                 "analysis_summary": project.analysis_summary,
                 "files": project.files,
-                "total_text_length": project.total_text_length
-            }
+                "total_text_length": project.total_text_length,
+                "effort_snapshot": project.effort_snapshot,
+                "map_seed_id": project.map_seed_id,
         })
-        
+    except EffortContractError as e:
+        return _public_failure(e, "分析投入配置冲突，请返回上一步重新确认。", 409, code="effort_snapshot_conflict")
     except Exception as e:
-        return jsonify({
-            "success": False,
-            "error": str(e),
-            "traceback": traceback.format_exc()
-        }), 500
+        logger.exception("生成本体定义失败")
+        return _public_failure(e, "场景本体生成失败，请稍后重试。")
 
 
 # ============== 接口2：构建图谱 ==============
@@ -285,7 +337,7 @@ def build_graph():
         # 检查配置
         errors = []
         if not Config.ZEP_API_KEY:
-            errors.append("ZEP_API_KEY未配置")
+            errors.append("图谱服务尚未配置")
         if errors:
             logger.error(f"配置错误: {errors}")
             return jsonify({
@@ -301,7 +353,7 @@ def build_graph():
         if not project_id:
             return jsonify({
                 "success": False,
-                "error": "请提供 project_id"
+                "error": "缺少项目信息"
             }), 400
         
         # 获取项目
@@ -309,7 +361,7 @@ def build_graph():
         if not project:
             return jsonify({
                 "success": False,
-                "error": f"项目不存在: {project_id}"
+                "error": "项目不存在"
             }), 404
         
         # 检查项目状态
@@ -318,13 +370,13 @@ def build_graph():
         if project.status == ProjectStatus.CREATED:
             return jsonify({
                 "success": False,
-                "error": "项目尚未生成本体，请先调用 /ontology/generate"
+                "error": "项目尚未生成本体，请先完成场景资料分析"
             }), 400
         
         if project.status == ProjectStatus.GRAPH_BUILDING and not force:
             return jsonify({
                 "success": False,
-                "error": "图谱正在构建中，请勿重复提交。如需强制重建，请添加 force: true",
+                "error": "图谱正在构建中，请勿重复提交",
                 "task_id": project.graph_build_task_id
             }), 400
         
@@ -336,7 +388,7 @@ def build_graph():
             project.error = None
         
         # 获取配置
-        graph_name = data.get('graph_name', project.name or 'Envfish Graph')
+        graph_name = data.get('graph_name', project.name or 'Envfish 推演图谱')
         chunk_size = data.get('chunk_size', project.chunk_size or Config.DEFAULT_CHUNK_SIZE)
         chunk_overlap = data.get('chunk_overlap', project.chunk_overlap or Config.DEFAULT_CHUNK_OVERLAP)
         
@@ -411,7 +463,7 @@ def build_graph():
                 ensure_running()
                 task_manager.update_task(
                     task_id,
-                    message="创建Zep图谱...",
+                    message="创建推演图谱…",
                     progress=10
                 )
                 graph_id = builder.create_graph(name=graph_name)
@@ -459,7 +511,7 @@ def build_graph():
                 ensure_running()
                 task_manager.update_task(
                     task_id,
-                    message="等待Zep处理数据...",
+                    message="等待图谱引擎处理数据…",
                     progress=55
                 )
                 
@@ -522,14 +574,15 @@ def build_graph():
                 build_logger.debug(traceback.format_exc())
                 
                 project.status = ProjectStatus.FAILED
-                project.error = str(e)
+                public_error = public_error_message(e, "图谱构建失败，请稍后重试。")
+                project.error = public_error
                 ProjectManager.save_project(project)
                 
                 task_manager.update_task(
                     task_id,
                     status=TaskStatus.FAILED,
-                    message=f"构建失败: {str(e)}",
-                    error=traceback.format_exc()
+                    message=public_error,
+                    error=public_error
                 )
         
         TaskExecutor(task_manager).start(task_id=task_id, target=build_task)
@@ -539,16 +592,13 @@ def build_graph():
             "data": {
                 "project_id": project_id,
                 "task_id": task_id,
-                "message": "图谱构建任务已启动，请通过 /task/{task_id} 查询进度"
+                "message": "图谱构建任务已启动"
             }
         })
         
     except Exception as e:
-        return jsonify({
-            "success": False,
-            "error": str(e),
-            "traceback": traceback.format_exc()
-        }), 500
+        logger.exception("启动图谱构建失败")
+        return _public_failure(e, "图谱构建启动失败，请稍后重试。")
 
 
 # ============== 任务查询接口 ==============
@@ -563,13 +613,10 @@ def get_task(task_id: str):
     if not task:
         return jsonify({
             "success": False,
-            "error": f"任务不存在: {task_id}"
+            "error": "任务不存在"
         }), 404
     
-    return jsonify({
-        "success": True,
-        "data": task.to_dict()
-    })
+    return _public_success(task.to_dict())
 
 
 @graph_bp.route('/tasks', methods=['GET'])
@@ -579,11 +626,7 @@ def list_tasks():
     """
     tasks = TaskManager().list_tasks()
     
-    return jsonify({
-        "success": True,
-        "data": [t.to_dict() for t in tasks],
-        "count": len(tasks)
-    })
+    return _public_success([t.to_dict() for t in tasks], count=len(tasks))
 
 
 # ============== 图谱数据接口 ==============
@@ -597,23 +640,17 @@ def get_graph_data(graph_id: str):
         if not Config.ZEP_API_KEY:
             return jsonify({
                 "success": False,
-                "error": "ZEP_API_KEY未配置"
+                "error": "图谱服务尚未配置"
             }), 500
         
         builder = GraphBuilderService(api_key=Config.ZEP_API_KEY)
         graph_data = builder.get_graph_data(graph_id)
         
-        return jsonify({
-            "success": True,
-            "data": graph_data
-        })
+        return _public_success(graph_data)
         
     except Exception as e:
-        return jsonify({
-            "success": False,
-            "error": str(e),
-            "traceback": traceback.format_exc()
-        }), 500
+        logger.exception("获取图谱数据失败")
+        return _public_failure(e, "获取图谱数据失败，请稍后重试。")
 
 
 @graph_bp.route('/delete/<graph_id>', methods=['DELETE'])
@@ -625,7 +662,7 @@ def delete_graph(graph_id: str):
         if not Config.ZEP_API_KEY:
             return jsonify({
                 "success": False,
-                "error": "ZEP_API_KEY未配置"
+                "error": "图谱服务尚未配置"
             }), 500
         
         builder = GraphBuilderService(api_key=Config.ZEP_API_KEY)
@@ -633,12 +670,9 @@ def delete_graph(graph_id: str):
         
         return jsonify({
             "success": True,
-            "message": f"图谱已删除: {graph_id}"
+            "message": "图谱已删除"
         })
         
     except Exception as e:
-        return jsonify({
-            "success": False,
-            "error": str(e),
-            "traceback": traceback.format_exc()
-        }), 500
+        logger.exception("删除图谱失败")
+        return _public_failure(e, "删除图谱失败，请稍后重试。")

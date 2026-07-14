@@ -10,9 +10,11 @@ fallbacks.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import random
+import re
 import sys
 import time
 from collections import defaultdict
@@ -27,6 +29,27 @@ sys.path.insert(0, _backend_dir)
 
 from dotenv import load_dotenv
 
+from app.services.agent_action_contract import (  # noqa: E402
+    AGENT_ACTION_CONTRACT_VERSION,
+    action_label_zh,
+    consume_action_resources,
+    validate_agent_action,
+)
+from app.services.agent_emergence_detector import AgentEmergenceDetector  # noqa: E402
+from app.services.agent_relationship_runtime import (  # noqa: E402
+    apply_relationship_event,
+    build_interaction_event,
+    build_lifecycle_event,
+    initialize_relationship_states,
+    relationship_contract_id,
+    upsert_relationship_state,
+)
+from app.services.agent_state_mutation import (  # noqa: E402
+    apply_state_delta,
+    mutation_refs,
+    resource_mutation_records,
+)
+from app.services.effort_contract import build_effort_snapshot, effort_operation_limit  # noqa: E402
 from app.services.envfish_models import (  # noqa: E402
     clamp_probability,
     clamp_score,
@@ -42,8 +65,10 @@ from app.services.mechanism_simulation_service import (  # noqa: E402
     is_llm_mechanism_architecture,
     normalize_simulation_architecture,
 )
+from app.services.policy_runtime import execute_policy_binding  # noqa: E402
 from app.services.risk_artifact_store import load_risk_artifacts, write_risk_artifacts  # noqa: E402
 from app.services.risk_definition_builder import RiskDefinitionBuilder  # noqa: E402
+from app.services.risk_emergence_detector import RiskEmergenceDetector  # noqa: E402
 from app.services.risk_event_engine import RiskEventEngine  # noqa: E402
 from app.services.risk_runtime_tracker import RiskRuntimeTracker  # noqa: E402
 from app.services.simulation_ipc import CommandType, SimulationIPCServer  # noqa: E402
@@ -54,6 +79,54 @@ if os.path.exists(os.path.join(_project_root, ".env")):
     load_dotenv(os.path.join(_project_root, ".env"))
 
 logger = get_logger("envfish.runtime")
+
+
+_CJK_PATTERN = re.compile(r"[\u3400-\u9fff]")
+_INTERNAL_DISPLAY_PATTERN = re.compile(
+    r"(?:(?:agent|entity|region|snapshot|fallback|unknown|unnamed)(?![A-Za-z0-9])|"
+    r"[a-z][a-z0-9]*(?:_[a-z0-9]+)+|"
+    r"[A-Z][a-z0-9]+(?:[A-Z][A-Za-z0-9]+)+|"
+    r"[0-9a-f]{8}-[0-9a-f-]{20,})",
+    re.IGNORECASE,
+)
+
+
+def _chinese_display_text(value: Any, fallback: str) -> str:
+    """Validate generated display copy while leaving machine fields untouched."""
+
+    text = str(value or "").strip()
+    if (
+        not text
+        or not _CJK_PATTERN.search(text)
+        or re.search(r"[A-Za-z]", text)
+        or _INTERNAL_DISPLAY_PATTERN.search(text)
+    ):
+        return fallback
+    return text
+
+
+def _chinese_display_list(value: Any, fallback: List[str], *, limit: int = 8) -> List[str]:
+    raw_items = value if isinstance(value, list) else []
+    localized = [_chinese_display_text(item, "") for item in raw_items[:limit]]
+    localized = [item for item in localized if item]
+    return localized or list(fallback[:limit])
+
+
+def _localized_reason_records(
+    value: Any,
+    *,
+    display_fields: Dict[str, str],
+    limit: int,
+) -> List[Dict[str, Any]]:
+    localized: List[Dict[str, Any]] = []
+    for item in (value if isinstance(value, list) else [])[:limit]:
+        if not isinstance(item, dict):
+            continue
+        normalized = dict(item)
+        for field_name, fallback in display_fields.items():
+            normalized[field_name] = _chinese_display_text(item.get(field_name), fallback)
+        localized.append(normalized)
+    return localized
 
 
 def append_jsonl(path: str, payload: Dict[str, Any]) -> None:
@@ -68,6 +141,79 @@ def normalize_search_mode(value: Any) -> str:
     if normalized == "deep_search":
         return "deep_search"
     return "fast"
+
+
+def _stable_runtime_event_id(prefix: str, *parts: Any) -> str:
+    payload = json.dumps(
+        parts,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    )
+    return f"{prefix}_{hashlib.sha256(payload.encode('utf-8')).hexdigest()[:20]}"
+
+
+def _causal_metadata(
+    event_id: str,
+    causal_context: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Normalize only caller-proven causal links.
+
+    Missing context deliberately creates a new root.  In particular, this
+    helper never infers parents from a shared round, region, or endpoint.
+    """
+
+    context = dict(causal_context or {})
+    parent_event_ids: List[str] = []
+    for value in context.get("parent_event_ids") or []:
+        parent_id = str(value or "").strip()
+        if parent_id and parent_id != event_id and parent_id not in parent_event_ids:
+            parent_event_ids.append(parent_id)
+    root_event_id = str(context.get("root_event_id") or "").strip()
+    if not root_event_id:
+        root_event_id = parent_event_ids[0] if parent_event_ids else event_id
+    try:
+        hop = max(0, int(context.get("hop")))
+    except (TypeError, ValueError):
+        hop = 1 if parent_event_ids else 0
+    return {
+        "root_event_id": root_event_id,
+        "parent_event_ids": parent_event_ids,
+        "hop": hop,
+    }
+
+
+def _child_causal_context(event: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    if not isinstance(event, dict):
+        return {}
+    event_id = str(event.get("event_id") or event.get("relationship_event_id") or "").strip()
+    if not event_id:
+        return {}
+    try:
+        hop = max(0, int(event.get("hop") or 0)) + 1
+    except (TypeError, ValueError):
+        hop = 1
+    return {
+        "root_event_id": str(event.get("root_event_id") or event_id),
+        "parent_event_ids": [event_id],
+        "hop": hop,
+    }
+
+
+def normalize_runtime_injection_schedule(
+    variable: Dict[str, Any],
+    *,
+    current_round: int,
+) -> Dict[str, Any]:
+    """Fill an omitted start round without treating explicit round zero as empty."""
+
+    start_round = variable.get("start_round")
+    if start_round is None or start_round == "":
+        variable["start_round"] = current_round + 1 if current_round else 1
+    else:
+        variable["start_round"] = max(0, int(start_round))
+    return variable
 
 
 class EnvFishRuntime:
@@ -100,7 +246,32 @@ class EnvFishRuntime:
         self.transport_edges = deepcopy(self.config.get("transport_edges") or [])
         self.actor_profiles = deepcopy(self.config.get("actor_profiles") or self.config.get("agent_configs") or [])
         self.agent_relationship_graph = deepcopy(self.config.get("agent_relationship_graph") or [])
+        self.relationship_states = initialize_relationship_states(
+            self.agent_relationship_graph,
+            self.config.get("relationship_states") or [],
+        )
         self.region_agent_index = deepcopy(self.config.get("region_agent_index") or {})
+        self.role_demands = deepcopy(self.config.get("role_demands") or [])
+        self.policy_execution_plan = deepcopy(self.config.get("policy_execution_plan") or {})
+        self.policy_execution_runtime_state = deepcopy(
+            self.config.get("policy_execution_runtime_state") or {}
+        )
+        self.agent_plan_source = str(self.config.get("agent_plan_source") or "").strip()
+        planning_input = dict(self.config.get("scenario_planning_input") or {})
+        self.scenario_version_ref = {
+            "artifact_id": str(planning_input.get("planning_input_id") or self.config.get("simulation_id") or ""),
+            "contract_version": str(planning_input.get("contract_version") or "scenario_planning.v2"),
+            "content_hash": str(planning_input.get("content_hash") or ""),
+        }
+        self.effort_snapshot = deepcopy(
+            self.config.get("effort_snapshot")
+            or build_effort_snapshot(
+                "high",
+                effort_snapshot_id=f"effort_runtime_{hashlib.sha256(self.sim_dir.encode('utf-8')).hexdigest()[:12]}",
+                source="legacy_migration",
+            )
+        )
+        self.agent_emergence_state = deepcopy(self.config.get("agent_emergence_state") or {})
         self.interaction_policies = deepcopy(self.config.get("interaction_policies") or {})
         self.runtime_limits = deepcopy(self.config.get("runtime_limits") or {})
         self.risk_objects = deepcopy(self.config.get("risk_objects") or [])
@@ -136,7 +307,19 @@ class EnvFishRuntime:
         self.spread_log = os.path.join(self.sim_dir, "spread_event_ledger.jsonl")
         self.agent_interaction_log = os.path.join(self.sim_dir, "agent_interaction_ledger.jsonl")
         self.dynamic_edge_log = os.path.join(self.sim_dir, "dynamic_edge_ledger.jsonl")
+        self.relationship_event_log = os.path.join(self.sim_dir, "relationship_event_ledger.jsonl")
+        self.relationship_state_path = os.path.join(self.sim_dir, "latest_relationship_states.json")
+        self.state_mutation_log = os.path.join(self.sim_dir, "state_mutation_ledger.jsonl")
         self.round_reasoning_log = os.path.join(self.sim_dir, "round_reasoning_ledger.jsonl")
+        self.agent_emergence_log = os.path.join(self.sim_dir, "agent_emergence_ledger.jsonl")
+        self.agent_lineage_log = os.path.join(self.sim_dir, "agent_lineage_ledger.jsonl")
+        self.agent_candidate_log = os.path.join(self.sim_dir, "agent_candidate_ledger.jsonl")
+        self.agent_action_decision_log = os.path.join(self.sim_dir, "agent_action_decision_ledger.jsonl")
+        self.policy_execution_log = os.path.join(self.sim_dir, "policy_execution_ledger.jsonl")
+        self.policy_execution_state_path = os.path.join(
+            self.sim_dir, "latest_policy_execution_state.json"
+        )
+        self.agent_emergence_state_path = os.path.join(self.sim_dir, "agent_emergence_state.json")
         self.state_matrix_log = os.path.join(self.sim_dir, "round_state_matrix.jsonl")
         self.intervention_log = os.path.join(self.sim_dir, "intervention_log.jsonl")
         self.interview_log = os.path.join(self.sim_dir, "interviews.jsonl")
@@ -146,7 +329,9 @@ class EnvFishRuntime:
         self.transport_edges_path = os.path.join(self.sim_dir, "transport_edges_snapshot.json")
 
         self.risk_tracker = RiskRuntimeTracker()
+        self.agent_emergence_detector = AgentEmergenceDetector()
         self.risk_definition_builder = RiskDefinitionBuilder()
+        self.risk_emergence_detector = RiskEmergenceDetector()
         self.risk_event_engine = RiskEventEngine()
         risk_artifacts = load_risk_artifacts(self.sim_dir)
         if risk_artifacts.get("risk_definitions"):
@@ -158,6 +343,13 @@ class EnvFishRuntime:
         if risk_artifacts.get("risk_objects"):
             self.risk_objects = deepcopy(risk_artifacts.get("risk_objects") or self.risk_objects)
         self.risk_events = list(risk_artifacts.get("risk_events") or [])
+        self.risk_contract_version = int(
+            risk_artifacts.get("risk_contract_version")
+            or self.config.get("risk_contract_version")
+            or 1
+        )
+        self.risk_generation_audit = dict(risk_artifacts.get("risk_generation_audit") or self.config.get("risk_generation_audit") or {})
+        self.risk_candidate_ledger = list(risk_artifacts.get("risk_candidate_ledger") or [])
         self.risk_generation_notes = list((risk_artifacts.get("risk_objects_summary") or {}).get("generation_notes") or [])
 
         dump_json(self.region_graph_path, self.region_graph)
@@ -191,6 +383,8 @@ class EnvFishRuntime:
                 continue
             self.relationships_by_source[source_agent_id].append(edge)
             self.relationships_by_target[target_agent_id].append(edge)
+        self._rebuild_relationship_state_index()
+        dump_json(self.relationship_state_path, self.relationship_states)
         for actor in self.actor_profiles:
             primary_region = str(actor.get("primary_region") or actor.get("home_region_id") or "")
             if primary_region:
@@ -237,6 +431,23 @@ class EnvFishRuntime:
         )
         self.allowed_cross_region_hops = int(self.interaction_policies.get("allowed_cross_region_hops") or 1)
         self.llm_relation_search_budget = int(self.interaction_policies.get("llm_relation_search_budget") or 0)
+        self.max_deep_agents_per_round = int(
+            effort_operation_limit(self.effort_snapshot, "step3", "deep_agents_per_round")
+        )
+        self.action_candidates_per_agent = int(
+            effort_operation_limit(self.effort_snapshot, "step3", "actions_per_deep_agent")
+        )
+        self.dynamic_relationship_validation_limit = int(
+            effort_operation_limit(
+                self.effort_snapshot,
+                "step3",
+                "dynamic_relationship_validations_per_round",
+            )
+        )
+        if self.agent_plan_source == "agent_v2":
+            self.allowed_cross_region_hops = int(
+                effort_operation_limit(self.effort_snapshot, "step3", "relationship_hops")
+            )
         self.edge_promotion_enabled = bool(self.interaction_policies.get("edge_promotion_enabled", True))
         # M8: relationships are no longer a read-only decoration — an active edge
         # transmits stress between its endpoint regions (state is a byproduct of
@@ -357,7 +568,7 @@ class EnvFishRuntime:
                         "strength": 0.6,
                         "confidence": 0.42,
                         "evidence": {"fallback": "region_neighbors"},
-                        "rationale": "Legacy neighbor adjacency converted into directional transport edge.",
+                        "rationale": "已将历史相邻区域关系转换为有方向的传输边。",
                         "metadata": {},
                     }
                 )
@@ -453,7 +664,17 @@ class EnvFishRuntime:
 
     def _persist_runtime_config(self) -> None:
         self.config["injected_variables"] = deepcopy(self.injections)
+        self.config["actor_profiles"] = deepcopy(self.actor_profiles)
+        self.config["effort_snapshot"] = deepcopy(self.effort_snapshot)
+        self.config["agent_emergence_state"] = deepcopy(self.agent_emergence_state)
+        self.config["policy_execution_runtime_state"] = deepcopy(
+            self.policy_execution_runtime_state
+        )
+        self.config["runtime_agent_count"] = len(self.actor_profiles)
+        self.config["relationship_states"] = deepcopy(self.relationship_states)
         self.config["risk_definitions"] = deepcopy(self.risk_definitions)
+        self.config["risk_contract_version"] = int(self.risk_contract_version)
+        self.config["risk_generation_audit"] = deepcopy(self.risk_generation_audit)
         self.config["latest_risk_runtime_state"] = deepcopy(self.latest_risk_runtime_state)
         self.config["risk_objects"] = deepcopy(self.risk_objects)
         self.config["primary_risk_object_id"] = str(
@@ -462,6 +683,181 @@ class EnvFishRuntime:
         self.config["primary_active_risk_id"] = str(self.latest_risk_runtime_state.get("primary_active_risk_id") or "")
         dump_json(self.config_path, self.config)
         dump_json(os.path.join(self.sim_dir, "injected_variables.json"), self.injections)
+        dump_json(self.agent_emergence_state_path, self.agent_emergence_state)
+        dump_json(self.relationship_state_path, self.relationship_states)
+        dump_json(self.policy_execution_state_path, self.policy_execution_runtime_state)
+
+    def _execute_policy_plan(self, round_num: int) -> Dict[str, Any]:
+        bindings = list((self.policy_execution_plan or {}).get("policy_bindings") or [])
+        if not bindings:
+            return {
+                "contract_version": "policy-execution-runtime.v2",
+                "round_number": int(round_num),
+                "execution_records": [],
+                "state_mutation_records": [],
+                "emergent_role_demands": [],
+                "summary": {"due_count": 0, "executed_count": 0, "blocked_count": 0},
+            }
+
+        previous_event_ids = set(
+            str(item or "")
+            for item in (self.policy_execution_runtime_state.get("recorded_execution_ids") or [])
+            if str(item or "")
+        )
+        available_region_ids = [*self.region_lookup.keys(), *self.subregion_lookup.keys()]
+        execution_records: List[Dict[str, Any]] = []
+        state_mutations: List[Dict[str, Any]] = []
+        emergent_demands: List[Dict[str, Any]] = []
+        for binding in bindings:
+            event = execute_policy_binding(
+                binding=binding,
+                actor_lookup=self.actor_lookup,
+                round_number=round_num,
+                available_target_region_ids=available_region_ids,
+                scenario_version_ref=self.scenario_version_ref,
+            )
+            if not event:
+                continue
+            event_id = str(event.get("policy_execution_id") or "")
+            if event_id in previous_event_ids:
+                continue
+
+            event_mutations: List[Dict[str, Any]] = []
+            source_ref = {
+                "artifact_id": event_id,
+                "contract_version": str(event.get("contract_version") or "policy-execution-event.v2"),
+            }
+            evidence_refs = [
+                f"policy:{event.get('policy_id')}",
+                *(f"event:{item}" for item in binding.get("target_event_ids") or []),
+                *(f"mechanism:{item}" for item in binding.get("target_mechanism_ids") or []),
+            ]
+            if event.get("execution_status") == "executed":
+                for settlement in event.get("resource_settlements") or []:
+                    event_mutations.extend(
+                        resource_mutation_records(
+                            settlement=settlement,
+                            round_number=round_num,
+                            source_ref=source_ref,
+                            agent_id=settlement.get("agent_id"),
+                            evidence_refs=evidence_refs,
+                            scenario_version_ref=self.scenario_version_ref,
+                            source_type="policy_execution",
+                        )
+                    )
+                for target_region_id in event.get("target_region_ids") or []:
+                    target = self.region_lookup.get(str(target_region_id))
+                    target_type = "region"
+                    if target is None:
+                        target = self.subregion_lookup.get(str(target_region_id))
+                        target_type = "subregion"
+                    if target is None:
+                        continue
+                    next_vector, records = apply_state_delta(
+                        current_vector=target.get("state_vector") or {},
+                        delta=event.get("state_effect_delta") or {},
+                        round_number=round_num,
+                        source_ref=source_ref,
+                        target_type=target_type,
+                        target_id=target_region_id,
+                        evidence_refs=evidence_refs,
+                        scenario_version_ref=self.scenario_version_ref,
+                        source_type="policy_execution",
+                    )
+                    target["state_vector"] = next_vector
+                    event_mutations.extend(records)
+            else:
+                missing_capabilities = list(event.get("missing_capability_keys") or [])
+                required_capabilities = list(event.get("required_capability_keys") or [])
+                demand_capabilities = missing_capabilities or required_capabilities
+                if demand_capabilities:
+                    emergent_demands.append(
+                        {
+                            "demand_id": f"runtime_policy_{event.get('policy_id')}_{round_num}",
+                            "demand_key": "policy_execution",
+                            "label_zh": f"{event.get('policy_label_zh') or '政策措施'}执行能力",
+                            "required_capability_keys": demand_capabilities,
+                            "required_permissions": [
+                                permission
+                                for group in event.get("missing_permission_groups") or []
+                                for permission in group
+                            ],
+                            "required_resource_types": list(
+                                event.get("missing_resource_keys") or []
+                            ),
+                            "jurisdiction_region_ids": list(
+                                event.get("target_region_ids") or []
+                            ),
+                            "required_resolution": "organization",
+                            "importance": "high",
+                            "evidence_score": 78,
+                            "impact_score": 70,
+                            "evidence_refs": [f"policy_execution:{event_id}"],
+                            "source_type": "runtime_policy_execution",
+                            "runtime_discovered": True,
+                            "created_round": int(round_num),
+                        }
+                    )
+
+            event["state_mutation_refs"] = mutation_refs(event_mutations)
+            event["state_mutation_count"] = len(event_mutations)
+            execution_records.append(event)
+            state_mutations.extend(event_mutations)
+            previous_event_ids.add(event_id)
+            append_jsonl(self.policy_execution_log, event)
+            for record in event_mutations:
+                append_jsonl(self.state_mutation_log, record)
+
+        if any(
+            record.get("execution_status") == "executed"
+            and any(
+                str(region_id) in self.subregion_lookup
+                for region_id in record.get("target_region_ids") or []
+            )
+            for record in execution_records
+        ):
+            self._roll_up_subregions()
+
+        historical_records = list(
+            self.policy_execution_runtime_state.get("recent_execution_records") or []
+        )
+        historical_records.extend(execution_records)
+        self.policy_execution_runtime_state = {
+            "contract_version": "policy-execution-runtime.v2",
+            "last_round": int(round_num),
+            "recorded_execution_ids": sorted(previous_event_ids),
+            "recent_execution_records": historical_records[-100:],
+            "summary": {
+                "recorded_count": len(previous_event_ids),
+                "executed_count": sum(
+                    1
+                    for item in historical_records
+                    if item.get("execution_status") == "executed"
+                ),
+                "blocked_count": sum(
+                    1
+                    for item in historical_records
+                    if item.get("execution_status") == "blocked"
+                ),
+            },
+        }
+        dump_json(self.policy_execution_state_path, self.policy_execution_runtime_state)
+        return {
+            "contract_version": "policy-execution-runtime.v2",
+            "round_number": int(round_num),
+            "execution_records": execution_records,
+            "state_mutation_records": state_mutations,
+            "emergent_role_demands": emergent_demands,
+            "summary": {
+                "due_count": len(execution_records),
+                "executed_count": sum(
+                    1 for item in execution_records if item.get("execution_status") == "executed"
+                ),
+                "blocked_count": sum(
+                    1 for item in execution_records if item.get("execution_status") == "blocked"
+                ),
+            },
+        }
 
     def _refresh_risk_runtime(
         self,
@@ -504,6 +900,23 @@ class EnvFishRuntime:
         if runtime_events:
             self.risk_events.extend(runtime_events)
 
+        runtime_metrics = dict(self.risk_generation_audit.get("runtime_metrics") or {})
+        sample_count = int(runtime_metrics.get("sample_count") or 0) + 1
+        active_count = sum(
+            1
+            for state in (next_bundle.get("risk_states") or [])
+            if str(state.get("status") or "watch") not in {"dormant", "resolved"}
+        )
+        previous_average = float(runtime_metrics.get("average_active_risk_count") or 0.0)
+        runtime_metrics.update({
+            "sample_count": sample_count,
+            "average_active_risk_count": round(((previous_average * (sample_count - 1)) + active_count) / sample_count, 3),
+            "latest_active_risk_count": active_count,
+            "emergence_count": int(self.risk_generation_audit.get("emergence_count") or 0),
+            "primary_risk_switch_count": int(runtime_metrics.get("primary_risk_switch_count") or 0) + len(transition_events),
+        })
+        self.risk_generation_audit["runtime_metrics"] = runtime_metrics
+
         artifacts = write_risk_artifacts(
             sim_dir=self.sim_dir,
             risk_definitions=self.risk_definitions,
@@ -517,12 +930,175 @@ class EnvFishRuntime:
             risk_events=self.risk_events,
             append_runtime_history=append_history,
             runtime_history_entry=next_bundle,
+            risk_contract_version=self.risk_contract_version,
+            generation_audit=self.risk_generation_audit,
+            candidate_ledger=self.risk_candidate_ledger,
         )
         self.latest_risk_runtime_state = deepcopy(artifacts["latest_risk_runtime_state"])
         self.risk_objects = deepcopy(artifacts["risk_objects"])
         self._rebuild_risk_indexes()
         self._persist_runtime_config()
         return self.latest_risk_runtime_state
+
+    def _detect_runtime_risk_emergence(
+        self,
+        *,
+        round_num: int,
+        active_variables: List[Dict[str, Any]],
+    ) -> None:
+        if self.risk_contract_version < 2:
+            return
+        runtime_relationships = list(self.agent_relationship_graph)
+        runtime_relationships.extend(
+            self._serialize_dynamic_edge(edge)
+            for edge in self.dynamic_edge_lookup.values()
+            if edge.get("status") not in {"expired", "dormant"}
+        )
+        result = self.risk_emergence_detector.detect(
+            existing_definitions=self.risk_definitions,
+            previous_runtime_bundle=self.latest_risk_runtime_state,
+            current_round=round_num,
+            active_variables=active_variables,
+            regions=self.region_graph,
+            subregions=self.subregion_graph,
+            profiles=self.actor_profiles,
+            transport_edges=self.transport_edges,
+            agent_relationships=runtime_relationships,
+            simulation_requirement=self.config.get("simulation_requirement") or "",
+        )
+        self.risk_definitions = deepcopy(result.risk_definitions)
+        self.latest_risk_runtime_state["emergence_candidates"] = deepcopy(result.candidate_state)
+        if result.events:
+            self.risk_events.extend(result.events)
+        if result.candidate_ledger:
+            for item in result.candidate_ledger:
+                self.risk_candidate_ledger.append({
+                    **item,
+                    "round": round_num,
+                    "timestamp": self._now(),
+                })
+        if result.created_risk_ids:
+            self.risk_generation_audit["emergence_count"] = int(self.risk_generation_audit.get("emergence_count") or 0) + len(result.created_risk_ids)
+            self.risk_generation_audit["latest_emergent_risk_ids"] = list(result.created_risk_ids)
+            runtime_metrics = dict(self.risk_generation_audit.get("runtime_metrics") or {})
+            runtime_metrics["emergence_count"] = int(self.risk_generation_audit["emergence_count"])
+            self.risk_generation_audit["runtime_metrics"] = runtime_metrics
+        if result.dormant_risk_ids:
+            self.risk_generation_audit["latest_dormant_risk_ids"] = list(result.dormant_risk_ids)
+        self._rebuild_risk_indexes()
+
+    def _activate_due_runtime_agents(self, round_num: int) -> List[Dict[str, Any]]:
+        events: List[Dict[str, Any]] = []
+        for actor in self.actor_profiles:
+            lifecycle = actor.get("runtime_lifecycle") or {}
+            lifecycle_status = str(lifecycle.get("lifecycle_status") or "")
+            if lifecycle_status not in {"pending_activation", "dormant"}:
+                continue
+            activation_round = int(
+                lifecycle.get("activation_round")
+                or actor.get("activation_round")
+                or round_num + 1
+            )
+            if activation_round > round_num:
+                continue
+            lifecycle["lifecycle_status"] = "active"
+            lifecycle["activated_round"] = round_num
+            actor["runtime_lifecycle"] = lifecycle
+            actor["lifecycle_status"] = "active"
+            actor["activation_round"] = activation_round
+            event = {
+                "event_id": f"agent_activation_{actor.get('agent_id')}_{round_num}",
+                "event_type": "agent_activated",
+                "agent_id": actor.get("agent_id"),
+                "round": round_num,
+                "effective_round": round_num,
+                "summary": f"{actor.get('name') or '运行期 Agent'} 已在本轮开始参与推演。",
+                "timestamp": self._now(),
+            }
+            events.append(event)
+            append_jsonl(self.agent_emergence_log, event)
+        return events
+
+    def _detect_runtime_agent_emergence(
+        self,
+        *,
+        round_num: int,
+        active_variables: List[Dict[str, Any]],
+        interactions: Dict[str, Any],
+        feedback: Dict[str, Any],
+        policy_execution: Optional[Dict[str, Any]] = None,
+        risk_runtime: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        result = self.agent_emergence_detector.evaluate(
+            current_round=round_num,
+            actor_profiles=self.actor_profiles,
+            effort_snapshot=self.effort_snapshot,
+            role_demands=self.role_demands,
+            runtime_signals={
+                "active_variables": active_variables,
+                "interactions": interactions,
+                "feedback": feedback,
+                "policy_execution": policy_execution or {},
+                "new_dynamic_edges": list(interactions.get("new_dynamic_edges") or []),
+            },
+            previous_state=self.agent_emergence_state,
+        )
+        self.actor_profiles = deepcopy(result.actor_profiles)
+        self.agent_emergence_state = deepcopy(result.state)
+        for item in result.events:
+            append_jsonl(self.agent_emergence_log, item)
+        for item in result.lineage:
+            append_jsonl(self.agent_lineage_log, item)
+        for item in result.candidate_ledger:
+            append_jsonl(self.agent_candidate_log, item)
+
+        changed_ids = [
+            *result.created_agent_ids,
+            *result.split_agent_ids,
+            *result.activated_agent_ids,
+        ]
+        if changed_ids:
+            self._rebuild_actor_indexes()
+            self._rebuild_risk_indexes()
+            dump_json(os.path.join(self.sim_dir, "profiles_full.json"), self.actor_profiles)
+        self._persist_runtime_config()
+        return {
+            "contract_version": result.state.get("contract_version"),
+            "candidate_count": len(result.state.get("candidates") or {}),
+            "created_agent_ids": list(result.created_agent_ids),
+            "split_agent_ids": list(result.split_agent_ids),
+            "reactivated_agent_ids": list(result.activated_agent_ids),
+            "created_or_split_count": int(result.state.get("created_or_split_count") or 0),
+            "runtime_agent_total_limit": result.state.get("runtime_agent_total_limit"),
+            "runtime_agent_per_round_limit": result.state.get("runtime_agent_per_round_limit"),
+            "events": list(result.events),
+            "lineage": list(result.lineage),
+        }
+
+    def _rebuild_actor_indexes(self) -> None:
+        self.actor_lookup = {
+            int(item.get("agent_id", index)): item
+            for index, item in enumerate(self.actor_profiles)
+            if str(item.get("agent_id", index)).lstrip("-").isdigit()
+        }
+        self.agents_by_region = defaultdict(list)
+        self.agents_by_type = defaultdict(list)
+        self.agents_by_subtype = defaultdict(list)
+        self.agents_by_influence_region = defaultdict(list)
+        for actor in self.actor_profiles:
+            primary_region = str(actor.get("primary_region") or actor.get("home_region_id") or "")
+            if primary_region:
+                self.agents_by_region[primary_region].append(actor)
+            agent_type = str(actor.get("agent_type") or "").lower()
+            agent_subtype = str(actor.get("agent_subtype") or "").lower()
+            if agent_type:
+                self.agents_by_type[agent_type].append(actor)
+            if agent_subtype:
+                self.agents_by_subtype[agent_subtype].append(actor)
+            for region_id in actor.get("influenced_regions") or []:
+                region_key = str(region_id or "").strip()
+                if region_key:
+                    self.agents_by_influence_region[region_key].append(actor)
 
     def run(self) -> None:
         self._write_platform_event("twitter", {"event_type": "simulation_start", "timestamp": self._now()})
@@ -535,6 +1111,7 @@ class EnvFishRuntime:
         for round_num in range(1, self.total_rounds + 1):
             self.current_round = round_num
             self._drain_commands()
+            agent_activation_events = self._activate_due_runtime_agents(round_num)
             self._advance_dynamic_edges(round_num)
 
             active_variables = self._active_variables(round_num)
@@ -542,10 +1119,32 @@ class EnvFishRuntime:
             interactions = self._agent_interaction_update(round_num, active_variables, diffusion)
             self._apply_relationship_coupling(round_num)
             self._apply_mechanism_propagation(round_num)
+            policy_execution = self._execute_policy_plan(round_num)
             feedback = self._human_nature_feedback_update(round_num, active_variables, diffusion, interactions)
             if isinstance(feedback, dict):
                 feedback["detected_feedback_loops"] = self._detect_feedback_loops()
-            snapshot = self._build_snapshot(round_num, active_variables, diffusion, interactions, feedback)
+            agent_emergence = self._detect_runtime_agent_emergence(
+                round_num=round_num,
+                active_variables=active_variables,
+                interactions=interactions,
+                feedback=feedback,
+                policy_execution=policy_execution,
+            )
+            if agent_activation_events:
+                agent_emergence["activation_events"] = agent_activation_events
+            snapshot = self._build_snapshot(
+                round_num,
+                active_variables,
+                diffusion,
+                interactions,
+                feedback,
+                policy_execution,
+            )
+            snapshot["agent_emergence"] = agent_emergence
+            self._detect_runtime_risk_emergence(
+                round_num=round_num,
+                active_variables=active_variables,
+            )
             latest_risk_runtime = self._refresh_risk_runtime(
                 round_num=round_num,
                 snapshot=snapshot,
@@ -692,6 +1291,49 @@ class EnvFishRuntime:
                 modulation[receptor_dim] += extra
         return {key: round(value, 4) for key, value in modulation.items() if abs(value) > 1e-6}
 
+    def _ensure_spread_event_causality(
+        self,
+        transfer: Dict[str, Any],
+        *,
+        round_num: int,
+        ordinal: int,
+    ) -> Dict[str, Any]:
+        """Give every applied transfer an identity without inventing a parent.
+
+        Deterministic fallback transfers already carry an explicit causal chain.
+        LLM/legacy transfers that do not carry one become independent roots; a
+        common round or region is not sufficient evidence to link them.
+        """
+
+        event_id = str(transfer.get("event_id") or "").strip()
+        if not event_id:
+            simulation_id = str((getattr(self, "config", {}) or {}).get("simulation_id") or "runtime")
+            event_id = _stable_runtime_event_id(
+                "spread_event",
+                simulation_id,
+                "applied_transfer",
+                int(round_num),
+                int(ordinal),
+                transfer.get("source_region"),
+                transfer.get("target_region"),
+                transfer.get("transport_edge_id"),
+                transfer.get("channel_type"),
+                transfer.get("transfer_intensity"),
+                transfer.get("delay_rounds"),
+            )
+        transfer["event_id"] = event_id
+        transfer.update(
+            _causal_metadata(
+                event_id,
+                {
+                    "root_event_id": transfer.get("root_event_id"),
+                    "parent_event_ids": transfer.get("parent_event_ids") or [],
+                    "hop": transfer.get("hop"),
+                },
+            )
+        )
+        return transfer
+
     def _environmental_diffusion_update(
         self,
         round_num: int,
@@ -699,14 +1341,25 @@ class EnvFishRuntime:
     ) -> Dict[str, Any]:
         due_transfers = [item for item in self.pending_transfers if item["apply_round"] <= round_num]
         self.pending_transfers = [item for item in self.pending_transfers if item["apply_round"] > round_num]
+        for ordinal, transfer in enumerate(due_transfers):
+            self._ensure_spread_event_causality(
+                transfer,
+                round_num=round_num,
+                ordinal=ordinal,
+            )
         llm_result = self._llm_diffusion(round_num, active_variables, due_transfers)
         if not llm_result:
             llm_result = self._fallback_diffusion(round_num, active_variables, due_transfers)
 
         valid_transfers = []
-        for transfer in llm_result.get("transfers") or []:
+        for transfer_index, transfer in enumerate(llm_result.get("transfers") or []):
             validated = self._validate_transfer(transfer, active_variables)
             if validated:
+                self._ensure_spread_event_causality(
+                    validated,
+                    round_num=round_num,
+                    ordinal=len(due_transfers) + transfer_index,
+                )
                 valid_transfers.append(validated)
                 if validated["delay_rounds"] > 0:
                     scheduled = dict(validated)
@@ -742,6 +1395,10 @@ class EnvFishRuntime:
                 {
                     "round": round_num,
                     "timestamp": self._now(),
+                    "event_id": transfer["event_id"],
+                    "root_event_id": transfer["root_event_id"],
+                    "parent_event_ids": list(transfer.get("parent_event_ids") or []),
+                    "hop": int(transfer.get("hop") or 0),
                     "source_region": transfer["source_region"],
                     "target_region": transfer["target_region"],
                     "transfer_intensity": transfer["transfer_intensity"],
@@ -749,6 +1406,15 @@ class EnvFishRuntime:
                     "persistence": transfer["persistence"],
                     "confidence": transfer["confidence"],
                     "channel_type": transfer.get("channel_type"),
+                    "transport_edge_id": transfer.get("transport_edge_id"),
+                    "path_edge_ids": (
+                        [str(transfer.get("transport_edge_id"))]
+                        if transfer.get("transport_edge_id")
+                        else []
+                    ),
+                    "related_edge_ids": [],
+                    "source_variable_id": transfer.get("source_variable_id"),
+                    "causal_source_type": transfer.get("causal_source_type"),
                     "channel_modulation": transfer.get("channel_modulation") or {},
                     "rationale": transfer["rationale"],
                 },
@@ -757,7 +1423,7 @@ class EnvFishRuntime:
                 platform="twitter",
                 round_num=round_num,
                 agent_id=500000 + self._region_index(transfer["source_region"]),
-                agent_name=self.region_lookup.get(transfer["source_region"], {}).get("name", "EnvField"),
+                agent_name=self.region_lookup.get(transfer["source_region"], {}).get("name", "环境扩散"),
                 action_type="SPREAD_UPDATE",
                 action_args=transfer,
                 result=transfer["rationale"],
@@ -807,11 +1473,41 @@ class EnvFishRuntime:
                 "agent_interactions": [],
                 "agent_environment_effects": [],
                 "turning_points": [],
+                "action_records": [],
+                "state_mutation_records": [],
+                "relationship_events": [],
+                "relationship_states": deepcopy(getattr(self, "relationship_states", [])),
             }
 
-        max_active = int(self.runtime_limits.get("max_active_agents_per_round") or max(12, len(self.actor_profiles) // 4))
+        eligible_profiles = []
+        for actor in self.actor_profiles:
+            lifecycle = actor.get("runtime_lifecycle") or {}
+            lifecycle_status = str(lifecycle.get("lifecycle_status") or "active")
+            activation_round = int(lifecycle.get("activation_round") or 0)
+            if lifecycle_status in {"dormant", "retired", "pending_activation"}:
+                if lifecycle_status != "pending_activation" or activation_round > round_num:
+                    continue
+            eligible_profiles.append(actor)
+        if not eligible_profiles:
+            return {
+                "active_agent_ids": [],
+                "agent_interactions": [],
+                "agent_environment_effects": [],
+                "turning_points": [],
+                "action_records": [],
+                "state_mutation_records": [],
+                "relationship_events": [],
+                "relationship_states": deepcopy(getattr(self, "relationship_states", [])),
+            }
+
+        max_active = int(
+            self.runtime_limits.get("max_active_agents_per_round")
+            or max(12, len(eligible_profiles) // 4)
+        )
+        if getattr(self, "agent_plan_source", "") == "agent_v2":
+            max_active = min(max_active, max(1, int(self.max_deep_agents_per_round)))
         ordered = sorted(
-            self.actor_profiles,
+            eligible_profiles,
             key=self._agent_activation_score,
             reverse=True,
         )
@@ -822,14 +1518,49 @@ class EnvFishRuntime:
         turning_points: List[str] = []
         new_dynamic_edges: List[Dict[str, Any]] = []
         activated_dynamic_edge_ids: List[str] = []
+        relationship_events: List[Dict[str, Any]] = []
+        action_records: List[Dict[str, Any]] = []
+        state_mutation_records: List[Dict[str, Any]] = []
         llm_search_remaining = self.llm_relation_search_budget
+        self._remaining_dynamic_validations = (
+            self.dynamic_relationship_validation_limit
+            if getattr(self, "agent_plan_source", "") == "agent_v2"
+            else 10**9
+        )
 
         for actor in active_agents:
             home_region = self.region_lookup.get(actor.get("primary_region")) or self.region_graph[0]
             home_subregion = self.subregion_lookup.get(actor.get("home_subregion_id") or "")
             actor_id = int(actor.get("agent_id", -1))
-            action_type = self._choose_agent_action(actor, home_region)
+            scenario_version_ref = getattr(self, "scenario_version_ref", {})
+            action_type, action_decision = self._choose_validated_agent_action(actor, home_region)
             action_bundle = self._action_effects(actor, action_type, home_region)
+            action_ref = {
+                "artifact_id": f"agent_action_{round_num}_{actor_id}",
+                "contract_version": AGENT_ACTION_CONTRACT_VERSION,
+            }
+            resource_settlement = consume_action_resources(
+                actor,
+                action_decision["selected_validation"],
+            )
+            action_decision["resource_settlement"] = resource_settlement
+            action_mutations = resource_mutation_records(
+                settlement=resource_settlement,
+                round_number=round_num,
+                source_ref=action_ref,
+                agent_id=actor_id,
+                evidence_refs=actor.get("evidence_refs") or [],
+                scenario_version_ref=scenario_version_ref,
+            )
+            action_decision.update(
+                {
+                    "round": round_num,
+                    "timestamp": self._now(),
+                    "agent_id": actor.get("agent_id"),
+                    "agent_name": actor.get("name") or actor.get("username"),
+                    "region_id": home_region.get("region_id"),
+                }
+            )
             emergent_edges, llm_search_remaining = self._maybe_create_dynamic_edges(actor, round_num, llm_search_remaining)
             if emergent_edges:
                 new_dynamic_edges.extend(emergent_edges)
@@ -840,19 +1571,47 @@ class EnvFishRuntime:
                     )
             relation_edges = self._candidate_relationship_edges(actor)
 
-            actor["state_vector"] = merge_state_vectors(actor.get("state_vector") or {}, action_bundle["actor_delta"])
+            actor["state_vector"], actor_mutations = apply_state_delta(
+                current_vector=actor.get("state_vector") or {},
+                delta=action_bundle["actor_delta"],
+                round_number=round_num,
+                source_ref=action_ref,
+                target_type="agent",
+                target_id=actor_id,
+                evidence_refs=actor.get("evidence_refs") or [],
+                scenario_version_ref=scenario_version_ref,
+            )
+            action_mutations.extend(actor_mutations)
             if action_bundle["region_delta"]:
-                home_region["state_vector"] = merge_state_vectors(home_region["state_vector"], action_bundle["region_delta"])
+                home_region["state_vector"], region_mutations = apply_state_delta(
+                    current_vector=home_region["state_vector"],
+                    delta=action_bundle["region_delta"],
+                    round_number=round_num,
+                    source_ref=action_ref,
+                    target_type="region",
+                    target_id=home_region.get("region_id"),
+                    evidence_refs=actor.get("evidence_refs") or [],
+                    scenario_version_ref=scenario_version_ref,
+                )
+                action_mutations.extend(region_mutations)
                 if home_subregion is not None:
-                    home_subregion["state_vector"] = merge_state_vectors(
-                        home_subregion.get("state_vector") or {},
-                        action_bundle["region_delta"],
+                    home_subregion["state_vector"], subregion_mutations = apply_state_delta(
+                        current_vector=home_subregion.get("state_vector") or {},
+                        delta=action_bundle["region_delta"],
+                        round_number=round_num,
+                        source_ref=action_ref,
+                        target_type="region",
+                        target_id=home_subregion.get("region_id"),
+                        evidence_refs=actor.get("evidence_refs") or [],
+                        scenario_version_ref=scenario_version_ref,
                     )
+                    action_mutations.extend(subregion_mutations)
                 environment_effects.append(
                     {
                         "agent_id": actor.get("agent_id"),
-                        "agent_name": actor.get("username") or actor.get("name"),
+                        "agent_name": actor.get("name") or actor.get("username"),
                         "action_type": action_type,
+                        "action_label_zh": action_label_zh(action_type),
                         "region_id": home_region.get("region_id"),
                         "region_name": home_region.get("name"),
                         "home_subregion_id": home_subregion.get("region_id") if home_subregion else "",
@@ -862,44 +1621,132 @@ class EnvFishRuntime:
 
             target_actor, selected_edge = self._select_interaction_target(relation_edges, action_type)
             if target_actor and action_bundle["target_delta"]:
-                target_actor["state_vector"] = merge_state_vectors(
-                    target_actor.get("state_vector") or {},
-                    action_bundle["target_delta"],
+                target_actor["state_vector"], target_mutations = apply_state_delta(
+                    current_vector=target_actor.get("state_vector") or {},
+                    delta=action_bundle["target_delta"],
+                    round_number=round_num,
+                    source_ref=action_ref,
+                    target_type="agent",
+                    target_id=target_actor.get("agent_id"),
+                    evidence_refs=[
+                        *(actor.get("evidence_refs") or []),
+                        *((selected_edge or {}).get("evidence") or []),
+                    ],
+                    scenario_version_ref=scenario_version_ref,
                 )
+                action_mutations.extend(target_mutations)
                 selected_dynamic_edge_id = str(selected_edge.get("edge_id") or "") if selected_edge else ""
+                interaction_event_id = _stable_runtime_event_id(
+                    "agent_interaction_event",
+                    str((getattr(self, "config", {}) or {}).get("simulation_id") or "runtime"),
+                    int(round_num),
+                    actor.get("agent_id"),
+                    target_actor.get("agent_id"),
+                    action_type,
+                    selected_dynamic_edge_id,
+                )
+                interaction_causality = _causal_metadata(interaction_event_id)
                 if selected_dynamic_edge_id in self.dynamic_edge_lookup:
-                    self._activate_dynamic_edge(selected_dynamic_edge_id, round_num)
+                    self._activate_dynamic_edge(
+                        selected_dynamic_edge_id,
+                        round_num,
+                        causal_context=_child_causal_context(
+                            {"event_id": interaction_event_id, **interaction_causality}
+                        ),
+                    )
                     activated_dynamic_edge_ids.append(selected_dynamic_edge_id)
                 relation_type = None
                 if selected_edge:
                     relation_type = selected_edge.get("edge_type") or selected_edge.get("relation_type") or selected_edge.get("name")
+                relationship_event = None
+                relationship_state = None
+                if selected_edge and getattr(self, "agent_plan_source", "") == "agent_v2":
+                    confidence = clamp_probability(selected_edge.get("confidence", 0.6))
+                    relationship_event = build_interaction_event(
+                        round_number=round_num,
+                        edge=selected_edge,
+                        action_key=action_type,
+                        action_label_zh=action_label_zh(action_type),
+                        source_action_ref=action_ref,
+                        state_mutation_refs=mutation_refs(action_mutations),
+                        success_status="success" if confidence >= 0.5 else "partial",
+                        scenario_version_ref=scenario_version_ref,
+                        causal_context=_child_causal_context(
+                            {"event_id": interaction_event_id, **interaction_causality}
+                        ),
+                    )
+                    relationship_state = self._record_relationship_event(
+                        selected_edge,
+                        relationship_event,
+                    )
+                    relationship_events.append(relationship_event)
                 interaction_record = {
                     "round": round_num,
                     "timestamp": self._now(),
+                    "event_id": interaction_event_id,
+                    **interaction_causality,
                     "source_agent_id": actor.get("agent_id"),
-                    "source_agent_name": actor.get("username") or actor.get("name"),
+                    "source_agent_name": actor.get("name") or actor.get("username"),
                     "target_agent_id": target_actor.get("agent_id"),
-                    "target_agent_name": target_actor.get("username") or target_actor.get("name"),
+                    "target_agent_name": target_actor.get("name") or target_actor.get("username"),
                     "action_type": action_type,
+                    "action_label_zh": action_label_zh(action_type),
                     "channel": action_bundle["interaction_channel"],
                     "delta": action_bundle["target_delta"],
                     "rationale": action_bundle["rationale"],
                     "relation_type": relation_type,
                     "edge_layer": selected_edge.get("layer", "structural") if selected_edge else "structural",
                     "edge_id": selected_edge.get("edge_id") if selected_edge else None,
+                    "path_edge_ids": (
+                        [str(selected_edge.get("edge_id"))]
+                        if selected_edge and selected_edge.get("edge_id")
+                        else []
+                    ),
+                    "related_edge_ids": [
+                        str(edge_id)
+                        for edge_id in ((selected_edge or {}).get("mechanism_edge_ids") or [])
+                        if str(edge_id or "").strip()
+                    ],
                     "source_region_id": home_region.get("region_id"),
                     "target_region_id": target_actor.get("primary_region") or target_actor.get("home_region_id"),
+                    "relationship_event_id": (
+                        relationship_event.get("relationship_event_id")
+                        if relationship_event
+                        else ""
+                    ),
+                    "relationship_state_ref": (
+                        {
+                            "artifact_id": relationship_state.get("relationship_state_id"),
+                            "contract_version": relationship_state.get("contract_version"),
+                        }
+                        if relationship_state
+                        else {}
+                    ),
                 }
                 interactions.append(interaction_record)
                 append_jsonl(self.agent_interaction_log, interaction_record)
+
+            action_decision["state_mutation_refs"] = mutation_refs(action_mutations)
+            action_records.append(deepcopy(action_decision))
+            state_mutation_records.extend(action_mutations)
+            if getattr(self, "agent_action_decision_log", ""):
+                append_jsonl(self.agent_action_decision_log, action_decision)
+            if getattr(self, "state_mutation_log", ""):
+                for mutation in action_mutations:
+                    append_jsonl(self.state_mutation_log, mutation)
 
             self._write_action(
                 platform="reddit" if actor.get("agent_type") == "human" else "twitter",
                 round_num=round_num,
                 agent_id=int(actor.get("agent_id", -1)),
-                agent_name=actor.get("username") or actor.get("name"),
-                action_type=action_type.upper(),
+                agent_name=actor.get("name") or actor.get("username"),
+                action_type=action_type,
                 action_args={
+                    "action_label_zh": action_label_zh(action_type),
+                    "action_contract_version": AGENT_ACTION_CONTRACT_VERSION,
+                    "action_validation": action_decision["selected_validation"],
+                    "resource_settlement": action_decision["resource_settlement"],
+                    "state_mutation_refs": action_decision["state_mutation_refs"],
                     "region_delta": action_bundle["region_delta"],
                     "target_delta": action_bundle["target_delta"],
                     "home_region": home_region.get("region_id"),
@@ -920,6 +1767,10 @@ class EnvFishRuntime:
             "agent_environment_effects": environment_effects,
             "new_dynamic_edges": new_dynamic_edges,
             "activated_dynamic_edge_ids": activated_dynamic_edge_ids,
+            "relationship_events": relationship_events,
+            "relationship_states": deepcopy(getattr(self, "relationship_states", [])),
+            "action_records": action_records,
+            "state_mutation_records": state_mutation_records,
             "dynamic_edge_summary": {
                 "search_mode": self.search_mode,
                 "total_dynamic_edges": len(active_dynamic_edges),
@@ -930,7 +1781,7 @@ class EnvFishRuntime:
             "top_active_agents": [
                 {
                     "agent_id": actor.get("agent_id"),
-                    "agent_name": actor.get("username") or actor.get("name"),
+                    "agent_name": actor.get("name") or actor.get("username"),
                     "agent_type": actor.get("agent_type") or actor.get("node_family"),
                     "primary_region": actor.get("primary_region"),
                     "state_vector": actor.get("state_vector"),
@@ -990,6 +1841,36 @@ class EnvFishRuntime:
                 merged[key] = value
         return merged
 
+    def _rebuild_relationship_state_index(self) -> None:
+        self.relationship_state_lookup = {
+            str(item.get("relationship_contract_id") or ""): item
+            for item in getattr(self, "relationship_states", [])
+            if str(item.get("relationship_contract_id") or "")
+        }
+
+    def _ensure_relationship_state(self, edge: Dict[str, Any]) -> Dict[str, Any]:
+        self.relationship_states, state = upsert_relationship_state(
+            getattr(self, "relationship_states", []),
+            edge,
+        )
+        self._rebuild_relationship_state_index()
+        return self.relationship_state_lookup[state["relationship_contract_id"]]
+
+    def _record_relationship_event(self, edge: Dict[str, Any], event: Dict[str, Any]) -> Dict[str, Any]:
+        state = self._ensure_relationship_state(edge)
+        next_state = apply_relationship_event(state, event)
+        contract_id = str(next_state["relationship_contract_id"])
+        self.relationship_states = [
+            next_state if str(item.get("relationship_contract_id") or "") == contract_id else item
+            for item in self.relationship_states
+        ]
+        self._rebuild_relationship_state_index()
+        if getattr(self, "relationship_event_log", ""):
+            append_jsonl(self.relationship_event_log, event)
+        if getattr(self, "relationship_state_path", ""):
+            dump_json(self.relationship_state_path, self.relationship_states)
+        return next_state
+
     def _rebuild_dynamic_edge_index(self) -> None:
         self.dynamic_edges_by_source = defaultdict(list)
         for edge in self.dynamic_edge_lookup.values():
@@ -1002,8 +1883,17 @@ class EnvFishRuntime:
             self.dynamic_edges_by_source[source_agent_id].append(edge)
 
     def _serialize_dynamic_edge(self, edge: Dict[str, Any]) -> Dict[str, Any]:
+        edge_id = str(edge.get("edge_id") or "").strip()
+        mechanism_edge_ids = [
+            str(item)
+            for item in (edge.get("mechanism_edge_ids") or [])
+            if str(item or "").strip()
+        ]
         return {
             "edge_id": edge.get("edge_id"),
+            "path_edge_ids": [edge_id] if edge_id else [],
+            "related_edge_ids": mechanism_edge_ids,
+            "mechanism_edge_ids": mechanism_edge_ids,
             "source_agent_id": edge.get("source_agent_id"),
             "target_agent_id": edge.get("target_agent_id"),
             "source_region_id": edge.get("source_region_id"),
@@ -1027,16 +1917,56 @@ class EnvFishRuntime:
             "reconfirm_count": int(edge.get("reconfirm_count") or 0),
         }
 
-    def _record_dynamic_edge_event(self, round_num: int, event_type: str, edge: Dict[str, Any]) -> None:
-        append_jsonl(
-            self.dynamic_edge_log,
-            {
-                "round": round_num,
-                "timestamp": self._now(),
-                "event_type": event_type,
-                **self._serialize_dynamic_edge(edge),
-            },
+    def _record_dynamic_edge_event(
+        self,
+        round_num: int,
+        event_type: str,
+        edge: Dict[str, Any],
+        *,
+        causal_context: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        simulation_id = str((getattr(self, "config", {}) or {}).get("simulation_id") or "runtime")
+        event_id = _stable_runtime_event_id(
+            "dynamic_edge_event",
+            simulation_id,
+            edge.get("edge_id"),
+            int(round_num),
+            event_type,
+            edge.get("reconfirm_count"),
+            edge.get("status"),
+            list((causal_context or {}).get("parent_event_ids") or []),
         )
+        event_record = {
+            "round": round_num,
+            "timestamp": self._now(),
+            "event_id": event_id,
+            **_causal_metadata(event_id, causal_context),
+            "event_type": event_type,
+            **self._serialize_dynamic_edge(edge),
+        }
+        append_jsonl(self.dynamic_edge_log, event_record)
+        if (
+            getattr(self, "agent_plan_source", "") == "agent_v2"
+            and event_type
+            in {
+                "created",
+                "reawakened",
+                "updated",
+                "activated",
+                "promoted",
+                "expired",
+                "dormant",
+            }
+        ):
+            relationship_event = build_lifecycle_event(
+                round_number=round_num,
+                edge=edge,
+                lifecycle_event_type=event_type,
+                scenario_version_ref=getattr(self, "scenario_version_ref", {}),
+                causal_context=_child_causal_context(event_record),
+            )
+            self._record_relationship_event(edge, relationship_event)
+        return event_record
 
     def _advance_dynamic_edges(self, round_num: int) -> None:
         changed = False
@@ -1373,11 +2303,31 @@ class EnvFishRuntime:
             if str(edge.get("target_agent_id") or "").isdigit()
         }
 
-        for link_field in ("counterpart_agent_ids", "social_links", "ecology_links"):
-            for raw_target_id in actor.get(link_field) or []:
-                if not str(raw_target_id or "").isdigit():
+        if getattr(self, "agent_plan_source", "") != "agent_v2":
+            for link_field in ("counterpart_agent_ids", "social_links", "ecology_links"):
+                for raw_target_id in actor.get(link_field) or []:
+                    if not str(raw_target_id or "").isdigit():
+                        continue
+                    target_id = int(raw_target_id)
+                    if target_id == actor_id or target_id in seen_targets:
+                        continue
+                    target_actor = self.actor_lookup.get(target_id)
+                    if not target_actor:
+                        continue
+                    relation_edges.append(
+                        self._make_fallback_relationship_edge(
+                            source_actor=actor,
+                            target_actor=target_actor,
+                            rationale=f"{actor.get('name') or actor.get('username')} 与 {target_actor.get('name') or target_actor.get('username')} 共享结构化 counterpart 关联。",
+                            route_sources=[link_field],
+                        )
+                    )
+                    seen_targets.add(target_id)
+
+            for inbound_edge in self.relationships_by_target.get(actor_id, []):
+                if not str(inbound_edge.get("source_agent_id") or "").isdigit():
                     continue
-                target_id = int(raw_target_id)
+                target_id = int(inbound_edge.get("source_agent_id"))
                 if target_id == actor_id or target_id in seen_targets:
                     continue
                 target_actor = self.actor_lookup.get(target_id)
@@ -1387,31 +2337,12 @@ class EnvFishRuntime:
                     self._make_fallback_relationship_edge(
                         source_actor=actor,
                         target_actor=target_actor,
-                        rationale=f"{actor.get('name') or actor.get('username')} 与 {target_actor.get('name') or target_actor.get('username')} 共享结构化 counterpart 关联。",
-                        route_sources=[link_field],
+                        rationale=inbound_edge.get("rationale")
+                        or f"{actor.get('name') or actor.get('username')} 对 {target_actor.get('name') or target_actor.get('username')} 形成反馈影响。",
+                        route_sources=["reverse_structural_link"],
                     )
                 )
                 seen_targets.add(target_id)
-
-        for inbound_edge in self.relationships_by_target.get(actor_id, []):
-            if not str(inbound_edge.get("source_agent_id") or "").isdigit():
-                continue
-            target_id = int(inbound_edge.get("source_agent_id"))
-            if target_id == actor_id or target_id in seen_targets:
-                continue
-            target_actor = self.actor_lookup.get(target_id)
-            if not target_actor:
-                continue
-            relation_edges.append(
-                self._make_fallback_relationship_edge(
-                    source_actor=actor,
-                    target_actor=target_actor,
-                    rationale=inbound_edge.get("rationale")
-                    or f"{actor.get('name') or actor.get('username')} 对 {target_actor.get('name') or target_actor.get('username')} 形成反馈影响。",
-                    route_sources=["reverse_structural_link"],
-                )
-            )
-            seen_targets.add(target_id)
 
         # M8: real runs ship an empty agent_relationship_graph and empty link
         # fields, so the interaction ledger was always empty — agents never had a
@@ -1421,7 +2352,7 @@ class EnvFishRuntime:
         # partners. This is a routing heuristic (epistemic_status=speculative), it
         # is bounded by `_colocation_candidate_limit`, and it is additive so any
         # run that already carries structural edges is untouched.
-        if not relation_edges:
+        if not relation_edges and getattr(self, "agent_plan_source", "") != "agent_v2":
             relation_edges.extend(
                 self._colocation_candidate_edges(actor, seen_targets)
             )
@@ -1597,7 +2528,7 @@ class EnvFishRuntime:
                 target_agent_id,
                 {
                     "target_agent_id": target_agent_id,
-                    "target_agent_name": target_actor.get("username") or target_actor.get("name"),
+                    "target_agent_name": target_actor.get("name") or target_actor.get("username"),
                     "target_region_id": target_region_id,
                     "target_agent_type": target_actor.get("agent_type") or target_actor.get("node_family"),
                     "target_agent_subtype": target_actor.get("agent_subtype") or target_actor.get("role_type"),
@@ -1620,21 +2551,22 @@ class EnvFishRuntime:
                     bonus=0.14,
                 )
 
-        relevant_risk_ids = set(self.agent_risk_lookup.get(source_agent_id, []))
-        for risk_id, regions in self.risk_region_lookup.items():
-            if source_region_id in regions:
-                relevant_risk_ids.add(risk_id)
-        for risk_id in relevant_risk_ids:
-            for target_agent_id in self.risk_actor_lookup.get(risk_id, []):
-                target_actor = self.actor_lookup.get(target_agent_id)
-                if not target_actor:
-                    continue
-                add_candidate(
-                    target_actor,
-                    "shared_risk_object",
-                    evidence={"risk_object_ids": [risk_id]},
-                    bonus=0.24,
-                )
+        if self.risk_contract_version < 2:
+            relevant_risk_ids = set(self.agent_risk_lookup.get(source_agent_id, []))
+            for risk_id, regions in self.risk_region_lookup.items():
+                if source_region_id in regions:
+                    relevant_risk_ids.add(risk_id)
+            for risk_id in relevant_risk_ids:
+                for target_agent_id in self.risk_actor_lookup.get(risk_id, []):
+                    target_actor = self.actor_lookup.get(target_agent_id)
+                    if not target_actor:
+                        continue
+                    add_candidate(
+                        target_actor,
+                        "shared_risk_object",
+                        evidence={"risk_object_ids": [risk_id]},
+                        bonus=0.24,
+                    )
 
         actor_type = str(actor.get("agent_type") or "").lower()
         actor_subtype = str(actor.get("agent_subtype") or "").lower()
@@ -1702,20 +2634,22 @@ class EnvFishRuntime:
         if not self.llm or not candidates or self.max_new_dynamic_edges_per_agent <= 0:
             return []
         source_region_id = str(actor.get("primary_region") or actor.get("home_region_id") or "").strip()
+        source_agent_payload = {
+            "agent_id": actor.get("agent_id"),
+            "name": actor.get("name") or actor.get("username"),
+            "agent_type": actor.get("agent_type"),
+            "agent_subtype": actor.get("agent_subtype"),
+            "primary_region": source_region_id,
+            "state_vector": actor.get("state_vector") or {},
+            "influenced_regions": actor.get("influenced_regions") or [],
+        }
+        if self.risk_contract_version < 2:
+            source_agent_payload["risk_object_ids"] = self.agent_risk_lookup.get(int(actor.get("agent_id", -1)), [])
         prompt = {
-            "task": "Select a small number of plausible cross-region emergent edges for this EnvFish round.",
+            "task": "为本轮 EnvFish 推演选择少量可信的跨区域涌现关系，并返回严格 JSON。",
             "round": round_num,
             "search_mode": self.search_mode,
-            "source_agent": {
-                "agent_id": actor.get("agent_id"),
-                "name": actor.get("username") or actor.get("name"),
-                "agent_type": actor.get("agent_type"),
-                "agent_subtype": actor.get("agent_subtype"),
-                "primary_region": source_region_id,
-                "state_vector": actor.get("state_vector") or {},
-                "influenced_regions": actor.get("influenced_regions") or [],
-                "risk_object_ids": self.agent_risk_lookup.get(int(actor.get("agent_id", -1)), []),
-            },
+            "source_agent": source_agent_payload,
             "candidate_targets": candidates,
             "schema": {
                 "proposals": [
@@ -1726,7 +2660,7 @@ class EnvFishRuntime:
                         "confidence": 0.0,
                         "ttl_rounds": 2,
                         "routing_basis": ["neighbor_region"],
-                        "rationale": "string",
+                        "rationale": "简体中文关系生成依据",
                     }
                 ]
             },
@@ -1737,20 +2671,32 @@ class EnvFishRuntime:
                 "Keep strength and confidence between 0 and 1.",
                 "Keep ttl_rounds between 1 and 5.",
                 "Prefer candidates with multiple routing_basis entries.",
-                "Return valid JSON only.",
+                "rationale 必须使用简体中文，禁止使用 snake_case、类名、UUID 或内部编号作为显示内容。",
+                "edge_type、routing_basis 等机器枚举字段可保留英文，不能直接复制到 rationale。",
+                "只返回合法 JSON。",
             ],
         }
         try:
             result = self.llm.chat_json(
                 messages=[
-                    {"role": "system", "content": "Return compact JSON only. Respect the candidate list strictly."},
+                    {"role": "system", "content": "只返回紧凑 JSON，并严格使用候选列表。所有展示字段必须是简体中文，禁止显示 snake_case、类名或内部编号。"},
                     {"role": "user", "content": json.dumps(prompt, ensure_ascii=False)},
                 ],
                 temperature=0.2,
                 max_tokens=900,
             )
-            proposals = result.get("proposals") or []
-            return [item for item in proposals if isinstance(item, dict)]
+            proposals = result.get("proposals") if isinstance(result, dict) else []
+            localized = []
+            for item in proposals if isinstance(proposals, list) else []:
+                if not isinstance(item, dict):
+                    continue
+                normalized = dict(item)
+                normalized["rationale"] = _chinese_display_text(
+                    item.get("rationale"),
+                    "基于跨区域传播路径与候选关系生成。",
+                )
+                localized.append(normalized)
+            return localized
         except Exception:
             return []
 
@@ -1811,10 +2757,7 @@ class EnvFishRuntime:
                     "confidence": confidence,
                     "ttl_rounds": ttl_rounds,
                     "routing_basis": candidate.get("route_sources") or [],
-                    "rationale": (
-                        f"Round {round_num} cross-region bridge triggered by "
-                        f"{' + '.join(candidate.get('route_sources') or ['neighbor_region'])}."
-                    ),
+                    "rationale": f"第 {round_num} 轮依据跨区域传播路径与候选关系建立临时连接。",
                 }
             )
         return proposals
@@ -1852,13 +2795,16 @@ class EnvFishRuntime:
         edge_id = f"dynamic::{source_agent_id}::{target_agent_id}::{edge_type}"
         evidence = self._merge_dynamic_evidence(candidate.get("evidence") or {}, proposal.get("evidence") or {})
         edge = self.dynamic_edge_lookup.get(edge_id)
+        latest_dynamic_event: Optional[Dict[str, Any]] = None
 
         if edge:
+            update_causal_context: Dict[str, Any] = {}
             if edge.get("status") == "dormant":
                 # a dormant relationship re-forms: reawaken it, keeping its scar history
-                edge.setdefault("history", []).append({"round": round_num, "event": "reawakened", "reason": "reconfirmed"})
+                edge.setdefault("history", []).append({"round": round_num, "event": "reawakened", "reason": "关系再次得到确认"})
                 edge["reawakened_round"] = round_num
-                self._record_dynamic_edge_event(round_num, "reawakened", edge)
+                reawakened_event = self._record_dynamic_edge_event(round_num, "reawakened", edge)
+                update_causal_context = _child_causal_context(reawakened_event)
             edge["strength"] = clamp_probability(max(float(edge.get("strength") or 0), strength))
             edge["confidence"] = clamp_probability(max(float(edge.get("confidence") or 0), confidence))
             edge["ttl_rounds"] = max(int(edge.get("ttl_rounds") or 1), ttl_rounds)
@@ -1873,8 +2819,12 @@ class EnvFishRuntime:
             edge["evidence"] = self._merge_dynamic_evidence(edge.get("evidence") or {}, evidence)
             edge["rationale"] = str(proposal.get("rationale") or edge.get("rationale") or "")
             edge["reconfirm_count"] = int(edge.get("reconfirm_count") or 1) + 1
-            self._record_dynamic_edge_event(round_num, "updated", edge)
-            self._maybe_promote_edge(edge, round_num)
+            latest_dynamic_event = self._record_dynamic_edge_event(
+                round_num,
+                "updated",
+                edge,
+                causal_context=update_causal_context,
+            )
         else:
             edge = {
                 "edge_id": edge_id,
@@ -1902,13 +2852,23 @@ class EnvFishRuntime:
                 "reconfirm_count": 1,
             }
             self.dynamic_edge_lookup[edge_id] = edge
-            self._record_dynamic_edge_event(round_num, "created", edge)
+            latest_dynamic_event = self._record_dynamic_edge_event(round_num, "created", edge)
 
-        self._maybe_promote_edge(edge, round_num)
+        self._maybe_promote_edge(
+            edge,
+            round_num,
+            causal_context=_child_causal_context(latest_dynamic_event),
+        )
         self._rebuild_dynamic_edge_index()
         return edge
 
-    def _maybe_promote_edge(self, edge: Dict[str, Any], round_num: int) -> bool:
+    def _maybe_promote_edge(
+        self,
+        edge: Dict[str, Any],
+        round_num: int,
+        *,
+        causal_context: Optional[Dict[str, Any]] = None,
+    ) -> bool:
         """Promote a repeatedly-reconfirmed, strong relationship into the stable
         structural skeleton — relationships that keep re-forming should consolidate
         instead of jittering create/expire/recreate forever. Lowered to reconfirm
@@ -1924,14 +2884,25 @@ class EnvFishRuntime:
             edge["origin"] = "runtime_promoted"
             edge["status"] = "stable"
             edge["expires_after_round"] = self.total_rounds + int(edge.get("ttl_rounds") or self.default_dynamic_ttl)
-            self._record_dynamic_edge_event(round_num, "promoted", edge)
+            self._record_dynamic_edge_event(
+                round_num,
+                "promoted",
+                edge,
+                causal_context=causal_context,
+            )
             return True
         return False
 
-    def _activate_dynamic_edge(self, edge_id: str, round_num: int) -> None:
+    def _activate_dynamic_edge(
+        self,
+        edge_id: str,
+        round_num: int,
+        *,
+        causal_context: Optional[Dict[str, Any]] = None,
+    ) -> Optional[Dict[str, Any]]:
         edge = self.dynamic_edge_lookup.get(edge_id)
         if not edge:
-            return
+            return None
         edge["last_activated_round"] = round_num
         edge["status"] = "active"
         edge["strength"] = clamp_probability(float(edge.get("strength") or 0) + 0.04)
@@ -1941,9 +2912,19 @@ class EnvFishRuntime:
             round_num + int(edge.get("ttl_rounds") or self.default_dynamic_ttl) - 1,
         )
         edge["reconfirm_count"] = int(edge.get("reconfirm_count") or 1) + 1
-        self._maybe_promote_edge(edge, round_num)
-        self._record_dynamic_edge_event(round_num, "activated", edge)
+        activated_event = self._record_dynamic_edge_event(
+            round_num,
+            "activated",
+            edge,
+            causal_context=causal_context,
+        )
+        self._maybe_promote_edge(
+            edge,
+            round_num,
+            causal_context=_child_causal_context(activated_event),
+        )
         self._rebuild_dynamic_edge_index()
+        return activated_event
 
     def _maybe_create_dynamic_edges(
         self,
@@ -1956,6 +2937,12 @@ class EnvFishRuntime:
         candidates = self._collect_cross_region_candidates(actor, round_num)
         if not candidates:
             return [], llm_search_remaining
+        if getattr(self, "agent_plan_source", "") == "agent_v2":
+            remaining = max(0, int(getattr(self, "_remaining_dynamic_validations", 0)))
+            if remaining <= 0:
+                return [], llm_search_remaining
+            candidates = candidates[:remaining]
+            self._remaining_dynamic_validations = max(0, remaining - len(candidates))
 
         proposals: List[Dict[str, Any]] = []
         origin = "heuristic_emergent"
@@ -1982,6 +2969,122 @@ class EnvFishRuntime:
             if edge:
                 created_edges.append(self._serialize_dynamic_edge(edge))
         return created_edges, llm_search_remaining
+
+    def _choose_validated_agent_action(
+        self,
+        actor: Dict[str, Any],
+        region: Dict[str, Any],
+    ) -> tuple[str, Dict[str, Any]]:
+        if getattr(self, "agent_plan_source", "") != "agent_v2":
+            action_key = self._choose_agent_action(actor, region)
+            return action_key, {
+                "contract_version": "legacy-action-compatibility.v1",
+                "decision_mode": "legacy_compatibility",
+                "candidate_evaluations": [],
+                "selected_action_key": action_key,
+                "selected_action_label_zh": action_label_zh(action_key),
+                "selected_validation": {
+                    "contract_version": "legacy-action-compatibility.v1",
+                    "action_key": action_key,
+                    "action_label_zh": action_label_zh(action_key),
+                    "accepted": True,
+                    "rejection_reasons_zh": [],
+                    "resource_costs": {},
+                },
+                "rationale_zh": "历史配置沿用兼容动作选择逻辑。",
+            }
+
+        evaluations: List[Dict[str, Any]] = []
+        for action_key in self._rank_agent_action_candidates(actor, region):
+            validation = validate_agent_action(actor, action_key)
+            evaluations.append(validation)
+            if validation["accepted"]:
+                return action_key, {
+                    "contract_version": AGENT_ACTION_CONTRACT_VERSION,
+                    "decision_mode": "capability_permission_resource_validated",
+                    "candidate_evaluations": evaluations,
+                    "selected_action_key": action_key,
+                    "selected_action_label_zh": validation["action_label_zh"],
+                    "selected_validation": validation,
+                    "rationale_zh": "该动作在当前行动空间内，并通过能力、权限与资源校验。",
+                }
+
+        wait_validation = validate_agent_action(actor, "wait")
+        evaluations.append(wait_validation)
+        return "wait", {
+            "contract_version": AGENT_ACTION_CONTRACT_VERSION,
+            "decision_mode": "capability_permission_resource_validated",
+            "candidate_evaluations": evaluations,
+            "selected_action_key": "wait",
+            "selected_action_label_zh": wait_validation["action_label_zh"],
+            "selected_validation": wait_validation,
+            "rationale_zh": "当前候选动作均未通过校验，本轮保持待命。",
+        }
+
+    def _rank_agent_action_candidates(
+        self,
+        actor: Dict[str, Any],
+        region: Dict[str, Any],
+    ) -> List[str]:
+        action_space = [
+            str(item or "").strip()
+            for item in actor.get("action_space") or []
+            if str(item or "").strip()
+        ]
+        state = region.get("state_vector") or {}
+        exposure = clamp_score(state.get("exposure_score", 0))
+        spread = clamp_score(state.get("spread_pressure", 0))
+        ecology = clamp_score(state.get("ecosystem_integrity", 60))
+        service = clamp_score(state.get("service_capacity", 60))
+        panic = clamp_score(state.get("panic_level", 0))
+        priority: List[str] = []
+        if exposure >= 65 or spread >= 65:
+            priority.extend(
+                [
+                    "shutdown_line",
+                    "mitigate_emission",
+                    "enforce_restriction",
+                    "evacuate",
+                    "patient_triage",
+                    "issue_alert",
+                    "coordinate_response",
+                    "report_hazard",
+                    "monitor",
+                    "transport_pressure",
+                    "stress_signal",
+                ]
+            )
+        if ecology <= 55:
+            priority.extend(
+                [
+                    "deploy_remediation",
+                    "sample_collect",
+                    "publish_assessment",
+                    "stress_signal",
+                    "migration_shift",
+                    "retain_pollutant",
+                    "partial_recovery",
+                ]
+            )
+        if service <= 50:
+            priority.extend(
+                [
+                    "stabilize_services",
+                    "reroute",
+                    "route_flow",
+                    "adjust_supply",
+                    "request_transfer",
+                    "request_support",
+                ]
+            )
+        if panic >= 55:
+            priority.extend(["public_briefing", "issue_notice", "verify", "broadcast"])
+        priority.extend(action_space)
+        priority.append("observe")
+        ranked = list(dict.fromkeys(priority))
+        if getattr(self, "agent_plan_source", "") == "agent_v2":
+            return ranked[: max(1, int(self.action_candidates_per_agent))]
+        return ranked
 
     def _choose_agent_action(self, actor: Dict[str, Any], region: Dict[str, Any]) -> str:
         action_space = actor.get("action_space") or ["monitor"]
@@ -2031,10 +3134,18 @@ class EnvFishRuntime:
         region_delta: Dict[str, Any] = {}
         target_delta: Dict[str, Any] = {}
         channel = "social"
-        rationale = f"{actor.get('name') or actor.get('username')} 在当前压力下选择 {action_type}。"
+        rationale = (
+            f"{actor.get('name') or actor.get('username')} 在当前压力下选择“"
+            f"{action_label_zh(action_type)}”。"
+        )
         turning_point = ""
 
-        if action in {"deploy_remediation", "restore_habitat", "volunteer_cleanup", "mitigate_emission"}:
+        if action == "wait":
+            actor_delta = {}
+            region_delta = {}
+            target_delta = {}
+            channel = "self"
+        elif action in {"deploy_remediation", "restore_habitat", "volunteer_cleanup", "mitigate_emission"}:
             actor_delta = {"response_capacity": 2.0, "panic_level": -1.0}
             region_delta = {
                 "ecosystem_integrity": max(1.0, ecology if ecology > 0 else 1.2),
@@ -2102,7 +3213,7 @@ class EnvFishRuntime:
         # particular branch left target_delta empty. Channel-typed so the sign is
         # defensible (information builds a little response capacity; media/ecology
         # raise stress). Tiny by design — it never dominates the explicit branches.
-        if not target_delta:
+        if not target_delta and action != "wait":
             minimal_target = {
                 "information": {"response_capacity": 0.3},
                 "governance": {"response_capacity": 0.3},
@@ -2243,7 +3354,7 @@ class EnvFishRuntime:
             actor_decisions.append(
                 {
                     "agent_id": agent_id,
-                    "agent_name": actor.get("username") or actor.get("name"),
+                    "agent_name": actor.get("name") or actor.get("username"),
                     "action_type": action_type,
                     "rationale": item.get("rationale", ""),
                     "delta": delta,
@@ -2253,7 +3364,7 @@ class EnvFishRuntime:
                 platform="reddit",
                 round_num=round_num,
                 agent_id=agent_id,
-                agent_name=actor.get("username") or actor.get("name"),
+                agent_name=actor.get("name") or actor.get("username"),
                 action_type=action_type,
                 action_args=delta,
                 result=item.get("rationale", ""),
@@ -2297,6 +3408,7 @@ class EnvFishRuntime:
         diffusion: Dict[str, Any],
         interactions: Dict[str, Any],
         feedback: Dict[str, Any],
+        policy_execution: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         regions = []
         for region in self.region_graph:
@@ -2349,12 +3461,32 @@ class EnvFishRuntime:
         agent_states = [
             {
                 "agent_id": actor.get("agent_id"),
-                "agent_name": actor.get("username") or actor.get("name"),
+                "agent_name": actor.get("name") or actor.get("username"),
                 "name": actor.get("name"),
                 "agent_type": actor.get("agent_type") or actor.get("node_family"),
                 "agent_subtype": actor.get("agent_subtype") or actor.get("role_type"),
+                "archetype_key": actor.get("archetype_key"),
                 "primary_region": actor.get("primary_region"),
                 "home_subregion_id": actor.get("home_subregion_id"),
+                "influenced_regions": list(actor.get("influenced_regions") or []),
+                "capability_keys": list(actor.get("capability_keys") or []),
+                "permission_keys": list(actor.get("permission_keys") or []),
+                "resource_budget": deepcopy(actor.get("resource_budget") or {}),
+                "resource_uncertainty": deepcopy(actor.get("resource_uncertainty") or {}),
+                "action_space": list(actor.get("action_space") or []),
+                "role_demand_refs": list(actor.get("role_demand_refs") or []),
+                "spatial_anchor_refs": deepcopy(actor.get("spatial_anchor_refs") or []),
+                "evidence_refs": list(actor.get("evidence_refs") or []),
+                "evidence_confidence": actor.get("evidence_confidence"),
+                "profile_confidence": actor.get("profile_confidence"),
+                "representation_level": actor.get("representation_level"),
+                "is_aggregate": bool(actor.get("is_aggregate")),
+                "runtime_lifecycle": deepcopy(actor.get("runtime_lifecycle") or {}),
+                "lifecycle_status": actor.get("lifecycle_status")
+                or (actor.get("runtime_lifecycle") or {}).get("lifecycle_status")
+                or "active",
+                "goals": list(actor.get("goals") or []),
+                "sensitivities": list(actor.get("sensitivities") or []),
                 "state_vector": normalize_state_vector(actor.get("state_vector") or {}),
                 "scenario_state": self._scenario_state_for_vector(normalize_state_vector(actor.get("state_vector") or {})),
             }
@@ -2399,6 +3531,16 @@ class EnvFishRuntime:
                 "dynamic_edge_count": len(dynamic_edges),
             },
             "dynamic_edges": dynamic_edges,
+            "action_records": list(interactions.get("action_records") or []),
+            "state_mutation_records": [
+                *(interactions.get("state_mutation_records") or []),
+                *((policy_execution or {}).get("state_mutation_records") or []),
+            ],
+            "relationship_events": list(interactions.get("relationship_events") or []),
+            "relationship_states": deepcopy(
+                interactions.get("relationship_states")
+                or getattr(self, "relationship_states", [])
+            ),
             "dynamic_edge_summary": interactions.get("dynamic_edge_summary") or {
                 "search_mode": self.search_mode,
                 "total_dynamic_edges": len(dynamic_edges),
@@ -2407,6 +3549,7 @@ class EnvFishRuntime:
             "diffusion_context": self.diffusion_context,
             "diffusion": diffusion,
             "interactions": interactions,
+            "policy_execution": policy_execution or {},
             "feedback": feedback,
             "vulnerability_ranking": vulnerability_ranking,
         }
@@ -2533,24 +3676,26 @@ class EnvFishRuntime:
             return None
         prompt = {
             "task": (
-                "Re-label and interpret this evolving ecological relationship graph. "
-                "Only describe structure, direction and sign — never invent magnitudes."
+                "重新标注并解释这张持续演化的生态关系图。"
+                "只描述结构、方向和作用性质，不得虚构量化数值。"
             ),
             "round": round_num,
             "relationship_brief": brief,
             "schema": {
                 "relabels": [
-                    {"edge_id": "id from brief", "semantic_label": "short label", "reason": "why"}
+                    {"edge_id": "brief 中的机器编号", "semantic_label": "简体中文短标签", "reason": "简体中文理由"}
                 ],
                 "leverage_hints": [
-                    {"edge_id": "id", "why_leverage": "why this edge is a control point"}
+                    {"edge_id": "机器编号", "why_leverage": "简体中文控制点说明"}
                 ],
-                "emergent_patterns": ["one-line note about an emergent pattern / loop"],
+                "emergent_patterns": ["一行简体中文涌现模式或反馈环说明"],
             },
             "rules": [
-                "Reference only edge_ids present in the brief.",
-                "Do not fabricate facts; qualitative only.",
-                "Return valid JSON only.",
+                "只能引用 brief 中已有的 edge_id。",
+                "不得虚构事实，只做定性解释。",
+                "semantic_label、reason、why_leverage、emergent_patterns 必须使用简体中文。",
+                "禁止使用 snake_case、类名、UUID 或内部编号作为显示内容；机器编号只能放在对应 id 字段。",
+                "只返回合法 JSON。",
             ],
         }
         try:
@@ -2558,21 +3703,37 @@ class EnvFishRuntime:
                 messages=[
                     {
                         "role": "system",
-                        "content": "You relabel ecological relationship graphs. Qualitative, structural, honest.",
+                        "content": "你负责重标生态关系图。只返回合法 JSON；展示字段必须使用简体中文，保持定性、结构化与诚实，禁止显示内部标识。",
                     },
                     {"role": "user", "content": json.dumps(prompt, ensure_ascii=False)},
                 ],
                 temperature=0.3,
                 max_tokens=1400,
             )
+            relabels = _localized_reason_records(
+                response.get("relabels") if isinstance(response, dict) else [],
+                display_fields={
+                    "semantic_label": "结构性关系",
+                    "reason": "依据关系结构、方向与端点角色完成重标。",
+                },
+                limit=12,
+            )
+            leverage_hints = _localized_reason_records(
+                response.get("leverage_hints") if isinstance(response, dict) else [],
+                display_fields={"why_leverage": "该关系对本轮结构变化具有较强控制作用。"},
+                limit=8,
+            )
             return {
                 "round": round_num,
                 "timestamp": self._now(),
                 "participation": "live",
                 "fallback_used": False,
-                "relabels": list(response.get("relabels") or [])[:12],
-                "leverage_hints": list(response.get("leverage_hints") or [])[:8],
-                "emergent_patterns": list(response.get("emergent_patterns") or [])[:8],
+                "relabels": relabels,
+                "leverage_hints": leverage_hints,
+                "emergent_patterns": _chinese_display_list(
+                    response.get("emergent_patterns") if isinstance(response, dict) else [],
+                    ["关系网络出现新的结构性联动。"],
+                ),
             }
         except Exception as exc:
             logger.warning(f"Relation relabel LLM failed, using explicit fallback: round={round_num}, error={exc}")
@@ -2606,7 +3767,7 @@ class EnvFishRuntime:
                 {
                     "edge_id": edge.get("edge_id"),
                     "semantic_label": label,
-                    "reason": f"基于通道 {channel or 'unknown'} 与端点角色的确定性重标。",
+                    "reason": f"依据{label}的方向和端点角色完成确定性重标。",
                     "epistemic_status": "inferred",
                 }
             )
@@ -2621,9 +3782,14 @@ class EnvFishRuntime:
                 )
         emergent_patterns: List[str] = []
         for loop in (brief.get("feedback_loops") or [])[:4]:
-            regions = "→".join(str(rid) for rid in (loop.get("regions") or []))
+            loop_label = {
+                "reinforcing": "强化型",
+                "balancing": "平衡型",
+                "mixed": "混合型",
+            }.get(str(loop.get("loop_type") or "").lower(), "结构性")
+            region_count = len(loop.get("regions") or [])
             emergent_patterns.append(
-                f"检测到{loop.get('loop_type', 'reinforcing')}反馈环：{regions}（长度 {loop.get('length')}）。"
+                f"检测到{loop_label}反馈环，涉及 {region_count} 个区域、{int(loop.get('length') or region_count)} 条关系。"
             )
         return {
             "round": round_num,
@@ -2651,7 +3817,7 @@ class EnvFishRuntime:
             return None
         top_regions = list(snapshot.get("vulnerability_ranking") or [])[:5]
         prompt = {
-            "task": "Explain this EnvFish simulation round using the scenario mechanism graph.",
+            "task": "用中文解释这一轮 EnvFish 生态-社会推演，并返回严格 JSON。",
             "round": round_num,
             "scenario_model": self.scenario_model,
             "mechanism_graph": {
@@ -2674,11 +3840,11 @@ class EnvFishRuntime:
                 "active_count": len(risk_runtime.get("active_risks") or risk_runtime.get("risks") or []),
             },
             "schema": {
-                "summary": "one sentence round explanation",
+                "summary": "一句中文轮次解释",
                 "activated_mechanisms": [
                     {
                         "mechanism_edge_id": "id from mechanism_graph if possible",
-                        "reason": "why active this round",
+                        "reason": "中文说明：为什么本轮激活",
                         "affected_regions": ["region_id"],
                         "confidence": 0.0,
                     }
@@ -2688,21 +3854,22 @@ class EnvFishRuntime:
                         "target_type": "region|agent|risk",
                         "target_id": "id",
                         "state_variable": "scenario variable or legacy metric",
-                        "reason": "why it changed",
+                        "reason": "中文说明：为什么变化",
                     }
                 ],
                 "relation_change_reasons": [
                     {
                         "edge_id": "dynamic or structural edge id",
-                        "reason": "why appeared/activated/decayed",
+                        "reason": "中文说明：为什么出现、激活或衰减",
                     }
                 ],
-                "uncertainty_notes": ["uncertainty"],
+                "uncertainty_notes": ["中文不确定性说明"],
             },
             "rules": [
-                "Use the mechanism graph when possible.",
-                "Do not invent exact facts not present in the payload.",
-                "Return valid JSON only.",
+                "所有面向用户展示的 summary、reason、uncertainty_notes 必须使用简体中文。",
+                "禁止在展示字段中使用 snake_case、类名、UUID、内部编号或 entity/agent/snapshot 等机器词；这些内容只能放在对应机器字段。",
+                "尽量引用机制图，但不要编造 payload 中不存在的精确事实。",
+                "只返回合法 JSON。",
             ],
         }
         try:
@@ -2710,12 +3877,27 @@ class EnvFishRuntime:
                 messages=[
                     {
                         "role": "system",
-                        "content": "You write concise structured reasoning for ecological simulation rounds.",
+                        "content": "你为生态-社会推演轮次撰写简洁的结构化中文推理。只返回 JSON，不要输出英文解释。",
                     },
                     {"role": "user", "content": json.dumps(prompt, ensure_ascii=False)},
                 ],
                 temperature=0.25,
                 max_tokens=1800,
+            )
+            activated_mechanisms = _localized_reason_records(
+                response.get("activated_mechanisms") if isinstance(response, dict) else [],
+                display_fields={"reason": "该机制由本轮状态变化触发。"},
+                limit=12,
+            )
+            state_change_reasons = _localized_reason_records(
+                response.get("state_change_reasons") if isinstance(response, dict) else [],
+                display_fields={"reason": "本轮扩散、互动与反馈共同推动该状态变化。"},
+                limit=18,
+            )
+            relation_change_reasons = _localized_reason_records(
+                response.get("relation_change_reasons") if isinstance(response, dict) else [],
+                display_fields={"reason": "本轮传播路径与主体互动推动该关系变化。"},
+                limit=18,
             )
             return {
                 "round": round_num,
@@ -2723,11 +3905,17 @@ class EnvFishRuntime:
                 "simulation_architecture": LLM_MECHANISM_ARCHITECTURE,
                 "llm_participation": "live",
                 "fallback_used": False,
-                "summary": str(response.get("summary") or ""),
-                "activated_mechanisms": list(response.get("activated_mechanisms") or [])[:12],
-                "state_change_reasons": list(response.get("state_change_reasons") or [])[:18],
-                "relation_change_reasons": list(response.get("relation_change_reasons") or [])[:18],
-                "uncertainty_notes": list(response.get("uncertainty_notes") or [])[:8],
+                "summary": _chinese_display_text(
+                    response.get("summary") if isinstance(response, dict) else "",
+                    "本轮扩散、主体互动与反馈共同更新了风险态势。",
+                ),
+                "activated_mechanisms": activated_mechanisms,
+                "state_change_reasons": state_change_reasons,
+                "relation_change_reasons": relation_change_reasons,
+                "uncertainty_notes": _chinese_display_list(
+                    response.get("uncertainty_notes") if isinstance(response, dict) else [],
+                    ["当前结论受输入资料完整度与推演假设约束。"],
+                ),
             }
         except Exception as exc:
             logger.warning(f"Round reasoning LLM failed, using explicit fallback: round={round_num}, error={exc}")
@@ -2748,7 +3936,7 @@ class EnvFishRuntime:
         ranking = snapshot.get("vulnerability_ranking") or []
         if ranking:
             top_region = ranking[0]
-        top_region_name = (top_region or {}).get("name") or (top_region or {}).get("region_id") or "未知区域"
+        top_region_name = _chinese_display_text((top_region or {}).get("name"), "重点区域")
         new_edges = list(interactions.get("new_dynamic_edges") or [])
         activated_mechanisms = []
         mechanism_edges = list((self.mechanism_graph or {}).get("edges") or [])
@@ -2756,7 +3944,10 @@ class EnvFishRuntime:
             activated_mechanisms.append(
                 {
                     "mechanism_edge_id": edge.get("id"),
-                    "reason": edge.get("mechanism") or "机制边被本轮状态变化引用。",
+                    "reason": _chinese_display_text(
+                        edge.get("mechanism"),
+                        "该机制关系被本轮状态变化触发。",
+                    ),
                     "affected_regions": [str((top_region or {}).get("region_id") or "")],
                     "confidence": edge.get("confidence", 0.35),
                     "source": "fallback_explicit",
@@ -2776,13 +3967,16 @@ class EnvFishRuntime:
                     "target_type": "region",
                     "target_id": str((top_region or {}).get("region_id") or ""),
                     "state_variable": "vulnerability_score",
-                    "reason": "基于本轮扩散、agent 互动和反馈汇总形成的显式降级解释。",
+                    "reason": "基于本轮扩散、主体互动和反馈汇总形成的显式变化解释。",
                 }
             ],
             "relation_change_reasons": [
                 {
                     "edge_id": edge.get("edge_id"),
-                    "reason": edge.get("rationale") or "运行时生成或激活的动态关系。",
+                    "reason": _chinese_display_text(
+                        edge.get("rationale"),
+                        "本轮传播路径与主体互动生成或激活了该动态关系。",
+                    ),
                 }
                 for edge in new_edges[:8]
                 if isinstance(edge, dict)
@@ -2790,14 +3984,17 @@ class EnvFishRuntime:
             "risk_change_reasons": [
                 {
                     "risk_id": risk_runtime.get("primary_active_risk_id"),
-                    "reason": "风险运行态由本轮 snapshot 的状态、动态边和事件派生。",
+                    "reason": "风险运行态由本轮状态快照、动态关系和事件共同派生。",
                 }
             ],
             "active_variable_count": len(active_variables or []),
             "uncertainty_notes": [
-                "Fallback reasoning is contract continuity only; use live LLM reasoning to evaluate simulation quality.",
+                "当前使用确定性规则维持推演连续性，结论应结合实时模型推理进一步评估。",
             ],
-            "feedback_turning_points": list(feedback.get("turning_points") or [])[:8],
+            "feedback_turning_points": _chinese_display_list(
+                feedback.get("turning_points") or [],
+                ["本轮反馈结构尚未出现明确拐点。"],
+            ),
         }
 
     def _transport_route_summary(self) -> List[Dict[str, Any]]:
@@ -2833,7 +4030,7 @@ class EnvFishRuntime:
         if not self.llm:
             return None
         prompt = {
-            "task": "Return constrained JSON for region-level pollution spread.",
+            "task": "生成区域级污染传播的受约束 JSON。",
             "round": round_num,
             "template": self.template,
             "rules": self.template_rules,
@@ -2866,26 +4063,35 @@ class EnvFishRuntime:
                         "delay_rounds": 0,
                         "persistence": 0,
                         "confidence": 0.5,
-                        "rationale": "string",
+                        "rationale": "简体中文传播依据",
                     }
                 ]
             },
             "constraints": [
-                "Only connect configured transport targets or self.",
-                "No teleporting spread.",
-                "Keep transfer_intensity between 0 and 100.",
-                "If there is no active pressure, return an empty transfer list.",
+                "只能连接已配置的传播目标或区域自身。",
+                "不得生成跨越传播路径的跳跃扩散。",
+                "transfer_intensity 必须保持在 0 到 100 之间。",
+                "rationale 必须使用简体中文，禁止使用 snake_case、类名、UUID 或内部编号作为显示内容。",
+                "没有活跃压力时返回空 transfers 数组。",
             ],
         }
         try:
-            return self.llm.chat_json(
+            result = self.llm.chat_json(
                 messages=[
-                    {"role": "system", "content": "Return compact JSON only. Respect constraints."},
+                    {"role": "system", "content": "只返回紧凑 JSON 并遵守约束。所有展示字段必须是简体中文，禁止显示 snake_case、类名或内部编号。"},
                     {"role": "user", "content": json.dumps(prompt, ensure_ascii=False)},
                 ],
                 temperature=0.2,
                 max_tokens=1400,
             )
+            if not isinstance(result, dict):
+                return None
+            transfers = _localized_reason_records(
+                result.get("transfers"),
+                display_fields={"rationale": "依据已配置的传播路径与区域状态生成。"},
+                limit=200,
+            )
+            return {**result, "transfers": transfers}
         except Exception:
             return None
 
@@ -2898,33 +4104,74 @@ class EnvFishRuntime:
         transfers = []
         decay = self.template_rules["default_decay"]
         lag = self.template_rules["default_lag_rounds"]
+        simulation_id = str((getattr(self, "config", {}) or {}).get("simulation_id") or "runtime")
         for variable in active_variables:
+            source_variable_id = str(
+                variable.get("variable_id")
+                or variable.get("input_id")
+                or _stable_runtime_event_id("variable_ref", variable)
+            )
             source_regions = variable.get("target_regions") or [self.region_graph[0]["region_id"]]
             for source in source_regions:
+                root_event_id = _stable_runtime_event_id(
+                    "spread_event",
+                    simulation_id,
+                    "fallback_injection",
+                    source_variable_id,
+                    int(round_num),
+                    source,
+                )
                 transfers.append(
                     {
+                        "event_id": root_event_id,
+                        "root_event_id": root_event_id,
+                        "parent_event_ids": [],
+                        "hop": 0,
+                        "source_variable_id": source_variable_id,
+                        "causal_source_type": "injected_variable",
                         "source_region": source,
                         "target_region": source,
                         "transfer_intensity": clamp_score(variable.get("intensity_0_100", 50)),
                         "delay_rounds": 0,
                         "persistence": clamp_score(self.template_rules["default_persistence"] + variable.get("intensity_0_100", 50) * 0.1),
                         "confidence": 0.62,
-                        "rationale": f"Direct pressure from injected variable {variable.get('name')}.",
+                        "rationale": (
+                            f"注入变量“{_chinese_display_text(variable.get('name'), '场景变量')}”"
+                            "直接对该区域施加压力。"
+                        ),
                     }
                 )
                 outgoing_edges = self._transport_edges_from_region(source)[: self.template_rules["max_neighbor_spread"]]
                 for edge in outgoing_edges:
                     attenuation = float(edge.get("attenuation_rate") or 0)
                     travel_time = int(edge.get("travel_time_rounds") or lag)
+                    child_event_id = _stable_runtime_event_id(
+                        "spread_event",
+                        simulation_id,
+                        "fallback_transport",
+                        root_event_id,
+                        edge.get("edge_id"),
+                        source,
+                        edge.get("target_region_id"),
+                    )
                     transfers.append(
                         {
+                            "event_id": child_event_id,
+                            "root_event_id": root_event_id,
+                            "parent_event_ids": [root_event_id],
+                            "hop": 1,
+                            "source_variable_id": source_variable_id,
+                            "causal_source_type": "fallback_propagation",
                             "source_region": source,
                             "target_region": edge.get("target_region_id"),
                             "transfer_intensity": clamp_score(variable.get("intensity_0_100", 50) * decay * max(0.18, 1.0 - attenuation)),
                             "delay_rounds": travel_time,
                             "persistence": clamp_score(self.template_rules["default_persistence"]),
                             "confidence": clamp_probability(edge.get("confidence", 0.56)),
-                            "rationale": edge.get("rationale") or f"Template-driven diffusion from {source} to connected region.",
+                            "rationale": _chinese_display_text(
+                                edge.get("rationale"),
+                                "依据传播模板与相邻路径向关联区域扩散。",
+                            ),
                         }
                     )
         for due in due_transfers:
@@ -2932,8 +4179,29 @@ class EnvFishRuntime:
             for edge in outgoing_edges:
                 attenuation = float(edge.get("attenuation_rate") or 0)
                 travel_time = int(edge.get("travel_time_rounds") or lag)
+                parent_event_id = str(due.get("event_id") or "").strip()
+                root_event_id = str(due.get("root_event_id") or parent_event_id).strip()
+                try:
+                    child_hop = max(0, int(due.get("hop") or 0)) + 1
+                except (TypeError, ValueError):
+                    child_hop = 1
+                child_event_id = _stable_runtime_event_id(
+                    "spread_event",
+                    simulation_id,
+                    "fallback_secondary_transport",
+                    parent_event_id,
+                    edge.get("edge_id"),
+                    due["target_region"],
+                    edge.get("target_region_id"),
+                )
                 transfers.append(
                     {
+                        "event_id": child_event_id,
+                        "root_event_id": root_event_id or child_event_id,
+                        "parent_event_ids": [parent_event_id] if parent_event_id else [],
+                        "hop": child_hop if parent_event_id else 0,
+                        "source_variable_id": due.get("source_variable_id"),
+                        "causal_source_type": "fallback_propagation",
                         "source_region": due["target_region"],
                         "target_region": edge.get("target_region_id"),
                         "transfer_intensity": clamp_score(
@@ -2942,7 +4210,10 @@ class EnvFishRuntime:
                         "delay_rounds": travel_time,
                         "persistence": clamp_score(due["persistence"] * decay),
                         "confidence": clamp_probability(edge.get("confidence", 0.5)),
-                        "rationale": edge.get("rationale") or "Secondary propagation from already impacted region.",
+                        "rationale": _chinese_display_text(
+                            edge.get("rationale"),
+                            "已受影响区域沿既有路径发生次级传播。",
+                        ),
                     }
                 )
         return {"transfers": transfers}
@@ -2962,7 +4233,7 @@ class EnvFishRuntime:
             reverse=True,
         )[:8]
         prompt = {
-            "task": "Produce constrained JSON for ecological impact, actor decisions, and feedback propagation.",
+            "task": "生成生态影响、主体决策和反馈传播的受约束 JSON，所有展示文本必须是简体中文。",
             "round": round_num,
             "active_variables": active_variables,
             "top_regions": top_regions,
@@ -2974,7 +4245,7 @@ class EnvFishRuntime:
                         "ecosystem_integrity_delta": 0,
                         "vulnerability_delta": 0,
                         "livelihood_delta": 0,
-                        "note": "string",
+                        "note": "中文说明",
                     }
                 ],
                 "actor_decisions": [
@@ -2985,7 +4256,7 @@ class EnvFishRuntime:
                         "trust_delta": 0,
                         "economic_delta": 0,
                         "response_delta": 0,
-                        "rationale": "string",
+                        "rationale": "中文说明",
                     }
                 ],
                 "feedback_propagation": [
@@ -2996,27 +4267,53 @@ class EnvFishRuntime:
                         "economic_delta": 0,
                         "livelihood_delta": 0,
                         "service_delta": 0,
-                        "loop": "string",
+                        "loop": "中文反馈环说明",
                     }
                 ],
-                "turning_points": ["string"],
+                "turning_points": ["中文拐点说明"],
             },
             "constraints": [
-                "Keep all deltas between -20 and 20.",
-                "Use real agent_id values only.",
-                "Keep at most 5 actor decisions.",
-                "Return valid JSON only.",
+                "所有 note、rationale、loop、turning_points 必须使用简体中文。",
+                "禁止在展示字段中使用 snake_case、类名、UUID、内部编号或 entity/agent 等机器词。",
+                "所有 delta 保持在 -20 到 20 之间。",
+                "只能使用真实 agent_id。",
+                "actor decisions 最多 5 条。",
+                "只返回合法 JSON。",
             ],
         }
         try:
-            return self.llm.chat_json(
+            result = self.llm.chat_json(
                 messages=[
-                    {"role": "system", "content": "Return compact JSON only."},
+                    {"role": "system", "content": "只返回紧凑 JSON。所有面向用户展示的文本字段必须是简体中文，不能夹杂英文句子、snake_case、类名或内部编号。"},
                     {"role": "user", "content": json.dumps(prompt, ensure_ascii=False)},
                 ],
                 temperature=0.25,
                 max_tokens=1800,
             )
+            if not isinstance(result, dict):
+                return None
+            return {
+                **result,
+                "ecological_impacts": _localized_reason_records(
+                    result.get("ecological_impacts"),
+                    display_fields={"note": "暴露压力改变了区域生态与生计状态。"},
+                    limit=24,
+                ),
+                "actor_decisions": _localized_reason_records(
+                    result.get("actor_decisions"),
+                    display_fields={"rationale": "主体依据本轮风险、资源与协作条件采取行动。"},
+                    limit=12,
+                ),
+                "feedback_propagation": _localized_reason_records(
+                    result.get("feedback_propagation"),
+                    display_fields={"loop": "本轮状态变化形成了区域反馈传播。"},
+                    limit=24,
+                ),
+                "turning_points": _chinese_display_list(
+                    result.get("turning_points"),
+                    ["本轮尚未识别出明确的反馈拐点。"],
+                ),
+            }
         except Exception:
             return None
 
@@ -3036,7 +4333,7 @@ class EnvFishRuntime:
                     "ecosystem_integrity_delta": clamp_score(item["exposure_score"] * 0.08, 0, 20),
                     "vulnerability_delta": clamp_score(item["exposure_score"] * 0.05, 0, 20),
                     "livelihood_delta": clamp_score(item["exposure_score"] * 0.04, 0, 20),
-                    "note": "Exposure degrades ecological integrity and nearby livelihoods.",
+                    "note": "暴露压力削弱生态完整性，并影响周边生计稳定。",
                 }
             )
             feedback_propagation.append(
@@ -3047,7 +4344,7 @@ class EnvFishRuntime:
                     "economic_delta": min(16, item["exposure_score"] * 0.06),
                     "livelihood_delta": -min(14, item["exposure_score"] * 0.05),
                     "service_delta": -min(10, item["exposure_score"] * 0.03),
-                    "loop": "environment -> ecology -> livelihood -> panic/media -> market behavior",
+                    "loop": "环境压力 → 生态退化 → 生计波动 → 恐慌/媒体传播 → 市场行为变化",
                 }
             )
 
@@ -3066,7 +4363,7 @@ class EnvFishRuntime:
                         "trust_delta": 4 if exposure < 60 else -2,
                         "economic_delta": 2 if exposure >= 60 else 0,
                         "response_delta": 5,
-                        "rationale": "Authorities react by disclosure in moderate cases and restrictions in severe cases.",
+                        "rationale": "治理主体在中等暴露下倾向于信息披露，在高暴露下转向限制措施。",
                     }
                 )
             elif actor.get("node_family") in {"HumanActor", "OrganizationActor"}:
@@ -3078,7 +4375,7 @@ class EnvFishRuntime:
                         "trust_delta": -2,
                         "economic_delta": 5 if exposure > 45 else 1,
                         "response_delta": -1,
-                        "rationale": "Affected actors react through rumor amplification or adaptive market behavior.",
+                        "rationale": "受影响主体通过舆情放大或市场行为调整作出反应。",
                     }
                 )
 
@@ -3086,7 +4383,7 @@ class EnvFishRuntime:
             "ecological_impacts": ecological_impacts,
             "actor_decisions": actor_decisions[:5],
             "feedback_propagation": feedback_propagation,
-            "turning_points": [f"Round {round_num} increased visible stress in {item['name']}" for item in top_regions[:2]],
+            "turning_points": [f"第 {round_num} 轮，{item['name']} 的可见压力上升。" for item in top_regions[:2]],
         }
 
     def _validate_transfer(self, transfer: Dict[str, Any], active_variables: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
@@ -3122,6 +4419,16 @@ class EnvFishRuntime:
             "confidence": clamp_probability(transfer.get("confidence", (transport_edge or {}).get("confidence", 0.5))),
             "rationale": str(transfer.get("rationale", "")),
         }
+        for causal_key in (
+            "event_id",
+            "root_event_id",
+            "parent_event_ids",
+            "hop",
+            "source_variable_id",
+            "causal_source_type",
+        ):
+            if causal_key in transfer:
+                validated[causal_key] = deepcopy(transfer.get(causal_key))
         if transport_edge:
             validated["channel_type"] = transport_edge.get("channel_type")
             validated["transport_edge_id"] = transport_edge.get("edge_id")
@@ -3146,11 +4453,13 @@ class EnvFishRuntime:
             try:
                 if command.command_type == CommandType.CLOSE_ENV:
                     self.closed = True
-                    self.ipc.send_success(command.command_id, {"message": "EnvFish environment closing"})
+                    self.ipc.send_success(command.command_id, {"message": "推演环境正在关闭"})
                 elif command.command_type == CommandType.INJECT_VARIABLE:
                     variable = command.args.get("variable") or {}
-                    if "start_round" not in variable or not variable["start_round"]:
-                        variable["start_round"] = self.current_round + 1 if self.current_round else 1
+                    normalize_runtime_injection_schedule(
+                        variable,
+                        current_round=int(self.current_round or 0),
+                    )
                     self.injections.append(variable)
                     reframe_result = self.risk_definition_builder.reframe_runtime(
                         existing_definitions=self.risk_definitions,
@@ -3203,7 +4512,7 @@ class EnvFishRuntime:
                     self.ipc.send_success(
                         command.command_id,
                         {
-                            "message": "variable queued",
+                            "message": "变量已加入队列",
                             "variable": variable,
                             "current_round": self.current_round,
                             "risk_refresh": {
@@ -3251,29 +4560,34 @@ class EnvFishRuntime:
             raise ValueError(f"Unknown agent_id: {agent_id}")
         region = self.region_lookup.get(actor.get("primary_region"), {})
         response = self._answer_interview(actor, region, prompt)
+        display_agent_name = _chinese_display_text(
+            actor.get("name"),
+            f"代理体 {agent_id + 1}",
+        )
+        display_profession = _chinese_display_text(actor.get("profession"), "场景主体")
         record = {
             "timestamp": self._now(),
             "round": self.current_round,
             "agent_id": agent_id,
-            "agent_name": actor.get("username") or actor.get("name"),
-            "profession": actor.get("profession"),
+            "agent_name": display_agent_name,
+            "profession": display_profession,
             "prompt": prompt,
             "response": response,
-            "region": region.get("name"),
+            "region": _chinese_display_text(region.get("name"), "所属区域"),
         }
         append_jsonl(self.interview_log, record)
         result = {
             f"reddit_{agent_id}": {
                 "agent_id": agent_id,
-                "agent_name": actor.get("username") or actor.get("name"),
-                "profession": actor.get("profession"),
+                "agent_name": display_agent_name,
+                "profession": display_profession,
                 "response": response,
                 "answer": response,
             },
             f"twitter_{agent_id}": {
                 "agent_id": agent_id,
-                "agent_name": actor.get("username") or actor.get("name"),
-                "profession": actor.get("profession"),
+                "agent_name": display_agent_name,
+                "profession": display_profession,
                 "response": response,
                 "answer": response,
             },
@@ -3283,7 +4597,7 @@ class EnvFishRuntime:
     def _answer_interview(self, actor: Dict[str, Any], region: Dict[str, Any], prompt: str) -> str:
         if self.llm:
             payload = {
-                "task": "Answer in first person as an EnvFish simulated actor.",
+                "task": "以 EnvFish 推演主体的第一人称回答问题，并使用简体中文。",
                 "actor": {
                     "name": actor.get("name"),
                     "username": actor.get("username"),
@@ -3300,30 +4614,37 @@ class EnvFishRuntime:
                 "latest_summary": self.latest_summary.get("feedback", {}),
                 "question": prompt,
                 "rules": [
-                    "Respond in first person.",
-                    "Stay within the simulation context.",
-                    "Do not mention being an AI model.",
-                    "Keep the answer under 180 words.",
+                    "使用第一人称回答。",
+                    "严格停留在推演情境内。",
+                    "不要提及自己是人工智能模型。",
+                    "回答不超过 180 个汉字。",
+                    "回答必须使用简体中文，禁止显示 snake_case、类名、UUID 或内部编号。",
                 ],
             }
             try:
-                return self.llm.chat(
+                answer = self.llm.chat(
                     messages=[
-                        {"role": "system", "content": "You are roleplaying a simulation actor. Be concise and grounded."},
+                        {"role": "system", "content": "你正在扮演推演主体。回答必须使用简体中文，简洁、有依据，禁止显示内部标识。"},
                         {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
                     ],
                     temperature=0.5,
                     max_tokens=300,
+                )
+                return _chinese_display_text(
+                    answer,
+                    "我会依据当前区域状态与自身职责审慎行动，并持续观察风险变化。",
                 )
             except Exception:
                 pass
 
         exposure = region.get("state_vector", {}).get("exposure_score", 0)
         panic = region.get("state_vector", {}).get("panic_level", 0)
+        display_region = _chinese_display_text(region.get("name"), "本地区")
+        display_profession = _chinese_display_text(actor.get("profession"), "相关主体")
         return (
-            f"我主要关注 {region.get('name', '本地区')} 的局势。现在暴露压力大约在 {exposure:.0f}/100，"
+            f"我主要关注{display_region}的局势。现在暴露压力大约在 {exposure:.0f}/100，"
             f"社会恐慌大约在 {panic:.0f}/100。以我的角色来看，最明显的问题是"
-            f"{actor.get('profession', actor.get('role_type', '相关主体'))}需要在生态风险和生计压力之间做取舍。"
+            f"{display_profession}需要在生态风险和生计压力之间做取舍。"
         )
 
     def _write_action(
@@ -3340,8 +4661,9 @@ class EnvFishRuntime:
             "round": round_num,
             "timestamp": self._now(),
             "agent_id": agent_id,
-            "agent_name": agent_name,
+            "agent_name": _chinese_display_text(agent_name, f"代理体 {agent_id + 1}"),
             "action_type": action_type,
+            "action_label_zh": action_label_zh(str(action_type or "").lower()),
             "action_args": action_args,
             "result": result,
             "success": True,
@@ -3361,6 +4683,7 @@ class EnvFishRuntime:
                 "engine_mode": "envfish",
                 "twitter_available": True,
                 "reddit_available": True,
+                "process_pid": os.getpid(),
             },
         )
 

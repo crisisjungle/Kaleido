@@ -118,7 +118,8 @@ class AgentIdentityDeepeningTests(unittest.TestCase):
 
         # Inferred: real source entity but no external corroboration of the role.
         self.assertEqual(p_inf.review_status, "inferred")
-        self.assertIn("provenance=", p_inf.grounding_reason)
+        self.assertTrue(any("\u3400" <= char <= "\u9fff" for char in p_inf.grounding_reason))
+        self.assertNotIn("provenance=", p_inf.grounding_reason)
 
         # Both share the resolved role; only the provenance tier differs.
         self.assertEqual(p_obs.agent_subtype, "worker")
@@ -135,7 +136,9 @@ class AgentIdentityDeepeningTests(unittest.TestCase):
         config = profile.to_agent_config()
         self.assertEqual(payload["review_status"], "observed")
         self.assertEqual(config["review_status"], "observed")
-        self.assertIn("provenance=observed", config["grounding_reason"])
+        self.assertEqual(config["agent_name"], profile.name)
+        self.assertTrue(any("\u3400" <= char <= "\u9fff" for char in config["grounding_reason"]))
+        self.assertNotIn("provenance=", config["grounding_reason"])
         self.assertEqual(profile.agent_subtype, "scientist")
 
 

@@ -1,28 +1,19 @@
 <template>
-  <div class="main-view">
-    <!-- Header -->
-    <header class="app-header">
-      <div class="header-left">
-        <KaleidoNavBrand to="/" />
-      </div>
-
-      <div class="header-right">
-        <button class="layout-toggle" @click="toggleGraphCollapse">
-          {{ viewMode === 'workbench' ? '◧ 展开图谱' : '▣ 收起图谱' }}
-        </button>
-        <WorkflowStepMenu :current-step="2" current-name="场景设计" />
-        <div class="step-divider"></div>
-        <span class="status-indicator" :class="statusClass">
-          <span class="dot"></span>
-          {{ statusText }}
-        </span>
-      </div>
-    </header>
-
-    <!-- Main Content Area -->
-    <main class="content-area">
-      <!-- Left Panel: Graph -->
-      <div class="panel-wrapper left" :style="leftPanelStyle">
+  <KaleidoWorkflowShell
+    :step="2"
+    step-name="场景生成"
+    :status-text="statusText"
+    :status-tone="shellStatusTone"
+    :view-mode="viewMode"
+    :visual-ratio="42"
+    @toggle-visual="toggleGraphCollapse"
+  >
+    <template #visual>
+      <div class="step2-graph-stage">
+        <div v-if="isPreparing" class="graph-preview-badge" role="status">
+          <span class="graph-preview-dot" aria-hidden="true"></span>
+          生成中预览
+        </div>
         <GraphPanel
           :graphData="graphData"
           :mapData="mapProjection"
@@ -37,39 +28,37 @@
           @toggle-maximize="toggleMaximize('graph')"
         />
       </div>
+    </template>
 
-      <!-- Right Panel: Step2 环境搭建 -->
-      <div class="panel-wrapper right" :style="rightPanelStyle">
-        <Step2EnvSetup
+    <Step2EnvSetup
           :simulationId="currentSimulationId"
           :projectData="projectData"
           :graphData="graphData"
+          :simulationData="currentSimulation"
+          :sceneSeedContext="sceneSeedContext"
           :systemLogs="systemLogs"
-          :initialScenarioMode="route.query.scenario_mode"
-          :initialDiffusionTemplate="route.query.diffusion_template"
-          :initialSearchMode="route.query.search_mode"
-          :initialSimulationArchitecture="route.query.simulation_architecture"
-          :initialInjectedVariables="initialInjectedVariables"
-          @go-back="handleGoBack"
-          @next-step="handleNextStep"
-          @add-log="addLog"
-          @update-status="updateStatus"
-          @risk-object-focus="updateGraphHighlight"
-        />
-      </div>
-    </main>
-  </div>
+      :initialScenarioMode="route.query.scenario_mode"
+      :initialDiffusionTemplate="route.query.diffusion_template"
+      :initialSearchMode="route.query.search_mode"
+      :initialSimulationArchitecture="route.query.simulation_architecture"
+      :initialInjectedVariables="initialInjectedVariables"
+      @go-back="handleGoBack"
+      @next-step="handleNextStep"
+      @add-log="addLog"
+      @update-status="updateStatus"
+      @risk-object-focus="updateGraphHighlight"
+    />
+  </KaleidoWorkflowShell>
 </template>
 
 <script setup>
 import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import KaleidoNavBrand from '../components/KaleidoNavBrand.vue'
-import WorkflowStepMenu from '../components/WorkflowStepMenu.vue'
+import KaleidoWorkflowShell from '../components/KaleidoWorkflowShell.vue'
 import GraphPanel from '../components/GraphPanel.vue'
 import Step2EnvSetup from '../components/Step2EnvSetup.vue'
 import { getProject, getGraphData } from '../api/graph'
-import { getSimulation, getSimulationGraphRealtime, stopSimulation, getEnvStatus, closeSimulationEnv } from '../api/simulation'
+import { getSimulation, getSimulationGraphRealtime } from '../api/simulation'
 import { getSceneSeedContextBySimulation } from '../store/sceneSeedBridge'
 import { markWorkflowStep } from '../store/workflowNavigation'
 
@@ -82,7 +71,7 @@ const props = defineProps({
 })
 
 // Layout State
-const viewMode = ref('split') // Step3 推演：图谱是主角，默认展示（可一键收起）
+const viewMode = ref('split')
 
 // Data State
 const currentSimulationId = ref(route.params.simulationId)
@@ -115,11 +104,15 @@ const statusClass = computed(() => {
   return currentStatus.value
 })
 
+const shellStatusTone = computed(() => {
+  if (statusClass.value === 'error') return 'error'
+  if (statusClass.value === 'processing') return 'processing'
+  return 'ready'
+})
+
 const statusText = computed(() => {
-  if (currentStatus.value === 'error') return '错误'
-  if (currentStatus.value === 'completed') return '就绪'
-  if (currentStatus.value === 'idle') return '空闲'
-  return '准备中'
+  if (currentStatus.value === 'processing') return '场景生成中'
+  return '场景配置'
 })
 
 const isPreparing = computed(() => currentStatus.value === 'processing')
@@ -225,7 +218,7 @@ const buildMapProjectionFallback = ({ graph, layersPayload = null, sourceMode = 
     if (!Number.isFinite(lat) || !Number.isFinite(lon)) return
     const normalized = {
       uuid: node?.uuid || node?.id || `node_${index}`,
-      name: node?.name || `Node ${index + 1}`,
+      name: node?.name || `节点 ${index + 1}`,
       labels: Array.isArray(node?.labels) ? node.labels : [],
       summary: node?.summary || '',
       kind: node?.kind || nodeKindFromNode(node),
@@ -517,7 +510,7 @@ const handleNextStep = (params = {}) => {
   markWorkflowStep(2, {
     visited: true,
     status: 'done',
-    summary: '场景配置已完成',
+    summary: '场景配置',
     route: projectData.value?.project_id
       ? { name: 'Simulation', params: { simulationId: currentSimulationId.value }, query: { ...route.query } }
       : null
@@ -534,69 +527,6 @@ const handleNextStep = (params = {}) => {
 }
 
 // --- Data Logic ---
-
-/**
- * 检查并关闭正在运行的模拟
- * 当用户从 Step 3 返回到 Step 2 时，默认用户要退出模拟
- */
-const checkAndStopRunningSimulation = async () => {
-  if (!currentSimulationId.value) return
-  
-  try {
-    // 先检查模拟环境是否存活
-    const envStatusRes = await getEnvStatus({ simulation_id: currentSimulationId.value })
-    
-    if (envStatusRes.success && envStatusRes.data?.env_alive) {
-      addLog('检测到模拟环境正在运行，正在关闭...')
-      
-      // 尝试优雅关闭模拟环境
-      try {
-        const closeRes = await closeSimulationEnv({ 
-          simulation_id: currentSimulationId.value,
-          timeout: 10  // 10秒超时
-        })
-        
-        if (closeRes.success) {
-          addLog('✓ 模拟环境已关闭')
-        } else {
-          addLog(`关闭模拟环境失败: ${closeRes.error || '未知错误'}`)
-          // 如果优雅关闭失败，尝试强制停止
-          await forceStopSimulation()
-        }
-      } catch (closeErr) {
-        addLog(`关闭模拟环境异常: ${closeErr.message}`)
-        // 如果优雅关闭异常，尝试强制停止
-        await forceStopSimulation()
-      }
-    } else {
-      // 环境未运行，但可能进程还在，检查模拟状态
-      const simRes = await getSimulation(currentSimulationId.value)
-      if (simRes.success && simRes.data?.status === 'running') {
-        addLog('检测到模拟状态为运行中，正在停止...')
-        await forceStopSimulation()
-      }
-    }
-  } catch (err) {
-    // 检查环境状态失败不影响后续流程
-    console.warn('检查模拟状态失败:', err)
-  }
-}
-
-/**
- * 强制停止模拟
- */
-const forceStopSimulation = async () => {
-  try {
-    const stopRes = await stopSimulation({ simulation_id: currentSimulationId.value })
-    if (stopRes.success) {
-      addLog('✓ 模拟已强制停止')
-    } else {
-      addLog(`强制停止模拟失败: ${stopRes.error || '未知错误'}`)
-    }
-  } catch (err) {
-    addLog(`强制停止模拟异常: ${err.message}`)
-  }
-}
 
 const loadSimulationData = async () => {
   try {
@@ -808,9 +738,6 @@ onMounted(async () => {
     route: { name: 'Simulation', params: { simulationId: currentSimulationId.value }, query: { ...route.query } }
   })
   
-  // 检查并关闭正在运行的模拟（用户从 Step 3 返回时）
-  await checkAndStopRunningSimulation()
-  
   // 加载模拟数据
   loadSimulationData()
 })
@@ -821,6 +748,46 @@ onUnmounted(() => {
 </script>
 
 <style scoped>
+.step2-graph-stage {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+}
+
+.graph-preview-badge {
+  position: absolute;
+  top: 18px;
+  left: 18px;
+  z-index: 20;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border: 1px solid rgba(16, 35, 29, 0.12);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.9);
+  box-shadow: 0 8px 24px rgba(16, 35, 29, 0.08);
+  color: #25473c;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  pointer-events: none;
+  backdrop-filter: blur(12px);
+}
+
+.graph-preview-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #d97706;
+  animation: graph-preview-pulse 1.4s ease-in-out infinite;
+}
+
+@keyframes graph-preview-pulse {
+  50% { opacity: 0.35; transform: scale(0.76); }
+}
+
 .main-view {
   height: 100vh;
   display: flex;
@@ -975,7 +942,7 @@ onUnmounted(() => {
 
 .panel-wrapper.right {
   height: 100%;
-  overflow-y: auto;
+  overflow-y: hidden;
   overflow-x: hidden;
 }
 </style>

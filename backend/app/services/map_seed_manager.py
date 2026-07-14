@@ -10,10 +10,12 @@ uncertainty instead of flattening everything into "facts".
 from __future__ import annotations
 
 import io
+import hashlib
 import json
 import math
 import os
 import threading
+import time
 import urllib.parse
 import urllib.request
 import uuid
@@ -27,28 +29,113 @@ from ..models.project import ProjectManager, ProjectStatus
 from ..utils.atomic_file import read_json_file, read_text_file, write_json_file, write_text_file
 from ..utils.llm_client import LLMClient
 from ..utils.logger import get_logger
+from .effort_contract import normalize_effort_snapshot
+from .map_spatial_selection import (
+    PUBLIC_PROVIDERS,
+    SelectionContext,
+    granularity_for_radius,
+    is_valid_proxy_anchor,
+    select_spatial_features,
+    spatial_policy_from_effort,
+    summarize_provider_failures,
+    summarize_source_status,
+)
 
 logger = get_logger("envfish.map_seed")
 PIL_NEAREST = getattr(getattr(Image, "Resampling", Image), "NEAREST")
 
 
 WORLD_COVER_CLASSES: Dict[int, Dict[str, Any]] = {
-    10: {"name": "Tree cover", "name_zh": "树木覆盖", "color": (0, 100, 0), "category": "ecology", "node_family": "EcologicalReceptor", "importance": 8},
-    20: {"name": "Shrubland", "name_zh": "灌丛", "color": (255, 187, 34), "category": "ecology", "node_family": "EcologicalReceptor", "importance": 6},
-    30: {"name": "Grassland", "name_zh": "草地", "color": (255, 255, 76), "category": "ecology", "node_family": "EcologicalReceptor", "importance": 6},
-    40: {"name": "Cropland", "name_zh": "农田", "color": (240, 150, 255), "category": "ecology", "node_family": "EcologicalReceptor", "importance": 6},
-    50: {"name": "Built-up", "name_zh": "建成区", "color": (250, 0, 0), "category": "facility", "node_family": "Infrastructure", "importance": 7},
-    60: {"name": "Bare / sparse vegetation", "name_zh": "裸地/稀疏植被", "color": (180, 180, 180), "category": "ecology", "node_family": "EcologicalReceptor", "importance": 5},
-    70: {"name": "Snow and ice", "name_zh": "雪冰", "color": (240, 240, 240), "category": "ecology", "node_family": "EnvironmentalCarrier", "importance": 4},
-    80: {"name": "Permanent water bodies", "name_zh": "永久水体", "color": (0, 100, 200), "category": "ecology", "node_family": "EnvironmentalCarrier", "importance": 9},
-    90: {"name": "Herbaceous wetland", "name_zh": "草本湿地", "color": (0, 150, 160), "category": "ecology", "node_family": "EcologicalReceptor", "importance": 9},
-    95: {"name": "Mangroves", "name_zh": "红树林", "color": (0, 207, 117), "category": "ecology", "node_family": "EcologicalReceptor", "importance": 10},
-    100: {"name": "Moss and lichen", "name_zh": "苔藓/地衣", "color": (250, 230, 160), "category": "ecology", "node_family": "EcologicalReceptor", "importance": 5},
+    10: {"name": "树木覆盖", "name_zh": "树木覆盖", "name_en": "Tree cover", "color": (0, 100, 0), "category": "ecology", "node_family": "EcologicalReceptor", "importance": 8},
+    20: {"name": "灌丛", "name_zh": "灌丛", "name_en": "Shrubland", "color": (255, 187, 34), "category": "ecology", "node_family": "EcologicalReceptor", "importance": 6},
+    30: {"name": "草地", "name_zh": "草地", "name_en": "Grassland", "color": (255, 255, 76), "category": "ecology", "node_family": "EcologicalReceptor", "importance": 6},
+    40: {"name": "农田", "name_zh": "农田", "name_en": "Cropland", "color": (240, 150, 255), "category": "ecology", "node_family": "EcologicalReceptor", "importance": 6},
+    50: {"name": "建成区", "name_zh": "建成区", "name_en": "Built-up", "color": (250, 0, 0), "category": "facility", "node_family": "Infrastructure", "importance": 7},
+    60: {"name": "裸地/稀疏植被", "name_zh": "裸地/稀疏植被", "name_en": "Bare / sparse vegetation", "color": (180, 180, 180), "category": "ecology", "node_family": "EcologicalReceptor", "importance": 5},
+    70: {"name": "雪冰", "name_zh": "雪冰", "name_en": "Snow and ice", "color": (240, 240, 240), "category": "ecology", "node_family": "EnvironmentalCarrier", "importance": 4},
+    80: {"name": "永久水体", "name_zh": "永久水体", "name_en": "Permanent water bodies", "color": (0, 100, 200), "category": "ecology", "node_family": "EnvironmentalCarrier", "importance": 9},
+    90: {"name": "草本湿地", "name_zh": "草本湿地", "name_en": "Herbaceous wetland", "color": (0, 150, 160), "category": "ecology", "node_family": "EcologicalReceptor", "importance": 9},
+    95: {"name": "红树林", "name_zh": "红树林", "name_en": "Mangroves", "color": (0, 207, 117), "category": "ecology", "node_family": "EcologicalReceptor", "importance": 10},
+    100: {"name": "苔藓/地衣", "name_zh": "苔藓/地衣", "name_en": "Moss and lichen", "color": (250, 230, 160), "category": "ecology", "node_family": "EcologicalReceptor", "importance": 5},
 }
 
 
 def _utcnow_iso() -> str:
     return datetime.now().isoformat()
+
+
+DISPLAY_TOKEN_ZH = {
+    "unknown": "未知",
+    "mixed": "混合场景",
+    "coastal": "滨海岸线",
+    "inland_water": "内陆水系",
+    "urban_edge": "城市边缘",
+    "agricultural": "农业空间",
+    "observed": "公开观测",
+    "detected": "遥感识别",
+    "reference": "参考地名",
+    "inferred": "规则推断",
+    "ecology": "生态",
+    "facility": "设施",
+    "region": "区域",
+    "human_proxy": "人类代理",
+    "explicit_focus_then_spatial_category_balance": "显式焦点优先 + 空间类别平衡",
+    "residential": "居住",
+    "commercial": "商业",
+    "commercial_hub": "商业中心",
+    "office_cluster": "办公组团",
+    "hospital": "医院",
+    "school": "学校",
+    "university": "高校",
+    "tourism": "旅游",
+    "shop": "商户",
+    "road_corridor": "道路廊道",
+    "transit_stop": "公交站点",
+    "rail_station": "轨道站点",
+    "pier": "码头",
+    "marina": "游艇/小型码头",
+    "ferry_terminal": "渡轮码头",
+    "industrial": "工业",
+    "wastewater_plant": "污水处理设施",
+    "power_plant": "电力设施",
+    "warehouse": "仓储设施",
+    "water": "水体",
+    "river": "河流",
+    "stream": "溪流",
+    "canal": "运河",
+    "ditch": "沟渠",
+    "reservoir": "水库",
+    "basin": "流域",
+    "coastline": "岸线",
+    "beach": "海滩",
+    "forest": "林地",
+    "wetland": "湿地",
+    "nature_reserve": "自然保护区",
+    "protected_area": "保护区",
+    "park": "公园",
+    "garden": "花园",
+    "farmland": "农田",
+    "farmyard": "农场院落",
+    "meadow": "草地",
+    "worldcover_10": "树木覆盖",
+    "worldcover_20": "灌丛",
+    "worldcover_30": "草地",
+    "worldcover_40": "农田",
+    "worldcover_50": "建成区",
+    "worldcover_60": "裸地/稀疏植被",
+    "worldcover_70": "雪冰",
+    "worldcover_80": "永久水体",
+    "worldcover_90": "草本湿地",
+    "worldcover_95": "红树林",
+    "worldcover_100": "苔藓/地衣",
+}
+
+
+def _display_token_zh(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return "未知"
+    return DISPLAY_TOKEN_ZH.get(text) or DISPLAY_TOKEN_ZH.get(text.lower()) or text
 
 
 def _safe_http_json(
@@ -134,6 +221,7 @@ def _slugify(value: str) -> str:
 
 class MapSeedManager:
     MAP_SEEDS_DIR = os.path.join(Config.UPLOAD_FOLDER, "map_seeds")
+    SOURCE_CACHE_DIR = os.path.join(Config.UPLOAD_FOLDER, "map_source_cache")
     GRAPH_FILENAME = "graph_snapshot.json"
     LAYERS_FILENAME = "layers.json"
     META_FILENAME = "seed.json"
@@ -150,6 +238,7 @@ class MapSeedManager:
 
     def __init__(self):
         os.makedirs(self.MAP_SEEDS_DIR, exist_ok=True)
+        os.makedirs(self.SOURCE_CACHE_DIR, exist_ok=True)
         self._llm_client: Optional[LLMClient] = None
         if Config.LLM_API_KEY:
             try:
@@ -466,7 +555,13 @@ class MapSeedManager:
         radius_m: int,
         simulation_requirement: str = "",
         title: str = "",
+        requested_location: str = "",
+        focus_text: str = "",
+        known_entities: str = "",
+        analysis_boundaries: str = "",
+        focus_mode: str = "auto",
         golden_case_profile: str = "",
+        effort_snapshot: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         seed_id = f"mapseed_{uuid.uuid4().hex[:12]}"
         seed_dir = cls._seed_dir(seed_id)
@@ -474,14 +569,28 @@ class MapSeedManager:
         payload = {
             "seed_id": seed_id,
             "status": "pending",
+            "availability": {
+                "status": "pending",
+                "available": False,
+                "retryable": False,
+                "reason_code": "analysis_pending",
+                "message": "地理数据正在获取。",
+                "provider_failures": [],
+            },
             "created_at": _utcnow_iso(),
             "updated_at": _utcnow_iso(),
             "title": title or f"Map Seed {seed_id[-6:]}",
+            "effort_snapshot": normalize_effort_snapshot(effort_snapshot),
             "input": {
                 "lat": round(float(lat), 6),
                 "lon": round(float(lon), 6),
                 "radius_m": max(500, int(radius_m)),
                 "simulation_requirement": simulation_requirement.strip(),
+                "requested_location": str(requested_location or "").strip(),
+                "focus_text": str(focus_text or "").strip(),
+                "known_entities": str(known_entities or "").strip(),
+                "analysis_boundaries": str(analysis_boundaries or "").strip(),
+                "focus_mode": str(focus_mode or "auto").strip() or "auto",
                 "golden_case_profile": str(golden_case_profile or "").strip(),
             },
             "summary": "",
@@ -501,17 +610,111 @@ class MapSeedManager:
         return read_json_file(path, default=None)
 
     @classmethod
-    def get_graph_snapshot(cls, seed_id: str) -> Optional[Dict[str, Any]]:
+    def is_formal_seed_ready(cls, seed: Optional[Dict[str, Any]]) -> bool:
+        payload = seed if isinstance(seed, dict) else {}
+        quality = payload.get("data_quality") if isinstance(payload.get("data_quality"), dict) else {}
+        return payload.get("status") == "ready" and quality.get("formal_ready") is True
+
+    @classmethod
+    def seed_availability(cls, seed: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+        payload = seed if isinstance(seed, dict) else {}
+        quality = payload.get("data_quality") if isinstance(payload.get("data_quality"), dict) else {}
+        recorded = quality.get("availability") if isinstance(quality.get("availability"), dict) else {}
+        if not recorded and isinstance(payload.get("availability"), dict):
+            recorded = dict(payload.get("availability") or {})
+        lifecycle_status = str(payload.get("status") or "unknown")
+        if lifecycle_status not in {"pending", "processing"} and str(
+            recorded.get("status") or ""
+        ) in {"pending", "processing"}:
+            recorded = {}
+        provider_failures = list(
+            recorded.get("provider_failures") or quality.get("provider_failures") or []
+        )
+        if not provider_failures and isinstance(quality.get("providers"), dict):
+            providers = dict(quality.get("providers") or {})
+            provider_failures = summarize_provider_failures(
+                overpass_status=dict(providers.get("overpass") or {}),
+                worldcover_status=dict(providers.get("worldcover") or {}),
+            )
+        if cls.is_formal_seed_ready(payload):
+            return {
+                "status": "ready",
+                "available": True,
+                "retryable": False,
+                "reason_code": "formal_spatial_data_ready",
+                "message": "已取得可用于正式空间判断的公开地理数据。",
+                "provider_failures": provider_failures,
+                **recorded,
+                "available": True,
+                "status": "ready",
+            }
+        if lifecycle_status in {"pending", "processing"}:
+            return {
+                "status": lifecycle_status,
+                "available": False,
+                "retryable": False,
+                "reason_code": "analysis_pending",
+                "message": "地理数据正在获取。",
+                "provider_failures": [],
+            }
+        blocking_failures = [
+            item for item in provider_failures if item.get("required_for_formal_ready")
+        ]
+        derived_retryable = any(bool(item.get("retryable")) for item in blocking_failures)
+        derived_reason = str(
+            (blocking_failures[0].get("reason_code") if blocking_failures else "")
+            or ""
+        )
+        return {
+            "status": "unavailable",
+            "available": False,
+            "retryable": bool(
+                recorded.get("retryable")
+                or quality.get("retryable")
+                or derived_retryable
+            ),
+            "reason_code": str(
+                recorded.get("reason_code")
+                or quality.get("reason_code")
+                or derived_reason
+                or ("analysis_failed" if lifecycle_status == "failed" else "formal_spatial_data_unavailable")
+            ),
+            "message": str(
+                recorded.get("message")
+                or payload.get("error")
+                or "当前没有取得可用于正式空间判断的地理数据。"
+            ),
+            "provider_failures": provider_failures,
+        }
+
+    @classmethod
+    def get_graph_snapshot(
+        cls,
+        seed_id: str,
+        *,
+        allow_unavailable: bool = False,
+    ) -> Optional[Dict[str, Any]]:
+        if not allow_unavailable and not cls.is_formal_seed_ready(cls.get_seed(seed_id)):
+            return None
         path = cls._seed_file(seed_id, cls.GRAPH_FILENAME)
         return read_json_file(path, default=None)
 
     @classmethod
-    def get_layers(cls, seed_id: str) -> Optional[Dict[str, Any]]:
+    def get_layers(
+        cls,
+        seed_id: str,
+        *,
+        allow_unavailable: bool = False,
+    ) -> Optional[Dict[str, Any]]:
+        if not allow_unavailable and not cls.is_formal_seed_ready(cls.get_seed(seed_id)):
+            return None
         path = cls._seed_file(seed_id, cls.LAYERS_FILENAME)
         return read_json_file(path, default=None)
 
     @classmethod
-    def get_report_text(cls, seed_id: str) -> str:
+    def get_report_text(cls, seed_id: str, *, allow_unavailable: bool = False) -> str:
+        if not allow_unavailable and not cls.is_formal_seed_ready(cls.get_seed(seed_id)):
+            return ""
         path = cls._seed_file(seed_id, cls.REPORT_FILENAME)
         return read_text_file(path, default="")
 
@@ -539,19 +742,96 @@ class MapSeedManager:
             return {
                 "profile": profile,
                 "spatial_feature_limit": 120,
+                "candidate_pool_limit": 360,
                 "spatial_per_subtype_limit": 12,
                 "worldcover_components_per_class": 4,
                 "graph_feature_limit": 160,
                 "llm_semantic_edge_limit": 60,
+                "spatial_effort_policy": None,
             }
+        effort_snapshot = normalize_effort_snapshot(seed.get("effort_snapshot"))
+        spatial_policy = spatial_policy_from_effort(effort_snapshot)
         return {
             "profile": "",
-            "spatial_feature_limit": 28,
-            "spatial_per_subtype_limit": 4,
-            "worldcover_components_per_class": 2,
-            "graph_feature_limit": 18,
-            "llm_semantic_edge_limit": 6,
+            "effort_level": effort_snapshot["effort_level"],
+            "spatial_feature_limit": spatial_policy.planning_anchor_limit,
+            "candidate_pool_limit": spatial_policy.candidate_pool_limit,
+            "spatial_per_subtype_limit": max(
+                2, int(math.ceil(spatial_policy.candidate_pool_limit / 18))
+            ),
+            "worldcover_components_per_class": max(
+                1, min(6, int(math.ceil(spatial_policy.targeted_refinement_slots / 4)))
+            ),
+            "graph_feature_limit": spatial_policy.planning_anchor_limit,
+            "llm_semantic_edge_limit": max(
+                3, int(round(math.sqrt(spatial_policy.planning_anchor_limit) * 2))
+            ),
+            "spatial_effort_policy": spatial_policy,
         }
+
+    def _source_cache_key(self, provider: str, *, lat: float, lon: float, radius_m: int, profile: str) -> str:
+        # Nearby requests intentionally share cache entries.  Public spatial
+        # sources change slowly relative to one simulation session, while this
+        # bucketing prevents a fresh heavy query for every map click.
+        payload = "|".join(
+            [
+                str(provider),
+                f"{round(float(lat), 3):.3f}",
+                f"{round(float(lon), 3):.3f}",
+                str(max(500, int(round(int(radius_m or 0) / 500.0) * 500))),
+                str(profile or "default"),
+            ]
+        )
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:24]
+
+    def _read_source_cache(self, provider: str, cache_key: str) -> Optional[Dict[str, Any]]:
+        path = os.path.join(self.SOURCE_CACHE_DIR, f"{provider}_{cache_key}.json")
+        try:
+            age_seconds = max(0.0, time.time() - os.path.getmtime(path))
+        except OSError:
+            return None
+        if age_seconds > max(300, int(Config.MAP_SOURCE_CACHE_TTL_SECONDS)):
+            return None
+        payload = read_json_file(path, default=None)
+        if not isinstance(payload, dict):
+            return None
+        if not list(payload.get("features") or []):
+            return None
+        result = dict(payload)
+        status = dict(result.get("status") or {})
+        status.update(
+            {
+                "status": "cached",
+                "cache_age_seconds": round(age_seconds, 1),
+                "cache_key": cache_key,
+            }
+        )
+        result["status"] = status
+        return result
+
+    def _write_source_cache(
+        self,
+        provider: str,
+        cache_key: str,
+        *,
+        features: List[Dict[str, Any]],
+        status: Dict[str, Any],
+        layers: Optional[List[Dict[str, Any]]] = None,
+    ) -> None:
+        path = os.path.join(self.SOURCE_CACHE_DIR, f"{provider}_{cache_key}.json")
+        try:
+            write_json_file(
+                path,
+                {
+                    "provider": provider,
+                    "cached_at": _utcnow_iso(),
+                    "features": features,
+                    "layers": layers or [],
+                    "status": status,
+                },
+            )
+        except Exception as exc:
+            logger.warning(f"Unable to persist {provider} map cache: {exc}")
 
     def _merge_feature_lists(self, *feature_groups: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         merged: List[Dict[str, Any]] = []
@@ -565,6 +845,25 @@ class MapSeedManager:
                 seen_ids.add(feature_id)
         merged.sort(key=lambda item: (-float(item.get("importance") or 0), float(item.get("distance_m") or 0), str(item.get("name") or "")))
         return merged
+
+    def _refresh_cached_feature_distances(
+        self,
+        features: Iterable[Dict[str, Any]],
+        *,
+        lat: float,
+        lon: float,
+    ) -> List[Dict[str, Any]]:
+        refreshed: List[Dict[str, Any]] = []
+        for feature in features or []:
+            item = dict(feature)
+            try:
+                feature_lat = float(item.get("lat"))
+                feature_lon = float(item.get("lon"))
+            except (TypeError, ValueError):
+                continue
+            item["distance_m"] = round(_haversine_m(lat, lon, feature_lat, feature_lon), 1)
+            refreshed.append(item)
+        return refreshed
 
     def build_seed(
         self,
@@ -582,7 +881,19 @@ class MapSeedManager:
         simulation_requirement = seed["input"].get("simulation_requirement", "")
         profile_limits = self._profile_limits(seed)
 
-        self.update_seed(seed_id, status="processing", error=None)
+        self.update_seed(
+            seed_id,
+            status="processing",
+            error=None,
+            availability={
+                "status": "processing",
+                "available": False,
+                "retryable": False,
+                "reason_code": "analysis_pending",
+                "message": "地理数据正在获取。",
+                "provider_failures": [],
+            },
+        )
         if progress_callback:
             progress_callback("locating", 5, "解析地点与分析范围")
 
@@ -594,12 +905,12 @@ class MapSeedManager:
         if progress_callback:
             progress_callback("collecting", 20, "采集周边空间要素和环境基线")
 
-        features = self._collect_spatial_features(
+        overpass_features, overpass_summary = self._collect_spatial_features(
             lat,
             lon,
             radius_m,
             per_subtype_limit=profile_limits["spatial_per_subtype_limit"],
-            feature_limit=profile_limits["spatial_feature_limit"],
+            feature_limit=profile_limits["candidate_pool_limit"],
         )
         remote_sensing_features, remote_sensing_summary, remote_sensing_layers = self._collect_worldcover_features(
             lat=lat,
@@ -610,14 +921,53 @@ class MapSeedManager:
         curated_features = self._wuhan_curated_features(lat, lon, radius_m) if profile_limits["profile"] == "wuhan_covid_v1" else []
         curated_features.extend(self._local_curated_features(lat, lon, radius_m))
         environment_baseline = self._build_environment_baseline(lat, lon, admin_context)
-        features = self._merge_context_features(
-            features=self._merge_feature_lists(features, curated_features, remote_sensing_features),
+        candidate_features = self._merge_context_features(
+            features=self._merge_feature_lists(overpass_features, curated_features, remote_sensing_features),
             lat=lat,
             lon=lon,
             admin_context=admin_context,
             environment_baseline=environment_baseline,
         )
-        features = self._filter_features_to_aoi(features, radius_m)
+        candidate_features = self._filter_features_to_aoi(candidate_features, radius_m)
+
+        selection_context = SelectionContext(
+            center_lat=lat,
+            center_lon=lon,
+            radius_m=radius_m,
+            simulation_requirement=simulation_requirement,
+            title=str(seed.get("title") or ""),
+            requested_location=str(seed["input"].get("requested_location") or ""),
+            focus_text=str(seed["input"].get("focus_text") or ""),
+            known_entities=str(seed["input"].get("known_entities") or ""),
+            analysis_boundaries=str(seed["input"].get("analysis_boundaries") or ""),
+            focus_mode=str(seed["input"].get("focus_mode") or "auto"),
+            admin_context=admin_context,
+        )
+        selection_result = select_spatial_features(
+            candidate_features,
+            context=selection_context,
+            limit=profile_limits["spatial_feature_limit"],
+            effort_policy=profile_limits["spatial_effort_policy"],
+        )
+        features = selection_result.selected_features
+        source_status = summarize_source_status(
+            overpass_status=overpass_summary,
+            worldcover_status=remote_sensing_summary,
+            # Downstream readiness is a contract on the actual spatial
+            # skeleton, not on objects that were collected and then discarded
+            # by focus/granularity selection.
+            features=features,
+        )
+        selection_summary = {
+            "granularity": selection_result.granularity,
+            "focus_terms": selection_result.focus_terms,
+            "diagnostics": selection_result.diagnostics,
+        }
+        data_quality = {
+            **source_status,
+            "granularity": selection_result.granularity,
+            "selection_policy": selection_result.diagnostics.get("selection_policy"),
+        }
 
         if progress_callback:
             progress_callback("classifying", 40, "判定场景类型并构建空间事实层")
@@ -634,6 +984,8 @@ class MapSeedManager:
             features=features,
             environment_baseline=environment_baseline,
             scene_classification=scene_classification,
+            data_quality=data_quality,
+            selection_summary=selection_summary,
             feature_limit=profile_limits["graph_feature_limit"],
             llm_edge_limit=profile_limits["llm_semantic_edge_limit"],
         )
@@ -649,17 +1001,36 @@ class MapSeedManager:
             environment_baseline=environment_baseline,
             scene_classification=scene_classification,
             graph=graph,
+            data_quality=data_quality,
+            selection_summary=selection_summary,
         )
 
-        layers = self._build_layers_payload(aoi, features, graph, remote_sensing_layers=remote_sensing_layers)
+        layers = self._build_layers_payload(
+            aoi,
+            features,
+            graph,
+            remote_sensing_layers=remote_sensing_layers,
+            data_quality=data_quality,
+            selection_summary=selection_summary,
+        )
         self._write_json(self._seed_file(seed_id, self.GRAPH_FILENAME), graph)
         self._write_json(self._seed_file(seed_id, self.LAYERS_FILENAME), layers)
         self._write_text(self._seed_file(seed_id, self.REPORT_FILENAME), report_text)
 
-        summary = self._build_summary(admin_context, scene_classification, graph)
+        summary = self._build_summary(
+            admin_context,
+            scene_classification,
+            graph,
+            data_quality=data_quality,
+        )
+        formal_ready = data_quality.get("formal_ready") is True
+        availability = dict(data_quality.get("availability") or {})
+        seed_status = "ready" if formal_ready else "unavailable"
         payload = self.update_seed(
             seed_id,
-            status="ready",
+            status=seed_status,
+            availability=availability,
+            retryable=bool(availability.get("retryable")),
             title=summary["title"],
             summary=summary["summary"],
             admin_context=admin_context,
@@ -667,10 +1038,19 @@ class MapSeedManager:
             scene_classification=scene_classification,
             environment_baseline=environment_baseline,
             remote_sensing_summary=remote_sensing_summary,
+            overpass_summary=overpass_summary,
+            data_quality=data_quality,
+            selection_summary=selection_summary,
             graph_stats=graph.get("stats", {}),
         )
         if progress_callback:
-            progress_callback("completed", 100, "地图种子图谱已生成")
+            progress_callback(
+                "completed" if formal_ready else "unavailable",
+                100,
+                "正式地理数据已生成"
+                if formal_ready
+                else str(availability.get("message") or "正式地理数据不可用"),
+            )
         return payload
 
     def build_seed_async(
@@ -695,10 +1075,12 @@ class MapSeedManager:
 
     def create_project_from_seed(self, seed_id: str) -> Dict[str, Any]:
         seed = self.get_seed(seed_id)
+        if not self.is_formal_seed_ready(seed):
+            raise ValueError(f"地图种子没有可用于正式分析的地理数据: {seed_id}")
         graph = self.get_graph_snapshot(seed_id)
         report_text = self.get_report_text(seed_id)
-        if not seed or not graph:
-            raise ValueError(f"Map seed not ready: {seed_id}")
+        if not graph:
+            raise ValueError(f"地图种子正式图谱不存在: {seed_id}")
 
         existing_project_id = seed.get("project_id")
         if existing_project_id:
@@ -707,11 +1089,16 @@ class MapSeedManager:
                 return {
                     "project_id": project.project_id,
                     "project_name": project.name,
+                    "effort_snapshot": project.effort_snapshot,
                 }
 
         title = seed.get("title") or f"Map Seed {seed_id[-6:]}"
-        project = ProjectManager.create_project(name=title)
+        project = ProjectManager.create_project(
+            name=title,
+            effort_snapshot=normalize_effort_snapshot(seed.get("effort_snapshot")),
+        )
         project.status = ProjectStatus.ONTOLOGY_GENERATED
+        project.map_seed_id = seed_id
         project.simulation_requirement = seed.get("input", {}).get("simulation_requirement") or (
             seed.get("summary") or "基于地图空间事实层建立生态推演场景。"
         )
@@ -736,6 +1123,7 @@ class MapSeedManager:
         return {
             "project_id": project.project_id,
             "project_name": project.name,
+            "effort_snapshot": project.effort_snapshot,
         }
 
     def _build_area_of_interest(
@@ -1164,52 +1552,207 @@ class MapSeedManager:
         *,
         per_subtype_limit: int = 4,
         feature_limit: int = 28,
-    ) -> List[Dict[str, Any]]:
-        query = f"""
-[out:json][timeout:25];
-(
-  nwr(around:{radius_m},{lat},{lon})[natural];
-  nwr(around:{radius_m},{lat},{lon})[waterway];
-  nwr(around:{radius_m},{lat},{lon})[landuse~"industrial|residential|commercial|retail|farmland|forest|reservoir|meadow|basin|farmyard"];
-  nwr(around:{radius_m},{lat},{lon})[amenity~"wastewater_plant|hospital|school|university|marketplace|parking|bus_station|ferry_terminal|police|fire_station|townhall"];
-  nwr(around:{radius_m},{lat},{lon})[man_made~"pier|breakwater|groyne"];
-  nwr(around:{radius_m},{lat},{lon})[leisure];
-  nwr(around:{radius_m},{lat},{lon})[tourism];
-  nwr(around:{radius_m},{lat},{lon})[power="plant"];
-  nwr(around:{radius_m},{lat},{lon})[building~"industrial|warehouse|commercial|retail"];
-  nwr(around:{radius_m},{lat},{lon})[highway~"motorway|trunk|primary|secondary|tertiary|residential|pedestrian|service"];
-  nwr(around:{radius_m},{lat},{lon})[public_transport];
-  nwr(around:{radius_m},{lat},{lon})[railway~"station|halt|subway_entrance|tram_stop"];
-  nwr(around:{radius_m},{lat},{lon})[shop~"mall|supermarket|convenience"];
-  nwr(around:{radius_m},{lat},{lon})[office];
-  nwr(around:{radius_m},{lat},{lon})[boundary="protected_area"];
-);
-out center tags;
-"""
-        payload = None
+    ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+        granularity = granularity_for_radius(radius_m)
+        regional = granularity == "city_region"
+        # Final map nodes must be explainable places.  Unnamed land-use/natural
+        # geometry explodes response size and cannot produce a useful place
+        # label, so it belongs in a raster/geometry pipeline rather than this
+        # point skeleton query.
+        named_filter = "[name]"
+        road_types = "motorway|trunk|primary" if regional else "motorway|trunk|primary|secondary|tertiary"
+        timeout_seconds = max(8, min(int(Config.OVERPASS_QUERY_TIMEOUT_SECONDS), 45))
+        # Large AOIs use two low-cardinality boundary queries.  A 37.5 km
+        # ``nwr`` union around Taipei previously exceeded the public server's
+        # declared 32 MiB working set before it could return a single object.
+        # The containing-boundary query is both more relevant to city-level
+        # selection and much cheaper than scanning every POI in the circle.
+        administrative_query = (
+            f"is_in({lat},{lon})->.containing;\n"
+            'rel(pivot.containing)[boundary="administrative"]'
+            '[admin_level~"4|5|6|7|8|9|10"][name];'
+        )
+        if regional:
+            query_batches = [
+                ("administrative", administrative_query),
+                (
+                    "regional_boundaries",
+                    "(\n  "
+                    + f'rel(around:{radius_m},{lat},{lon})[boundary="administrative"][admin_level~"4|5|6"][name];\n  '
+                    + f'rel(around:{radius_m},{lat},{lon})[boundary="protected_area"][name];\n'
+                    + ");",
+                ),
+            ]
+        else:
+            thematic_radius = radius_m if radius_m <= 15_000 else 12_000
+            infrastructure_radius = radius_m if radius_m <= 15_000 else 8_000
+            query_batches = [
+                ("administrative", administrative_query),
+                (
+                    "water_ecology",
+                    "(\n  "
+                    + f"nwr(around:{thematic_radius},{lat},{lon})[natural]{named_filter};\n  "
+                    + f"nwr(around:{thematic_radius},{lat},{lon})[waterway]{named_filter};\n  "
+                    + f'nwr(around:{thematic_radius},{lat},{lon})[landuse~"farmland|forest|reservoir|meadow|basin|farmyard"]{named_filter};\n  '
+                    + f'nwr(around:{thematic_radius},{lat},{lon})[leisure~"park|nature_reserve|marina|garden|playground"][name];\n'
+                    + ");",
+                ),
+                (
+                    "human_infrastructure",
+                    "(\n  "
+                    + f'nwr(around:{infrastructure_radius},{lat},{lon})[landuse~"industrial|residential|commercial|retail"]{named_filter};\n  '
+                    + f'nwr(around:{infrastructure_radius},{lat},{lon})[amenity~"wastewater_plant|hospital|school|university|marketplace|bus_station|ferry_terminal|police|fire_station|townhall"][name];\n  '
+                    + f'nwr(around:{infrastructure_radius},{lat},{lon})[man_made~"pier|breakwater|groyne"]{named_filter};\n  '
+                    + f'nwr(around:{infrastructure_radius},{lat},{lon})[power="plant"][name];\n'
+                    + ");",
+                ),
+                (
+                    "transport",
+                    "(\n  "
+                    + f'nwr(around:{infrastructure_radius},{lat},{lon})[highway~"{road_types}"][name];\n  '
+                    + f'nwr(around:{infrastructure_radius},{lat},{lon})[public_transport~"station|stop_position|platform"][name];\n  '
+                    + f'nwr(around:{infrastructure_radius},{lat},{lon})[railway~"station|halt|subway_entrance|tram_stop"][name];\n'
+                    + ");",
+                ),
+            ]
+        cache_key = self._source_cache_key(
+            "overpass",
+            lat=lat,
+            lon=lon,
+            radius_m=radius_m,
+            profile=f"{granularity}:v4-batched-named",
+        )
+        cached = self._read_source_cache("overpass", cache_key)
+        if cached:
+            cached_status = dict(cached.get("status") or {})
+            cached_status["query_strategy"] = "thematic_batches"
+            cached_status["cache_policy"] = "fresh_cache_first"
+            return self._refresh_cached_feature_distances(
+                cached.get("features") or [],
+                lat=lat,
+                lon=lon,
+            ), cached_status
+        maxsize_bytes = max(16 * 1024 * 1024, int(Config.OVERPASS_MAXSIZE_BYTES))
+        output_limit = max(120, min(600, int(feature_limit or 28) * 6))
         last_error = None
-        for endpoint in [
-            "https://overpass-api.de/api/interpreter",
-            "https://lz4.overpass-api.de/api/interpreter",
-        ]:
-            try:
-                payload = _safe_http_json(
-                    endpoint,
-                    method="POST",
-                    data=query,
-                    headers={"Content-Type": "text/plain;charset=utf-8"},
-                    timeout=30.0,
+        attempts: List[Dict[str, Any]] = []
+        batch_summaries: List[Dict[str, Any]] = []
+        elements: List[Dict[str, Any]] = []
+        successful_batches = 0
+        failed_batches = 0
+        started_at = time.monotonic()
+        for batch_name, query_body in query_batches:
+            query = (
+                f"[out:json][timeout:{timeout_seconds}][maxsize:{maxsize_bytes}];\n"
+                + query_body
+                + f"\nout center tags qt {output_limit};\n"
+            )
+            batch_payload = None
+            batch_error = None
+            batch_attempts: List[Dict[str, Any]] = []
+            batch_started = time.monotonic()
+            for endpoint in list(Config.OVERPASS_ENDPOINTS or []):
+                endpoint_started = time.monotonic()
+                try:
+                    candidate_payload = _safe_http_json(
+                        endpoint,
+                        method="POST",
+                        data=query,
+                        headers={
+                            "Content-Type": "text/plain;charset=utf-8",
+                            "Accept": "application/json",
+                            "User-Agent": "Kaleido/0.1 map-seed (+https://github.com/crisisjungle/Kaleido)",
+                        },
+                        timeout=max(10.0, float(Config.OVERPASS_HTTP_TIMEOUT_SECONDS)),
+                    )
+                    if not isinstance(candidate_payload, dict) or not isinstance(candidate_payload.get("elements"), list):
+                        raise ValueError("Overpass returned an invalid payload")
+                    remark = str(
+                        candidate_payload.get("remark")
+                        or (candidate_payload.get("osm3s") or {}).get("remark")
+                        or ""
+                    ).strip()
+                    if remark:
+                        raise RuntimeError(f"Overpass runtime error: {remark}")
+                    batch_payload = candidate_payload
+                    attempt = {
+                        "batch": batch_name,
+                        "endpoint": endpoint,
+                        "status": "completed",
+                        "elapsed_ms": round((time.monotonic() - endpoint_started) * 1000),
+                    }
+                    batch_attempts.append(attempt)
+                    attempts.append(attempt)
+                    break
+                except Exception as exc:
+                    last_error = exc
+                    batch_error = exc
+                    attempt = {
+                        "batch": batch_name,
+                        "endpoint": endpoint,
+                        "status": "failed",
+                        "error": str(exc),
+                        "elapsed_ms": round((time.monotonic() - endpoint_started) * 1000),
+                    }
+                    batch_attempts.append(attempt)
+                    attempts.append(attempt)
+                    logger.warning(f"Overpass batch {batch_name} failed via {endpoint}: {exc}")
+
+            if batch_payload is None:
+                failed_batches += 1
+                batch_summaries.append(
+                    {
+                        "batch": batch_name,
+                        "status": "failed",
+                        "error": str(batch_error or "No Overpass endpoint configured"),
+                        "attempts": batch_attempts,
+                        "elapsed_ms": round((time.monotonic() - batch_started) * 1000),
+                    }
                 )
-                break
-            except Exception as exc:
-                last_error = exc
-                logger.warning(f"Overpass fetch failed via {endpoint}: {exc}")
-        if payload is None:
+                continue
+
+            batch_elements = list(batch_payload.get("elements") or [])
+            elements.extend(batch_elements)
+            successful_batches += 1
+            batch_summaries.append(
+                {
+                    "batch": batch_name,
+                    "status": "completed",
+                    "raw_element_count": len(batch_elements),
+                    "attempts": batch_attempts,
+                    "elapsed_ms": round((time.monotonic() - batch_started) * 1000),
+                }
+            )
+
+        if successful_batches == 0:
+            cached = self._read_source_cache("overpass", cache_key)
+            if cached:
+                cached_status = dict(cached.get("status") or {})
+                cached_status["live_attempts"] = attempts
+                cached_status["live_error"] = str(last_error or "")
+                cached_status["batches"] = batch_summaries
+                return self._refresh_cached_feature_distances(
+                    cached.get("features") or [],
+                    lat=lat,
+                    lon=lon,
+                ), cached_status
             if last_error:
                 logger.warning(f"All Overpass endpoints failed, continuing with fallback features: {last_error}")
-            return []
+            return [], {
+                "status": "failed",
+                "provider": "osm_overpass",
+                "error": str(last_error or "No Overpass endpoint configured"),
+                "attempts": attempts,
+                "batches": batch_summaries,
+                "batch_count": len(query_batches),
+                "failed_batch_count": failed_batches,
+                "elapsed_ms": round((time.monotonic() - started_at) * 1000),
+                "granularity": granularity,
+                "query_profile": "named_macro" if regional else "named_local",
+                "query_strategy": "thematic_batches",
+                "maxsize_bytes": maxsize_bytes,
+            }
 
-        elements = payload.get("elements") or []
         features: List[Dict[str, Any]] = []
         seen_ids = set()
         for element in elements:
@@ -1217,7 +1760,8 @@ out center tags;
             if element_id in seen_ids:
                 continue
             seen_ids.add(element_id)
-            tags = element.get("tags") or {}
+            tags = dict(element.get("tags") or {})
+            tags["provider"] = "osm_overpass"
             lat_value = element.get("lat")
             lon_value = element.get("lon")
             if lat_value is None or lon_value is None:
@@ -1247,8 +1791,21 @@ out center tags;
                     "summary": classification["summary"],
                     "tags": tags,
                     "confidence": classification["confidence"],
+                    "spatial_level": classification.get("spatial_level") or "",
                 }
             )
+
+        cached_feature_count = 0
+        if failed_batches:
+            cached = self._read_source_cache("overpass", cache_key)
+            if cached:
+                cached_features = self._refresh_cached_feature_distances(
+                    cached.get("features") or [],
+                    lat=lat,
+                    lon=lon,
+                )
+                cached_feature_count = len(cached_features)
+                features = self._merge_feature_lists(features, cached_features)
 
         features.sort(key=lambda item: (-item["importance"], item["distance_m"], item["name"]))
 
@@ -1262,7 +1819,43 @@ out center tags;
             subtype_counts[subtype] = subtype_counts.get(subtype, 0) + 1
             if len(selected) >= feature_limit:
                 break
-        return selected
+        failed_batch_errors = [
+            str(item.get("error") or "")
+            for item in batch_summaries
+            if item.get("status") == "failed" and str(item.get("error") or "").strip()
+        ]
+        if selected:
+            provider_status = "completed" if failed_batches == 0 else "partial"
+        else:
+            provider_status = "failed" if failed_batches else "empty"
+        status = {
+            "status": provider_status,
+            "provider": "osm_overpass",
+            "feature_count": len(selected),
+            "raw_element_count": len(elements),
+            "classified_feature_count": len(features),
+            "cached_feature_count": cached_feature_count,
+            "attempts": attempts,
+            "batches": batch_summaries,
+            "batch_count": len(query_batches),
+            "successful_batch_count": successful_batches,
+            "failed_batch_count": failed_batches,
+            "error": "; ".join(dict.fromkeys(failed_batch_errors)),
+            "elapsed_ms": round((time.monotonic() - started_at) * 1000),
+            "granularity": granularity,
+            "query_profile": "named_macro" if regional else "named_local",
+            "query_strategy": "thematic_batches",
+            "maxsize_bytes": maxsize_bytes,
+            "cache_key": cache_key,
+        }
+        if selected:
+            self._write_source_cache(
+                "overpass",
+                cache_key,
+                features=selected,
+                status=status,
+            )
+        return selected, status
 
     def _collect_worldcover_features(
         self,
@@ -1272,36 +1865,121 @@ out center tags;
         radius_m: int,
         components_per_class: int = 2,
     ) -> Tuple[List[Dict[str, Any]], Dict[str, Any], List[Dict[str, Any]]]:
+        cache_key = self._source_cache_key(
+            "worldcover",
+            lat=lat,
+            lon=lon,
+            radius_m=radius_m,
+            profile=(
+                "wms-v4-official-contextual-reference:"
+                f"{Config.WORLDCOVER_WMS_VERSION}:"
+                f"{Config.WORLDCOVER_WMS_LAYER}:"
+                f"{Config.WORLDCOVER_WMS_TIME}:"
+                f"{components_per_class}"
+            ),
+        )
+        cached = self._read_source_cache("worldcover", cache_key)
+        if cached:
+            cached_status = dict(cached.get("status") or {})
+            cached_status["cache_policy"] = "fresh_cache_first"
+            return (
+                self._refresh_cached_feature_distances(
+                    cached.get("features") or [],
+                    lat=lat,
+                    lon=lon,
+                ),
+                cached_status,
+                list(cached.get("layers") or []),
+            )
         bbox = _radius_to_bbox(lat, lon, radius_m)
         minx, miny = _lonlat_to_mercator(bbox["min_lon"], bbox["min_lat"])
         maxx, maxy = _lonlat_to_mercator(bbox["max_lon"], bbox["max_lat"])
+        wms_version = str(Config.WORLDCOVER_WMS_VERSION or "1.3.0").strip()
+        wms_layer = str(Config.WORLDCOVER_WMS_LAYER or "esa-worldcover-map-10m-2021-v2_map").strip()
+        wms_time = str(Config.WORLDCOVER_WMS_TIME or "2021-01-01").strip()
         params = {
             "service": "WMS",
-            "version": "1.1.1",
+            "version": wms_version,
             "request": "GetMap",
-            "layers": "WORLDCOVER_2021_MAP",
-            "srs": "EPSG:3857",
+            "layers": wms_layer,
             "bbox": f"{minx},{miny},{maxx},{maxy}",
             "width": "256",
             "height": "256",
-            "styles": "worldcover.txt",
+            "styles": "",
             "format": "image/png",
             "transparent": "true",
-            "time": "2021-12-31",
+            "time": wms_time,
         }
-        url = "https://services.terrascope.be/wms/v2?" + urllib.parse.urlencode(params)
+        params["crs" if wms_version.startswith("1.3") else "srs"] = "EPSG:3857"
+        url = str(Config.WORLDCOVER_WMS_URL).rstrip("?") + "?" + urllib.parse.urlencode(params)
 
-        try:
-            with urllib.request.urlopen(url, timeout=30.0) as response:
-                image = Image.open(io.BytesIO(response.read())).convert("RGBA")
-        except Exception as exc:
-            logger.warning(f"WorldCover GetMap failed: {exc}")
+        image = None
+        last_error = None
+        attempts: List[Dict[str, Any]] = []
+        attempt_count = max(1, min(int(Config.WORLDCOVER_WMS_ATTEMPTS), 3))
+        for attempt in range(attempt_count):
+            started_at = time.monotonic()
+            try:
+                request = urllib.request.Request(
+                    url,
+                    headers={
+                        "User-Agent": "Kaleido/0.1 map-seed (+https://github.com/crisisjungle/Kaleido)",
+                        "Accept": "image/png",
+                    },
+                )
+                with urllib.request.urlopen(
+                    request,
+                    timeout=max(3.0, float(Config.WORLDCOVER_WMS_TIMEOUT_SECONDS)),
+                ) as response:
+                    image = Image.open(io.BytesIO(response.read())).convert("RGBA")
+                attempts.append(
+                    {
+                        "attempt": attempt + 1,
+                        "status": "completed",
+                        "elapsed_ms": round((time.monotonic() - started_at) * 1000),
+                    }
+                )
+                break
+            except Exception as exc:
+                last_error = exc
+                attempts.append(
+                    {
+                        "attempt": attempt + 1,
+                        "status": "failed",
+                        "error": str(exc),
+                        "elapsed_ms": round((time.monotonic() - started_at) * 1000),
+                    }
+                )
+                logger.warning(f"WorldCover GetMap failed (attempt {attempt + 1}/{attempt_count}): {exc}")
+                if attempt + 1 < attempt_count:
+                    time.sleep(0.6)
+        if image is None:
+            cached = self._read_source_cache("worldcover", cache_key)
+            if cached:
+                cached_status = dict(cached.get("status") or {})
+                cached_status["live_attempts"] = attempts
+                cached_status["live_error"] = str(last_error or "")
+                return (
+                    self._refresh_cached_feature_distances(
+                        cached.get("features") or [],
+                        lat=lat,
+                        lon=lon,
+                    ),
+                    cached_status,
+                    list(cached.get("layers") or []),
+                )
             return [], {
                 "status": "failed",
-                "provider": "esa_worldcover",
+                "provider": "worldcover_wms",
                 "product": "WorldCover 2021 v200",
-                "error": str(exc),
-                "note": "未能获取 WorldCover 遥感层，已退回 OSM 和上下文特征。",
+                "endpoint": str(Config.WORLDCOVER_WMS_URL),
+                "wms_version": wms_version,
+                "layer": wms_layer,
+                "time": wms_time,
+                "error": str(last_error or "WorldCover WMS unavailable"),
+                "attempts": attempts,
+                "analysis_grade": "contextual_only",
+                "note": "WorldCover WMS 未能获取；该 RGB 地图服务本来也只作为背景分类参考，不作为正式分析事实。",
             }, []
 
         sampled = image.resize((128, 128), resample=PIL_NEAREST)
@@ -1418,7 +2096,11 @@ out center tags;
                         "category": class_meta["category"],
                         "subtype": f"worldcover_{code}",
                         "node_family": class_meta["node_family"],
-                        "source_kind": "detected",
+                        # The public WMS is an RGB cartographic layer.  Preserve
+                        # its polygons as contextual reference, not analysis-
+                        # grade detected evidence (official COGs are required
+                        # for that stronger claim).
+                        "source_kind": "reference",
                         "lat": round(centroid_lat, 6),
                         "lon": round(centroid_lon, 6),
                         "distance_m": round(_haversine_m(lat, lon, centroid_lat, centroid_lon), 1),
@@ -1426,7 +2108,7 @@ out center tags;
                         "summary": summary,
                         "geometry": geometry,
                         "tags": {
-                            "provider": "esa_worldcover",
+                            "provider": "worldcover_wms",
                             "product": "WorldCover 2021 v200",
                             "class_code": code,
                             "class_name": class_meta["name"],
@@ -1456,9 +2138,11 @@ out center tags;
                         "id": f"worldcover_{code}",
                         "name": f"遥感 {class_meta['name_zh']}",
                         "type": "geojson",
+                        "source_provider": "worldcover_wms",
+                        "analysis_grade": "contextual_only",
                         "color": self._rgb_to_hex(class_meta["color"]),
                         "visible": True,
-                        "note": "ESA WorldCover 2021 v200 遥感识别结果",
+                        "note": "ESA WorldCover 2021 v200 WMS 背景分类参考（非分析级栅格）",
                         "data": {
                             "type": "FeatureCollection",
                             "features": layer_features,
@@ -1478,13 +2162,29 @@ out center tags;
         ]
         remote_summary = {
             "status": "completed" if detected_features else "empty",
-            "provider": "esa_worldcover",
+            "provider": "worldcover_wms",
             "product": "WorldCover 2021 v200",
+            "endpoint": str(Config.WORLDCOVER_WMS_URL),
+            "wms_version": wms_version,
+            "layer": wms_layer,
+            "time": wms_time,
             "mode": "wms_classified_png_sampling",
+            "analysis_grade": "contextual_only",
+            "attempts": attempts,
+            "cache_key": cache_key,
             "detected_features_count": len(detected_features),
+            "contextual_features_count": len(detected_features),
             "detected_classes": detected_classes,
-            "note": "基于 ESA WorldCover 2021 年度土地覆盖图识别，属于卫星派生地表分类，不是实时影像解译。",
+            "note": "基于 WorldCover WMS RGB 图层的背景分类参考；官方说明 WMS 适合制图、不适合作为分析数据。正式分析应切换到 COG/自托管栅格。",
         }
+        if detected_features:
+            self._write_source_cache(
+                "worldcover",
+                cache_key,
+                features=detected_features,
+                status=remote_summary,
+                layers=remote_layers,
+            )
         return detected_features, remote_summary, remote_layers
 
     def _match_worldcover_class(self, rgb: Tuple[int, int, int], *, alpha: int) -> int:
@@ -1565,6 +2265,51 @@ out center tags;
             merged.append(feature)
             existing_ids.add(feature["feature_id"])
             existing_subtypes.add(feature["subtype"])
+
+        admin_candidates = [
+            ("city", str(admin_context.get("city") or "").strip()),
+            ("district", str(admin_context.get("district") or admin_context.get("suburb") or "").strip()),
+        ]
+        for level_hint, place_name in admin_candidates:
+            if not place_name:
+                continue
+            if any(
+                str(item.get("name") or "").strip() == place_name
+                and str((item.get("tags") or {}).get("provider") or "") == "reverse_geocode"
+                for item in merged
+            ):
+                continue
+            if place_name.endswith(("街道", "镇", "乡")):
+                subtype = "subdistrict"
+                spatial_level = "street"
+            elif place_name.endswith(("区", "县")):
+                subtype = "admin_district"
+                spatial_level = "district"
+            else:
+                subtype = "admin_city" if level_hint == "city" else "admin_district"
+                spatial_level = "city" if level_hint == "city" else "district"
+            add_feature(
+                {
+                    "feature_id": f"context_admin_{level_hint}_{_slugify(place_name)}",
+                    "name": place_name,
+                    "category": "region",
+                    "subtype": subtype,
+                    "node_family": "Region",
+                    "source_kind": "observed",
+                    "lat": round(lat, 6),
+                    "lon": round(lon, 6),
+                    "distance_m": 0.0,
+                    "importance": 10 if spatial_level in {"city", "district"} else 8,
+                    "summary": "来自中心点逆地理编码的行政归属，只用于范围层级与关注区域判断。",
+                    "tags": {
+                        "provider": "reverse_geocode",
+                        "spatial_level": spatial_level,
+                        "admin_context": True,
+                    },
+                    "spatial_level": spatial_level,
+                    "confidence": 0.86,
+                }
+            )
 
         if any(current.get(key) is not None for key in ["temperature_2m", "wind_speed_10m", "precipitation"]) and "weather_baseline" not in existing_subtypes:
             summary_bits = []
@@ -1731,7 +2476,7 @@ out center tags;
                     "category": category,
                     "subtype": subtype,
                     "node_family": node_family,
-                    "source_kind": "observed",
+                    "source_kind": "reference",
                     "lat": feature_lat,
                     "lon": feature_lon,
                     "distance_m": round(distance_m, 1),
@@ -1741,7 +2486,7 @@ out center tags;
                         "provider": "local_geographic_gazetteer",
                         "local_context": local.get("key", ""),
                     },
-                    "confidence": 0.74,
+                    "confidence": 0.68,
                 }
             )
         return features
@@ -1910,6 +2655,30 @@ out center tags;
                 "summary": "商业或办公活动节点。",
                 "default_name": (shop or office).replace("_", " "),
             }
+        if boundary == "administrative":
+            try:
+                admin_level = int(tags.get("admin_level") or 99)
+            except (TypeError, ValueError):
+                admin_level = 99
+            if admin_level <= 5:
+                subtype = "admin_city"
+                spatial_level = "city"
+            elif admin_level <= 8:
+                subtype = "admin_district"
+                spatial_level = "district"
+            else:
+                subtype = "subdistrict"
+                spatial_level = "street"
+            return {
+                "category": "region",
+                "subtype": subtype,
+                "node_family": "Region",
+                "importance": 9 if spatial_level != "street" else 7,
+                "confidence": 0.88,
+                "summary": f"OSM 行政边界 admin_level={admin_level}。",
+                "default_name": "Administrative area",
+                "spatial_level": spatial_level,
+            }
         if boundary == "protected_area":
             return {
                 "category": "ecology",
@@ -1987,29 +2756,60 @@ out center tags;
             "wetland": 0,
             "urban_edge": 0,
             "agricultural": 0,
-            "mixed": 1,
+            "mixed": 0,
         }
+        evidence_feature_count = 0
         for feature in features:
-            subtype = feature["subtype"]
+            tags = feature.get("tags") if isinstance(feature.get("tags"), dict) else {}
+            provider = str(tags.get("provider") or feature.get("source_provider") or "").strip().lower()
+            source_kind = str(feature.get("source_kind") or "").strip().lower()
+            if provider not in PUBLIC_PROVIDERS or source_kind not in {"observed", "detected"}:
+                continue
+            subtype = str(feature.get("subtype") or "")
+            contributed = False
             if subtype in {"beach", "coastline", "pier", "marina", "breakwater", "groyne"}:
                 scores["coastal"] += 3
+                contributed = True
             if subtype in {"river", "stream", "canal", "ditch", "water", "reservoir", "basin", "worldcover_80"}:
                 scores["inland_water"] += 2
+                contributed = True
             if subtype in {"wetland", "worldcover_90", "worldcover_95"}:
                 scores["wetland"] += 4
+                contributed = True
             if subtype in {"industrial", "commercial", "residential", "hospital", "school", "university", "worldcover_50"}:
                 scores["urban_edge"] += 2
+                contributed = True
             if subtype in {"farmland", "farmyard", "meadow", "worldcover_40"}:
                 scores["agricultural"] += 3
+                contributed = True
+            if contributed:
+                evidence_feature_count += 1
 
-        title = max(scores.items(), key=lambda item: item[1])[0]
+        ranked = sorted(
+            ((key, value) for key, value in scores.items() if key != "mixed" and value > 0),
+            key=lambda item: (-item[1], item[0]),
+        )
+        place = str(admin_context.get("display_name") or "选定区域")
+        if not ranked:
+            return {
+                "primary_scene": "unknown",
+                "classification_ready": False,
+                "scores": scores,
+                "evidence_feature_count": 0,
+                "reasoning": f"已取得 {place} 的范围或行政空间数据，但环境类型证据不足，本轮不判断区域类型。",
+            }
+
+        title = ranked[0][0]
+        if len(ranked) > 1 and ranked[1][1] >= ranked[0][1] * 0.6:
+            title = "mixed"
+            scores["mixed"] = ranked[0][1] + ranked[1][1]
+        scene_label = _display_token_zh(title)
         return {
             "primary_scene": title,
+            "classification_ready": True,
             "scores": scores,
-            "reasoning": (
-                f"Based on nearby OSM features around {admin_context.get('display_name', 'selected area')}, "
-                f"the strongest spatial signature is {title}."
-            ),
+            "evidence_feature_count": evidence_feature_count,
+            "reasoning": f"根据 {place} 范围内 {evidence_feature_count} 个合格空间要素，主要呈现为{scene_label}。",
         }
 
     def _build_graph(
@@ -2021,6 +2821,8 @@ out center tags;
         features: List[Dict[str, Any]],
         environment_baseline: Dict[str, Any],
         scene_classification: Dict[str, Any],
+        data_quality: Optional[Dict[str, Any]] = None,
+        selection_summary: Optional[Dict[str, Any]] = None,
         feature_limit: int = 18,
         llm_edge_limit: int = 6,
     ) -> Dict[str, Any]:
@@ -2031,11 +2833,11 @@ out center tags;
         region_id = f"region_{_slugify(place_label)}"
         region_node = self._make_graph_node(
             node_id=region_id,
-            name=place_label or "Selected region",
-            label="Region",
+            name=place_label or "选定区域",
+            label="区域",
             summary=(
                 f"中心点 ({center['lat']}, {center['lon']}) 周边 {aoi['radius_m']} 米分析范围，"
-                f"场景类型倾向为 {scene_classification['primary_scene']}。"
+                f"场景类型判断为 {_display_token_zh(scene_classification.get('primary_scene'))}。"
             ),
             lat=center["lat"],
             lon=center["lon"],
@@ -2047,6 +2849,8 @@ out center tags;
                 "radius_m": aoi["radius_m"],
                 "admin_context": admin_context,
                 "environment_baseline": environment_baseline,
+                "data_quality": dict(data_quality or {}),
+                "selection_summary": dict(selection_summary or {}),
             },
         )
         nodes.append(region_node)
@@ -2070,6 +2874,14 @@ out center tags;
                     "importance": feature["importance"],
                     "tags": feature["tags"],
                     "evidence_summary": feature["summary"],
+                    "spatial_level": feature.get("selection_spatial_level")
+                    or feature.get("spatial_level")
+                    or (feature.get("tags") or {}).get("spatial_level"),
+                    "selection_score": feature.get("selection_score"),
+                    "selection_focus_score": feature.get("selection_focus_score"),
+                    "selection_sector": feature.get("selection_sector"),
+                    "selection_reasons": list(feature.get("selection_reasons") or []),
+                    "source_provider": (feature.get("tags") or {}).get("provider"),
                 },
             )
             feature_nodes.append(feature_node)
@@ -2135,11 +2947,14 @@ out center tags;
             "nodes": nodes,
             "edges": edges,
             "graph_data": graph_data,
+            "data_quality": dict(data_quality or {}),
+            "selection_summary": dict(selection_summary or {}),
             "stats": {
                 "node_count": len(nodes),
                 "edge_count": len(edges),
                 "observed_nodes": len([node for node in nodes if node["attributes"]["source_kind"] == "observed"]),
                 "detected_nodes": len([node for node in nodes if node["attributes"]["source_kind"] == "detected"]),
+                "reference_nodes": len([node for node in nodes if node["attributes"]["source_kind"] == "reference"]),
                 "inferred_nodes": len([node for node in nodes if node["attributes"]["source_kind"] == "inferred"]),
             },
         }
@@ -2157,7 +2972,11 @@ out center tags;
         proxies: List[Dict[str, Any]] = []
         edges: List[Dict[str, Any]] = []
 
-        def nearest_anchor(candidates: Iterable[Dict[str, Any]]) -> Tuple[float, float, Optional[str]]:
+        def nearest_anchor(
+            candidates: Iterable[Dict[str, Any]],
+            *,
+            allow_center_fallback: bool = True,
+        ) -> Tuple[Optional[float], Optional[float], Optional[str]]:
             nearest = None
             best_distance = float("inf")
             for candidate in candidates:
@@ -2171,7 +2990,9 @@ out center tags;
                     nearest = candidate
             if nearest:
                 return float(nearest["attributes"]["lat"]), float(nearest["attributes"]["lon"]), nearest["uuid"]
-            return center["lat"], center["lon"], None
+            if allow_center_fallback:
+                return center["lat"], center["lon"], None
+            return None, None, None
 
         proxy_specs = []
         if observed_subtypes & {"residential", "commercial", "commercial_hub", "office_cluster", "hospital", "school", "university", "road_corridor", "transit_stop", "rail_station", "worldcover_50"}:
@@ -2247,7 +3068,24 @@ out center tags;
             feature_lookup.setdefault(node["attributes"].get("subtype"), []).append(node)
 
         for spec in proxy_specs:
-            lat_value, lon_value, anchor_id = nearest_anchor(spec["anchors"])
+            valid_anchors = [
+                node
+                for node in spec["anchors"]
+                if is_valid_proxy_anchor(
+                    spec["key"],
+                    {
+                        "category": node["attributes"].get("category"),
+                        "subtype": node["attributes"].get("subtype"),
+                        "tags": node["attributes"].get("tags") or {},
+                    },
+                )
+            ]
+            lat_value, lon_value, anchor_id = nearest_anchor(
+                valid_anchors,
+                # A proxy may exist conceptually at AOI level, but the circle
+                # center is never evidence for its physical location.
+                allow_center_fallback=False,
+            )
             proxy_node = self._make_graph_node(
                 node_id=f"proxy_{_slugify(spec['key'])}",
                 name=spec["name"],
@@ -2263,6 +3101,7 @@ out center tags;
                     "scene_type": scene_classification["primary_scene"],
                     "anchor_node_id": anchor_id,
                     "inference_reason": spec["summary"],
+                    "spatial_precision": "site_approximate" if anchor_id else "area_only",
                 },
             )
             proxies.append(proxy_node)
@@ -2362,6 +3201,7 @@ out center tags;
                 "Only return relations if a clear, explainable connection exists.",
                 "Prefer depends_on, uses, regulates, affects, exposed_to, monitors.",
                 "Do not invent new nodes.",
+                "The fact field must be Simplified Chinese. Keep relation identifiers in English only as machine keys.",
             ],
             "output_schema": {
                 "edges": [
@@ -2369,7 +3209,7 @@ out center tags;
                         "source": "proxy_node_id",
                         "target": "observed_node_id",
                         "relation": "depends_on",
-                        "fact": "short explanation",
+                        "fact": "中文关系说明",
                         "confidence": 0.6,
                     }
                 ]
@@ -2380,7 +3220,7 @@ out center tags;
                 messages=[
                     {
                         "role": "system",
-                        "content": "You return compact JSON with only explainable graph edges.",
+                        "content": "You return compact JSON with only explainable graph edges. User-facing fact text must be Simplified Chinese.",
                     },
                     {"role": "user", "content": json.dumps(prompt, ensure_ascii=False)},
                 ],
@@ -2422,50 +3262,69 @@ out center tags;
         environment_baseline: Dict[str, Any],
         scene_classification: Dict[str, Any],
         graph: Dict[str, Any],
+        data_quality: Optional[Dict[str, Any]] = None,
+        selection_summary: Optional[Dict[str, Any]] = None,
     ) -> str:
         center = aoi["center"]
         top_features = features[:8]
         feature_lines = [
-            f"- {item['name']} ({item['subtype']}, {item['distance_m']}m, {item['source_kind']})"
+            f"- {item['name']} ({_display_token_zh(item['subtype'])}，{item['distance_m']}m，{_display_token_zh(item['source_kind'])})"
             for item in top_features
         ]
         proxy_lines = [
-            f"- {node['name']} ({node['attributes'].get('proxy_role')}, {node['attributes'].get('source_kind')})"
+            f"- {node['name']} ({_display_token_zh(node['attributes'].get('proxy_role'))}，{_display_token_zh(node['attributes'].get('source_kind'))})"
             for node in graph["nodes"]
             if node["attributes"].get("category") == "human_proxy"
         ]
         weather = environment_baseline.get("current") or {}
-        title = seed.get("title") or "Map Seed Report"
+        title = seed.get("title") or "地图种子报告"
         requirement = seed.get("input", {}).get("simulation_requirement") or "未提供额外模拟需求。"
+        quality = dict(data_quality or {})
+        selection = dict(selection_summary or {})
+        selected_diagnostics = dict(selection.get("diagnostics") or {})
+        source_note = quality.get("warning") or "公网空间事实可用；仍需按来源类型区分观测、遥感与推断。"
         return "\n".join(
             [
                 f"# {title}",
                 "",
-                "## 1. 选点概览",
+                "## 1. 数据质量与选点规则",
+                f"- 数据质量: {_display_token_zh(quality.get('status', 'unknown'))}",
+                f"- 可用于正式空间判断: {'是' if quality.get('formal_ready') else '否'}",
+                f"- 选点粒度: {_display_token_zh(selection.get('granularity') or quality.get('granularity') or 'unknown')}",
+                f"- 用户明确焦点: {'是' if selected_diagnostics.get('explicit_focus') else '否'}",
+                f"- 选点策略: {_display_token_zh(quality.get('selection_policy') or 'explicit_focus_then_spatial_category_balance')}",
+                f"- 提示: {source_note}",
+                "",
+                "## 2. 选点概览",
                 f"- 中心点: {center['lat']}, {center['lon']}",
                 f"- 分析半径: {aoi['radius_m']} 米",
                 f"- 行政与地点描述: {admin_context.get('display_name')}",
-                f"- 场景类型判定: {scene_classification.get('primary_scene')}",
+                (
+                    f"- 场景类型判定: {_display_token_zh(scene_classification.get('primary_scene'))}"
+                    if scene_classification.get("classification_ready") is True
+                    else "- 场景类型判定: 证据不足，暂不判断"
+                ),
                 "",
-                "## 2. 环境基线",
+                "## 3. 环境基线",
                 f"- 当前温度: {weather.get('temperature_2m', 'n/a')}",
                 f"- 当前湿度: {weather.get('relative_humidity_2m', 'n/a')}",
                 f"- 当前降水: {weather.get('precipitation', 'n/a')}",
                 f"- 当前风速: {weather.get('wind_speed_10m', 'n/a')}",
                 "",
-                "## 3. 观测到的关键空间节点",
+                "## 4. 最终纳入的关键空间节点",
                 *(feature_lines or ["- 当前公开空间数据未返回足够要素。"]),
                 "",
-                "## 4. 推断的人类代理节点",
+                "## 5. 推断的人类代理节点",
                 *(proxy_lines or ["- 当前基于空间事实未推断出代理主体。"]),
                 "",
-                "## 5. 推演需求",
+                "## 6. 推演需求",
                 requirement,
                 "",
-                "## 6. 说明",
-                "- observed 节点来自公开空间要素。",
-                "- detected 节点来自 ESA WorldCover 2021 卫星派生土地覆盖识别。",
-                "- inferred 节点来自规则与 LLM 约束推断，不代表真实具名主体。",
+                "## 7. 来源语义",
+                "- 公开观测节点来自公开空间要素。",
+                "- 遥感识别节点来自遥感派生土地覆盖识别；WMS 结果仅作背景参考，不等于分析级原始栅格。",
+                "- 参考地名节点来自内置或静态地名参考，只能用于降级补充。",
+                "- 规则推断节点来自规则与 LLM 约束推断，不代表真实具名主体。",
                 "- 当前遥感层是年度土地覆盖产品，不是实时卫星图像解译。",
             ]
         )
@@ -2475,13 +3334,28 @@ out center tags;
         admin_context: Dict[str, Any],
         scene_classification: Dict[str, Any],
         graph: Dict[str, Any],
+        *,
+        data_quality: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, str]:
         place = self._context_place_label(admin_context)
-        scene = scene_classification.get("primary_scene") or "mixed"
+        scene = scene_classification.get("primary_scene") or "unknown"
+        classification_ready = scene_classification.get("classification_ready") is True
+        scene_label = _display_token_zh(scene) if classification_ready else "区域空间"
         stats = graph.get("stats") or {}
-        title = f"{place} · {scene} map seed"
+        title = f"{place} · {scene_label}地图种子"
+        quality = dict(data_quality or {})
+        source_phrase = (
+            "基于可用公开空间事实"
+            if quality.get("formal_ready")
+            else "基于部分公开上下文与参考节点（公网空间事实不足）"
+        )
+        classification_phrase = (
+            f"并判定为{scene_label}"
+            if classification_ready
+            else "；环境类型证据不足，本轮不做类型判断"
+        )
         summary = (
-            f"基于公开空间数据与卫星派生土地覆盖为 {place} 生成 {scene} 场景地图图谱，"
+            f"{source_phrase}为 {place} 生成空间图谱{classification_phrase}，"
             f"共 {stats.get('node_count', 0)} 个节点、{stats.get('edge_count', 0)} 条边。"
         )
         return {"title": title, "summary": summary}
@@ -2493,6 +3367,8 @@ out center tags;
         graph: Dict[str, Any],
         *,
         remote_sensing_layers: Optional[List[Dict[str, Any]]] = None,
+        data_quality: Optional[Dict[str, Any]] = None,
+        selection_summary: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         detected_points = [
             {
@@ -2504,7 +3380,7 @@ out center tags;
             for item in features
             if item["source_kind"] == "detected"
         ]
-        observed_points = [
+        public_observed_points = [
             {
                 "lat": item["lat"],
                 "lon": item["lon"],
@@ -2513,6 +3389,29 @@ out center tags;
             }
             for item in features
             if item["source_kind"] == "observed"
+            and str((item.get("tags") or {}).get("provider") or "").lower()
+            not in {"reverse_geocode", "open-meteo", "open_meteo"}
+        ]
+        contextual_points = [
+            {
+                "lat": item["lat"],
+                "lon": item["lon"],
+                "label": item["name"],
+                "radius": 4,
+            }
+            for item in features
+            if str((item.get("tags") or {}).get("provider") or "").lower()
+            in {"reverse_geocode", "open-meteo", "open_meteo"}
+        ]
+        reference_points = [
+            {
+                "lat": item["lat"],
+                "lon": item["lon"],
+                "label": item["name"],
+                "radius": 4,
+            }
+            for item in features
+            if item["source_kind"] == "reference"
         ]
         inferred_points = [
             {
@@ -2547,7 +3446,7 @@ out center tags;
             }
         ]
         layers.extend(remote_sensing_layers or [])
-        if observed_points:
+        if public_observed_points:
             layers.append(
                 {
                     "id": "observed-features",
@@ -2555,8 +3454,20 @@ out center tags;
                     "type": "points",
                     "color": "#1f5d45",
                     "visible": True,
-                    "note": "来自 OSM / 逆地理编码 / 环境基线的观测节点",
-                    "data": observed_points,
+                    "note": "来自 OSM 等公开空间数据的观测节点",
+                    "data": public_observed_points,
+                }
+            )
+        if contextual_points:
+            layers.append(
+                {
+                    "id": "contextual-features",
+                    "name": "范围与环境上下文",
+                    "type": "points",
+                    "color": "#64748b",
+                    "visible": True,
+                    "note": "逆地理编码和天气基线只用于范围/环境上下文，不作为地点 Agent 的实地锚点",
+                    "data": contextual_points,
                 }
             )
         if detected_points:
@@ -2569,6 +3480,18 @@ out center tags;
                     "visible": True,
                     "note": "来自 ESA WorldCover 的卫星派生地表覆盖节点",
                     "data": detected_points,
+                }
+            )
+        if reference_points:
+            layers.append(
+                {
+                    "id": "reference-features",
+                    "name": "参考空间节点",
+                    "type": "points",
+                    "color": "#7c8795",
+                    "visible": True,
+                    "note": "内置地名或 WMS 背景分类参考，仅作降级辅助，不计作本轮观测",
+                    "data": reference_points,
                 }
             )
         if inferred_points:
@@ -2587,6 +3510,8 @@ out center tags;
             "center": aoi["center"],
             "radius_m": aoi["radius_m"],
             "analysis_polygon": aoi["polygon"],
+            "data_quality": dict(data_quality or {}),
+            "selection_summary": dict(selection_summary or {}),
             "layers": layers,
             "feature_points": [
                 {
@@ -2597,6 +3522,12 @@ out center tags;
                     "category": item["category"],
                     "subtype": item["subtype"],
                     "source_kind": item["source_kind"],
+                    "source_provider": (item.get("tags") or {}).get("provider"),
+                    "spatial_level": item.get("selection_spatial_level")
+                    or item.get("spatial_level")
+                    or (item.get("tags") or {}).get("spatial_level"),
+                    "selection_score": item.get("selection_score"),
+                    "selection_reasons": list(item.get("selection_reasons") or []),
                 }
                 for item in features
             ],
@@ -2610,6 +3541,8 @@ out center tags;
                     "category": node["attributes"].get("category"),
                     "source_kind": node["attributes"].get("source_kind"),
                     "confidence": node["attributes"].get("confidence"),
+                    "source_provider": node["attributes"].get("source_provider"),
+                    "spatial_precision": node["attributes"].get("spatial_precision"),
                 }
                 for node in graph["nodes"]
             ],
@@ -2622,8 +3555,8 @@ out center tags;
         name: str,
         label: str,
         summary: str,
-        lat: float,
-        lon: float,
+        lat: Optional[float],
+        lon: Optional[float],
         source_kind: str,
         confidence: float,
         attributes: Dict[str, Any],
@@ -2631,8 +3564,8 @@ out center tags;
         payload_attributes = dict(attributes)
         payload_attributes.update(
             {
-                "lat": round(float(lat), 6),
-                "lon": round(float(lon), 6),
+                "lat": round(float(lat), 6) if lat is not None else None,
+                "lon": round(float(lon), 6) if lon is not None else None,
                 "source_kind": source_kind,
                 "confidence": round(float(confidence), 3),
             }
@@ -2695,65 +3628,73 @@ out center tags;
             "entity_types": [
                 {
                     "name": "Region",
-                    "description": "A geographic analysis region or bounded area.",
+                    "display_name": "区域",
+                    "description": "地理分析区域或有边界的场景范围。",
                     "attributes": [
-                        {"name": "location", "description": "Region description"},
-                        {"name": "scene_type", "description": "Auto-classified scene type"},
+                        {"name": "location", "display_name": "位置", "description": "区域位置说明"},
+                        {"name": "scene_type", "display_name": "场景类型", "description": "自动判定的场景类型"},
                     ],
                 },
                 {
                     "name": "EcologicalReceptor",
-                    "description": "A habitat or ecological receptor inferred from map-first analysis.",
+                    "display_name": "生态受体",
+                    "description": "从地图优先分析中识别出的栖息地或生态受体。",
                     "attributes": [
-                        {"name": "location", "description": "Primary ecological location"},
-                        {"name": "source_kind", "description": "observed/detected/inferred"},
+                        {"name": "location", "display_name": "生态位置", "description": "主要生态位置"},
+                        {"name": "source_kind", "display_name": "来源类型", "description": "观测、检测或推断来源"},
                     ],
                 },
                 {
                     "name": "EnvironmentalCarrier",
-                    "description": "A water, air, shoreline, or transport carrier relevant to spread.",
+                    "display_name": "环境载体",
+                    "description": "与扩散相关的水体、空气、岸线或交通载体。",
                     "attributes": [
-                        {"name": "location", "description": "Primary environmental location"},
-                        {"name": "source_kind", "description": "observed/detected/inferred"},
+                        {"name": "location", "display_name": "环境位置", "description": "主要环境位置"},
+                        {"name": "source_kind", "display_name": "来源类型", "description": "观测、检测或推断来源"},
                     ],
                 },
                 {
                     "name": "Infrastructure",
-                    "description": "A facility or built asset in the local environment.",
+                    "display_name": "基础设施",
+                    "description": "本地环境中的设施或建成资产。",
                     "attributes": [
-                        {"name": "location", "description": "Facility location"},
-                        {"name": "source_kind", "description": "observed/detected/inferred"},
+                        {"name": "location", "display_name": "设施位置", "description": "设施所在位置"},
+                        {"name": "source_kind", "display_name": "来源类型", "description": "观测、检测或推断来源"},
                     ],
                 },
                 {
                     "name": "HumanActor",
-                    "description": "A spatially anchored human proxy group.",
+                    "display_name": "人群主体",
+                    "description": "带有空间锚点的人群代理主体。",
                     "attributes": [
-                        {"name": "location", "description": "Anchor location"},
-                        {"name": "source_kind", "description": "observed/detected/inferred"},
+                        {"name": "location", "display_name": "锚点位置", "description": "主体的空间锚点"},
+                        {"name": "source_kind", "display_name": "来源类型", "description": "观测、检测或推断来源"},
                     ],
                 },
                 {
                     "name": "GovernmentActor",
-                    "description": "A governing or regulatory actor inferred from map context.",
+                    "display_name": "治理主体",
+                    "description": "从地图上下文推断出的治理或监管主体。",
                     "attributes": [
-                        {"name": "jurisdiction", "description": "Administrative scope"},
-                        {"name": "source_kind", "description": "observed/detected/inferred"},
+                        {"name": "jurisdiction", "display_name": "管辖范围", "description": "行政或治理覆盖范围"},
+                        {"name": "source_kind", "display_name": "来源类型", "description": "观测、检测或推断来源"},
                     ],
                 },
                 {
                     "name": "OrganizationActor",
-                    "description": "A maintenance or operator proxy inferred from facilities.",
+                    "display_name": "组织主体",
+                    "description": "从设施和服务上下文推断出的维护、运营或协作组织。",
                     "attributes": [
-                        {"name": "service_scope", "description": "Service scope"},
-                        {"name": "source_kind", "description": "observed/detected/inferred"},
+                        {"name": "service_scope", "display_name": "服务范围", "description": "组织服务或维护覆盖范围"},
+                        {"name": "source_kind", "display_name": "来源类型", "description": "观测、检测或推断来源"},
                     ],
                 },
             ],
             "edge_types": [
                 {
                     "name": "located_in",
-                    "description": "The source lies within the target region.",
+                    "display_name": "位于",
+                    "description": "源节点位于目标区域内。",
                     "source_targets": [
                         {"source": "EcologicalReceptor", "target": "Region"},
                         {"source": "EnvironmentalCarrier", "target": "Region"},
@@ -2766,7 +3707,8 @@ out center tags;
                 },
                 {
                     "name": "depends_on",
-                    "description": "The source depends on the target.",
+                    "display_name": "依赖",
+                    "description": "源节点依赖目标节点提供支撑。",
                     "source_targets": [
                         {"source": "HumanActor", "target": "Infrastructure"},
                         {"source": "HumanActor", "target": "EnvironmentalCarrier"},
@@ -2776,7 +3718,8 @@ out center tags;
                 },
                 {
                     "name": "affects",
-                    "description": "The source can affect the target.",
+                    "display_name": "影响",
+                    "description": "源节点可能对目标节点产生影响。",
                     "source_targets": [
                         {"source": "Infrastructure", "target": "EcologicalReceptor"},
                         {"source": "Infrastructure", "target": "EnvironmentalCarrier"},
@@ -2786,7 +3729,8 @@ out center tags;
                 },
                 {
                     "name": "regulates",
-                    "description": "The source regulates or governs the target.",
+                    "display_name": "调控",
+                    "description": "源节点对目标节点具有治理、监管或调控作用。",
                     "source_targets": [
                         {"source": "GovernmentActor", "target": "Infrastructure"},
                         {"source": "GovernmentActor", "target": "EcologicalReceptor"},
@@ -2796,7 +3740,8 @@ out center tags;
                 },
                 {
                     "name": "uses",
-                    "description": "The source uses the target.",
+                    "display_name": "使用",
+                    "description": "源节点使用目标节点提供的设施或服务。",
                     "source_targets": [
                         {"source": "HumanActor", "target": "Infrastructure"},
                         {"source": "OrganizationActor", "target": "Infrastructure"},

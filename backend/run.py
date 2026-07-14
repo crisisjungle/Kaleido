@@ -22,6 +22,13 @@ from app import create_app
 from app.config import Config
 
 
+def _env_bool(name: str, default: bool) -> bool:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {'1', 'true', 'yes', 'on'}
+
+
 def main():
     """主函数"""
     # 验证配置
@@ -40,9 +47,10 @@ def main():
     host = os.environ.get('FLASK_HOST', '0.0.0.0')
     port = int(os.environ.get('FLASK_PORT', 5001))
     debug = Config.DEBUG
+    use_reloader = _env_bool('FLASK_USE_RELOADER', debug)
     
     # 启动服务
-    app.run(host=host, port=port, debug=debug, threaded=True)
+    app.run(host=host, port=port, debug=debug, threaded=True, use_reloader=use_reloader)
 
 
 if __name__ == '__main__':

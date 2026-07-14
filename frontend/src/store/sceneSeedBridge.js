@@ -15,8 +15,26 @@ function normalizeVariableList(value) {
   return value
     .filter((item) => item && typeof item === 'object')
     .map((item) => ({
+      ...safeClone(item),
+      input_id: String(item.input_id || item.variable_id || item.id || '').trim(),
+      variable_id: String(item.variable_id || item.input_id || item.id || '').trim(),
+      type: String(item.type || item.input_type || item.kind || 'custom').trim(),
       name: String(item.name || item.title || '').trim(),
-      description: String(item.description || '').trim()
+      description: String(item.description || item.intent || '').trim(),
+      direction: item.direction ?? null,
+      intensity: item.intensity ?? item.intensity_0_100 ?? null,
+      intensity_0_100: item.intensity_0_100 ?? (typeof item.intensity === 'number' ? item.intensity : null),
+      expected_effects: Array.isArray(item.expected_effects) ? [...item.expected_effects] : [],
+      target_region_ids: Array.isArray(item.target_region_ids)
+        ? [...item.target_region_ids]
+        : Array.isArray(item.target_regions) ? [...item.target_regions] : [],
+      target_entity_ids: Array.isArray(item.target_entity_ids)
+        ? [...item.target_entity_ids]
+        : Array.isArray(item.target_nodes) ? [...item.target_nodes] : [],
+      atomic_keys: Array.isArray(item.atomic_keys) ? [...item.atomic_keys] : [],
+      action_primitives: Array.isArray(item.action_primitives) ? [...item.action_primitives] : [],
+      executor_capability_keys: Array.isArray(item.executor_capability_keys) ? [...item.executor_capability_keys] : [],
+      source_origin: String(item.source_origin || 'user_input').trim()
     }))
     .filter((item) => item.name || item.description)
 }
@@ -62,14 +80,79 @@ function normalizeContext(value) {
   if (!value || typeof value !== 'object') return null
   const initialVariables = normalizeVariableList(value.initialVariables)
     .filter((item) => !isBaselineContextVariable(item))
+  const normalizedEventInputs = normalizeVariableList(
+    value.normalizedEventInputs || value.normalized_event_inputs
+  )
+  const normalizedPolicyInputs = normalizeVariableList(
+    value.normalizedPolicyInputs || value.normalized_policy_inputs
+  )
   const selectedPoints = normalizePointList(
     value.selectedPoints || value.selected_points || value.locations
   )
   const mapSeedId = String(value.mapSeedId || value.map_seed_id || '').trim()
   const areaLabel = String(value.areaLabel || value.area_label || value.location || '').trim()
   const radiusMeters = Number(value.radiusMeters || value.radius_m || 0)
-  if (initialVariables.length === 0 && selectedPoints.length === 0 && !mapSeedId && !areaLabel) return null
-  return { initialVariables, selectedPoints, mapSeedId, areaLabel, radiusMeters: Number.isFinite(radiusMeters) ? radiusMeters : 0 }
+  const rawEffortSnapshot = value.effortSnapshot || value.effort_snapshot
+  const effortSnapshot = rawEffortSnapshot && typeof rawEffortSnapshot === 'object'
+    ? safeClone(rawEffortSnapshot)
+    : null
+  const effortSnapshotId = String(
+    value.effortSnapshotId
+    || value.effort_snapshot_id
+    || effortSnapshot?.effort_snapshot_id
+    || effortSnapshot?.snapshot_id
+    || ''
+  ).trim()
+  const effortLevel = String(
+    value.effortLevel
+    || value.effort_level
+    || effortSnapshot?.effort_level
+    || effortSnapshot?.level
+    || 'high'
+  ).trim()
+  const effortLocked = Boolean(
+    value.effortLocked
+    ?? value.effort_locked
+    ?? effortSnapshot?.locked
+    ?? effortSnapshotId
+  )
+  const sceneId = String(value.sceneId || value.scene_id || '').trim()
+  const rawSemanticRef = value.semanticArtifactRef || value.semantic_artifact_ref
+  const semanticArtifactRef = rawSemanticRef && typeof rawSemanticRef === 'object'
+    ? safeClone(rawSemanticRef)
+    : null
+  const semanticRevision = Number(
+    value.semanticRevision
+    || value.semantic_revision
+    || semanticArtifactRef?.revision
+    || 0
+  )
+  if (
+    initialVariables.length === 0
+    && normalizedEventInputs.length === 0
+    && normalizedPolicyInputs.length === 0
+    && selectedPoints.length === 0
+    && !mapSeedId
+    && !areaLabel
+    && !effortSnapshotId
+    && !semanticArtifactRef
+  ) return null
+  return {
+    initialVariables,
+    normalizedEventInputs,
+    normalizedPolicyInputs,
+    selectedPoints,
+    mapSeedId,
+    areaLabel,
+    radiusMeters: Number.isFinite(radiusMeters) ? radiusMeters : 0,
+    effortLevel,
+    effortLocked,
+    effortSnapshotId,
+    effortSnapshot,
+    sceneId,
+    semanticArtifactRef,
+    semanticRevision: Number.isFinite(semanticRevision) ? semanticRevision : 0
+  }
 }
 
 function readState() {

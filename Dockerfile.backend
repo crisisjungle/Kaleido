@@ -1,13 +1,10 @@
-FROM ghcr.io/crisisjungle/kaleido-backend:latest AS previous-backend
-
 FROM python:3.11-slim
 
-COPY --from=previous-backend /usr/local/bin/uv /usr/local/bin/uv
+COPY --from=ghcr.io/astral-sh/uv:0.9.26 /uv /uvx /usr/local/bin/
 
 WORKDIR /app
 
 COPY backend/pyproject.toml backend/uv.lock ./backend/
-COPY --from=previous-backend /app/backend/.venv ./backend/.venv
 
 RUN cd backend && uv sync --frozen --no-dev
 

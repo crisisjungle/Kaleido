@@ -16,57 +16,56 @@
         </div>
         
         <div class="card-content">
-          <p class="api-note">POST /api/graph/ontology/generate</p>
           <p class="description">
-            LLM分析文档内容与模拟需求，提取出现实种子，自动生成合适的本体结构
+            分析场景资料与推演目标，提取实体和关系结构。
           </p>
 
           <!-- Loading / Progress -->
           <div v-if="currentPhase === 0 && ontologyProgress" class="progress-section">
             <div class="spinner-sm"></div>
-            <span>{{ ontologyProgress.message || '正在分析文档...' }}</span>
+            <span>{{ safeDisplayText(ontologyProgress.message, '正在分析场景资料…') }}</span>
           </div>
 
           <!-- Detail Overlay -->
           <div v-if="selectedOntologyItem" class="ontology-detail-overlay">
             <div class="detail-header">
                <div class="detail-title-group">
-                  <span class="detail-type-badge">{{ selectedOntologyItem.itemType === 'entity' ? 'ENTITY' : 'RELATION' }}</span>
-                  <span class="detail-name">{{ selectedOntologyItem.name }}</span>
+                  <span class="detail-type-badge">{{ selectedOntologyItem.itemType === 'entity' ? '实体' : '关系' }}</span>
+                  <span class="detail-name">{{ ontologyDisplayName(selectedOntologyItem) }}</span>
                </div>
                <button class="close-btn" @click="selectedOntologyItem = null">×</button>
             </div>
             <div class="detail-body">
-               <div class="detail-desc">{{ selectedOntologyItem.description }}</div>
+               <div class="detail-desc">{{ localizedDescription(selectedOntologyItem.description) }}</div>
                
                <!-- Attributes -->
                <div class="detail-section" v-if="selectedOntologyItem.attributes?.length">
-                  <span class="section-label">ATTRIBUTES</span>
+                  <span class="section-label">属性</span>
                   <div class="attr-list">
                      <div v-for="attr in selectedOntologyItem.attributes" :key="attr.name" class="attr-item">
-                        <span class="attr-name">{{ attr.name }}</span>
-                        <span class="attr-type">({{ attr.type }})</span>
-                        <span class="attr-desc">{{ attr.description }}</span>
+                        <span class="attr-name">{{ ontologyDisplayName(attr) }}</span>
+                        <span v-if="attr.type" class="attr-type">({{ safeDisplayToken(attr.type, '属性') }})</span>
+                        <span class="attr-desc">{{ localizedDescription(attr.description) }}</span>
                      </div>
                   </div>
                </div>
 
                <!-- Examples (Entity) -->
                <div class="detail-section" v-if="selectedOntologyItem.examples?.length">
-                  <span class="section-label">EXAMPLES</span>
+                  <span class="section-label">示例</span>
                   <div class="example-list">
-                     <span v-for="ex in selectedOntologyItem.examples" :key="ex" class="example-tag">{{ ex }}</span>
+                     <span v-for="ex in selectedOntologyItem.examples" :key="ex" class="example-tag">{{ safeDisplayText(ex, '示例') }}</span>
                   </div>
                </div>
 
                <!-- Source/Target (Relation) -->
                <div class="detail-section" v-if="selectedOntologyItem.source_targets?.length">
-                  <span class="section-label">CONNECTIONS</span>
+                  <span class="section-label">连接</span>
                   <div class="conn-list">
                      <div v-for="(conn, idx) in selectedOntologyItem.source_targets" :key="idx" class="conn-item">
-                        <span class="conn-node">{{ conn.source }}</span>
+                        <span class="conn-node">{{ ontologyTokenName(conn.source) }}</span>
                         <span class="conn-arrow">→</span>
-                        <span class="conn-node">{{ conn.target }}</span>
+                        <span class="conn-node">{{ ontologyTokenName(conn.target) }}</span>
                      </div>
                   </div>
                </div>
@@ -75,7 +74,7 @@
 
           <!-- Generated Entity Tags -->
           <div v-if="projectData?.ontology?.entity_types" class="tags-container" :class="{ 'dimmed': selectedOntologyItem }">
-            <span class="tag-label">GENERATED ENTITY TYPES</span>
+            <span class="tag-label">已生成实体类型</span>
             <div class="tags-list">
               <span 
                 v-for="entity in projectData.ontology.entity_types" 
@@ -83,14 +82,14 @@
                 class="entity-tag clickable"
                 @click="selectOntologyItem(entity, 'entity')"
               >
-                {{ entity.name }}
+                {{ ontologyDisplayName(entity) }}
               </span>
             </div>
           </div>
 
           <!-- Generated Relation Tags -->
           <div v-if="projectData?.ontology?.edge_types" class="tags-container" :class="{ 'dimmed': selectedOntologyItem }">
-            <span class="tag-label">GENERATED RELATION TYPES</span>
+            <span class="tag-label">已生成关系类型</span>
             <div class="tags-list">
               <span 
                 v-for="rel in projectData.ontology.edge_types" 
@@ -98,7 +97,7 @@
                 class="entity-tag clickable"
                 @click="selectOntologyItem(rel, 'relation')"
               >
-                {{ rel.name }}
+                {{ ontologyDisplayName(rel) }}
               </span>
             </div>
           </div>
@@ -110,7 +109,7 @@
         <div class="card-header">
           <div class="step-info">
             <span class="step-num">02</span>
-            <span class="step-title">GraphRAG构建</span>
+            <span class="step-title">图谱构建</span>
           </div>
           <div class="step-status">
             <span v-if="currentPhase > 1" class="badge success">已完成</span>
@@ -120,9 +119,8 @@
         </div>
 
         <div class="card-content">
-          <p class="api-note">POST /api/graph/build</p>
           <p class="description">
-            基于生成的本体，将文档自动分块后调用 Zep 构建知识图谱，提取实体和关系，并形成时序记忆与社区摘要
+            基于本体提取实体和关系，形成可用于推演的图谱结构。
           </p>
           
           <!-- Stats Cards -->
@@ -156,7 +154,6 @@
         </div>
         
         <div class="card-content">
-          <p class="api-note">POST /api/simulation/create</p>
           <p class="description">图谱构建已完成，请进入下一步进行模拟环境搭建</p>
           <button 
             class="action-btn" 
@@ -173,13 +170,13 @@
     <!-- Bottom Info / Logs -->
     <div class="system-logs">
       <div class="log-header">
-        <span class="log-title">SYSTEM DASHBOARD</span>
-        <span class="log-id">{{ projectData?.project_id || 'NO_PROJECT' }}</span>
+        <span class="log-title">系统日志</span>
+        <span class="log-id">{{ projectData?.project_id ? '项目已连接' : '未绑定项目' }}</span>
       </div>
       <div class="log-content" ref="logContent">
         <div class="log-line" v-for="(log, idx) in systemLogs" :key="idx">
           <span class="log-time">{{ log.time }}</span>
-          <span class="log-msg">{{ log.msg }}</span>
+          <span class="log-msg">{{ safeDisplayText(log.msg, '状态已更新') }}</span>
         </div>
       </div>
     </div>
@@ -191,6 +188,7 @@ import { computed, ref, watch, nextTick } from 'vue'
 import { useRouter } from 'vue-router'
 import { createSimulation } from '../api/simulation'
 import { attachSceneSeedContextToSimulation, getSceneSeedContextByProject } from '../store/sceneSeedBridge'
+import { formatFieldLabelZh, safeDisplayError, safeDisplayText, safeDisplayToken, sanitizeDisplayCopy } from '../utils/displayText'
 
 const router = useRouter()
 
@@ -240,11 +238,11 @@ const handleEnterEnvSetup = async () => {
       })
     } else {
       console.error('创建模拟失败:', res.error)
-      alert('创建模拟失败: ' + (res.error || '未知错误'))
+      alert(safeDisplayError(res.error, '创建模拟失败，请稍后重试。'))
     }
   } catch (err) {
     console.error('创建模拟异常:', err)
-    alert('创建模拟异常: ' + err.message)
+    alert(safeDisplayError(err, '创建模拟失败，请稍后重试。'))
   } finally {
     creatingSimulation.value = false
   }
@@ -252,6 +250,20 @@ const handleEnterEnvSetup = async () => {
 
 const selectOntologyItem = (item, type) => {
   selectedOntologyItem.value = { ...item, itemType: type }
+}
+
+const ontologyTokenName = (value) => safeDisplayToken(value, '其他')
+
+const ontologyDisplayName = (item) => {
+  if (!item) return ''
+  return safeDisplayText(
+    item.display_name || item.label_zh || item.label || formatFieldLabelZh(item.name, ''),
+    '未命名类型',
+  )
+}
+
+const localizedDescription = (value) => {
+  return sanitizeDisplayCopy(value, '').trim() || '暂无说明'
 }
 
 const graphStats = computed(() => {
@@ -354,13 +366,6 @@ watch(() => props.systemLogs.length, () => {
 .badge.processing { background: #FF5722; color: #FFF; }
 .badge.accent { background: #FF5722; color: #FFF; }
 .badge.pending { background: #F5F5F5; color: #999; }
-
-.api-note {
-  font-family: 'JetBrains Mono', monospace;
-  font-size: 10px;
-  color: #999;
-  margin-bottom: 8px;
-}
 
 .description {
   font-size: 12px;

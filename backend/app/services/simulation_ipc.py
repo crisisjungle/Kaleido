@@ -44,7 +44,22 @@ class SimulationIPCClient:
 
     def check_env_alive(self) -> bool:
         status_file = os.path.join(self.sim_dir, "env_status.json")
-        return os.path.exists(status_file)
+        if not os.path.exists(status_file):
+            return False
+        try:
+            with open(status_file, "r", encoding="utf-8") as handle:
+                status = json.load(handle)
+            if status.get("status") != "alive":
+                return False
+            process_pid = status.get("process_pid")
+            if process_pid:
+                try:
+                    os.kill(int(process_pid), 0)
+                except (OSError, ProcessLookupError, ValueError, TypeError):
+                    return False
+            return True
+        except (OSError, json.JSONDecodeError):
+            return False
 
     def _send_command(self, command_type: CommandType, args: Dict[str, Any] = None, timeout: float = 30.0) -> IPCResponse:
         os.makedirs(self.commands_dir, exist_ok=True)

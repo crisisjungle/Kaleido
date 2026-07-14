@@ -16,25 +16,19 @@
         :center="mapCenter"
         :zoom="mapZoom"
         :layers="leafletLayers"
+        :fit-key="mapViewportKey"
         :selected-point="null"
         :radius-meters="0"
         read-only
       />
       <div v-if="hasData" class="map-summary-overlay" :class="{ 'is-embedded': embedded }">
-        <span class="summary-chip summary-chip-accent">{{ highlightLabel || '推演关系回放' }}</span>
+        <span class="summary-chip summary-chip-accent">{{ safeMapText(highlightLabel, '推演关系回放') }}</span>
         <span
-          v-if="isSyntheticGrounding"
-          class="summary-chip summary-chip-synthetic"
-          title="节点位置为示意性散布，并非真实地理坐标"
-        >非地理示意 / non-geographic</span>
-        <span class="summary-chip">{{ nodeCount }} 个节点</span>
-        <span class="summary-chip">{{ shownEdgeCount }} 条连线</span>
-        <span v-if="edgeLayerSummary" class="summary-chip summary-chip-layers">
-          骨架 {{ edgeLayerSummary.spatial }} · 因果 {{ edgeLayerSummary.causal }}
-        </span>
-        <span v-if="suppressedEdgeCount > 0" class="summary-chip summary-chip-muted">
-          已整理 {{ suppressedEdgeCount }} 条高密度连线
-        </span>
+          v-if="hasDegradedSpatialEvidence"
+          class="summary-chip summary-chip-quality"
+          title="公网空间事实不足；参考节点和示意落点不等同于真实观测"
+        >空间证据降级</span>
+        <span class="summary-chip">{{ nodeCount }} 个节点 · {{ shownEdgeCount }} 条连线</span>
       </div>
       <div v-if="!hasData" class="empty-state">
         <span>等待地图关系数据...</span>
@@ -48,6 +42,22 @@
 <script setup>
 import { computed } from 'vue'
 import LeafletMapPicker from './LeafletMapPicker.vue'
+import { safeDisplayText, safeDisplayToken } from '../utils/displayText'
+import {
+  CURATED_FIXTURE_GROUNDING,
+  isCuratedFixtureNode,
+  normalizeMapAnimationStatus,
+  resolveCuratedFixtureEdgeGrounding,
+  resolveEdgeGeometry,
+  sliceGeometryByProgress,
+} from '../utils/mapRelationGeometry'
+
+const INVALID_MAP_COPY = new Set(['内部标识', '未命名项', '内容待本地化'])
+const safeMapText = (value, fallback = '') => {
+  const text = safeDisplayText(value, '').trim()
+  return !text || INVALID_MAP_COPY.has(text) ? fallback : text
+}
+const safeMapToken = (value, fallback = '') => safeDisplayToken(value, fallback)
 
 const props = defineProps({
   mapData: {
@@ -99,28 +109,67 @@ const edgeList = computed(() => {
 const nodeCount = computed(() => nodeList.value.length)
 const edgeCount = computed(() => edgeList.value.length)
 const hasData = computed(() => nodeCount.value > 0 || edgeCount.value > 0)
+const spatialQuality = computed(() => props.mapData?.data_quality || {})
+const hasDegradedSpatialEvidence = computed(() => (
+  spatialQuality.value?.formal_ready === false
+  || ['partial', 'unavailable'].includes(String(spatialQuality.value?.status || '').toLowerCase())
+))
 
 // M10 honesty: never dress a synthetic (hash/radial) layout as real geography.
 const geographicGrounding = computed(() => {
   const top = String(props.mapData?.geographic_grounding || '').trim().toLowerCase()
-  if (top === 'map_seed' || top === 'synthetic') return top
+  if (top === 'map_seed' || top === 'synthetic' || top === CURATED_FIXTURE_GROUNDING) return top
   const meta = String(props.mapData?.meta?.geographic_grounding || '').trim().toLowerCase()
-  if (meta === 'map_seed' || meta === 'synthetic') return meta
+  if (meta === 'map_seed' || meta === 'synthetic' || meta === CURATED_FIXTURE_GROUNDING) return meta
   return ''
 })
 
+function nodePlacementOf(node) {
+  if (node?.is_geographic === true || node?.attributes?.is_geographic === true) return 'geographic'
+  if (node?.is_geographic === false || node?.attributes?.is_geographic === false) return 'synthetic'
+  const placement = String(node?.attributes?.placement || node?.placement || '').trim().toLowerCase()
+  if (['geographic', 'map_seed', 'anchored', 'real'].includes(placement)) return 'geographic'
+  if (['synthetic', 'non_geographic', 'radial', 'hash'].includes(placement)) return 'synthetic'
+  return 'unknown'
+}
+
+function effectiveNodePlacement(node) {
+  const placement = nodePlacementOf(node)
+  if (placement !== 'unknown') return placement
+  if (geographicGrounding.value === 'map_seed') return 'geographic'
+  if (geographicGrounding.value === 'synthetic') return 'synthetic'
+  return 'unknown'
+}
+
+const placementSummary = computed(() => {
+  const result = { geographic: 0, synthetic: 0, unknown: 0 }
+  for (const node of nodeList.value) {
+    result[effectiveNodePlacement(node)] += 1
+  }
+
+  // Older payloads may only carry the projection-level marker. Keep that as a
+  // compatibility fallback, but never let it overwrite explicit node markers.
+  if (result.geographic === 0 && result.synthetic === 0 && result.unknown > 0) {
+    if (geographicGrounding.value === 'map_seed') {
+      result.geographic = result.unknown
+      result.unknown = 0
+    } else if (geographicGrounding.value === 'synthetic') {
+      result.synthetic = result.unknown
+      result.unknown = 0
+    }
+  }
+  return result
+})
+
+const hasMixedGrounding = computed(() => (
+  placementSummary.value.geographic > 0 && placementSummary.value.synthetic > 0
+))
+
 const isSyntheticGrounding = computed(() => {
-  if (geographicGrounding.value === 'synthetic') return true
-  if (geographicGrounding.value === 'map_seed') return false
-  // Fall back to per-node grounding: if no node claims real geography, the
-  // layout is non-geographic schematic scatter.
-  if (!nodeList.value.length) return false
-  const anyGeographic = nodeList.value.some((node) => {
-    if (node?.is_geographic === true || node?.attributes?.is_geographic === true) return true
-    const placement = String(node?.attributes?.placement || '').toLowerCase()
-    return placement === 'geographic'
-  })
-  return !anyGeographic
+  if (placementSummary.value.synthetic > 0) {
+    return placementSummary.value.geographic === 0
+  }
+  return geographicGrounding.value === 'synthetic'
 })
 
 // M10 edge-layer summary (prefer backend meta, recount as fallback).
@@ -155,6 +204,18 @@ const mapZoom = computed(() => {
   const zoom = Number(props.mapData?.zoom_hint)
   if (Number.isFinite(zoom) && zoom > 0) return zoom
   return 9
+})
+
+const mapViewportKey = computed(() => {
+  const center = mapCenter.value
+  const meta = props.mapData?.meta || {}
+  return [
+    props.mapData?.simulation_id || props.mapData?.map_seed_id || props.mapData?.source_mode || 'map',
+    props.mapData?.map_seed_id || geographicGrounding.value || 'unanchored',
+    meta.projection_version || meta.layout_version || '',
+    Number(center[0]).toFixed(5),
+    Number(center[1]).toFixed(5)
+  ].join(':')
 })
 
 const highlightedNodeIdSet = computed(() => {
@@ -201,11 +262,11 @@ const nodeById = computed(() => {
 
 const normalizeLayer = (layer, index) => ({
   id: layer?.id || `map-layer-${index}`,
-  name: layer?.name || `Layer ${index + 1}`,
+  name: safeMapText(layer?.name, `地图图层 ${index + 1}`),
   type: layer?.type || 'geojson',
   color: layer?.color || '#0f766e',
   visible: layer?.visible !== false,
-  note: layer?.note || '',
+  note: safeMapText(layer?.note, ''),
   data: layer?.data || []
 })
 
@@ -223,15 +284,27 @@ const nodeLayers = computed(() => {
     if (!Number.isFinite(lat) || !Number.isFinite(lon)) continue
     const kind = String(node?.kind || node?.attributes?.map_kind || 'entity').toLowerCase()
     const isHighlighted = isNodeHighlighted(node)
-    const visual = nodeVisualState(node, kind, isHighlighted)
-    if (visual.status === 'hidden' && !isHighlighted) continue
-    const key = `${visual.status}:${kind}:${visual.group}`
-    if (!grouped.has(key)) grouped.set(key, { kind, status: visual.status, group: visual.group, points: [] })
+    const placement = effectiveNodePlacement(node)
+    const isSynthetic = placement === 'synthetic'
+    const visual = nodeVisualState(node, kind, isHighlighted, isSynthetic)
+    if (visual.status === 'hidden') continue
+    const key = `${placement}:${kind}:${visual.group}`
+    if (!grouped.has(key)) grouped.set(key, { placement, kind, group: visual.group, points: [] })
+    const displayName = nodeTooltip(node)
     grouped.get(key).points.push({
+      id: String(node?.uuid || ''),
+      renderKey: String(node?.uuid || `${kind}:${lat}:${lon}`),
       lat,
       lon,
-      tooltip: nodeTooltip(node),
-      label: showNodeLabel(node, isHighlighted, visual.status) ? node?.name : '',
+      tooltip: isSynthetic ? `${displayName}（示意位置）` : displayName,
+      label: showNodeLabel(node, isHighlighted, visual.status) ? displayName : '',
+      popupTitle: displayName,
+      popupSubtitle: isSynthetic
+        ? '示意位置 · 非真实地理锚点'
+        : (placement === 'geographic' ? '地理锚定节点' : '位置状态未标注'),
+      popupSummary: isSynthetic
+        ? '该节点用于展示关系结构，位置由系统散布，不代表真实地点。'
+        : '',
       radius: visual.radius,
       color: visual.color,
       weight: visual.weight,
@@ -243,56 +316,113 @@ const nodeLayers = computed(() => {
 
   return [...grouped.values()]
     .sort((left, right) => {
-      const statusDelta = animationStatusPriority(left.status) - animationStatusPriority(right.status)
-      if (statusDelta !== 0) return statusDelta
       return nodeKindPriority(left.kind) - nodeKindPriority(right.kind)
     })
     .map((entry, index) => ({
-      id: `nodes-${entry.status}-${entry.kind}`,
-      name: `${entry.kind} ${entry.status} nodes`,
+      id: `nodes-${entry.placement}-${entry.kind}-${entry.group}`,
+      name: `${safeMapToken(entry.kind, '节点')} · 推演状态`,
       type: 'points',
       color: nodeColor(null, entry.kind, entry.group),
       visible: true,
-      note: `Projected ${entry.kind} nodes`,
+      note: '推演节点投影',
       data: entry.points,
       order: 100 + index
     }))
 })
 
-const edgeLayer = computed(() => {
-  const { edges: visibleEdges } = compactedEdgeResult.value
-  const features = []
-  for (const edge of visibleEdges) {
+const drawableEdgeEntries = computed(() => {
+  const result = []
+  for (const edge of compactedEdgeResult.value.edges) {
     const source = nodeById.value.get(String(edge?.source_node_uuid || ''))
     const target = nodeById.value.get(String(edge?.target_node_uuid || ''))
     if (!source || !target) continue
+    const grounding = edgeGroundingPolicy(source.node, target.node, edge)
+    if (grounding === 'omit') continue
+    result.push({ edge, source, target, grounding })
+  }
+  return result
+})
+
+const edgeLayer = computed(() => {
+  const features = []
+  for (const { edge, source, target, grounding } of drawableEdgeEntries.value) {
+    const edgeId = String(edge?.uuid || `${edge?.source_node_uuid}-${edge?.target_node_uuid}`)
     const highlighted = isEdgeHighlighted(edge)
-    const visual = edgeVisualState(edge, highlighted)
-    features.push({
-      type: 'Feature',
-      geometry: {
-        type: 'LineString',
-        coordinates: curvedEdgeCoordinates(source, target, edge)
-      },
-      properties: {
-        name: edge?.name || edge?.fact_type || 'relation',
-        color: visual.color,
-        weight: visual.weight,
-        opacity: visual.opacity,
-        dashArray: visual.dashArray,
-        fillOpacity: 0
-      }
-    })
+    const status = entityAnimationStatus(edge)
+    if (status === 'hidden') continue
+    const propagationGrounding = String(edge?.attributes?.propagation_grounding || '').trim().toLowerCase()
+    const schematicPropagation = ['new', 'active'].includes(status)
+      && (propagationGrounding.includes('schematic') || propagationGrounding.includes('partial'))
+    const hasCuratedFixtureEndpoint = isCuratedFixtureNode(source.node) || isCuratedFixtureNode(target.node)
+    const eligibleSchematicPropagation = schematicPropagation && !hasCuratedFixtureEndpoint
+    // An event with geographic endpoints but no authoritative edge may still
+    // be shown as a neutral endpoint bridge.  It must not borrow a candidate
+    // business edge's route geometry and masquerade as an observed path.
+    const geometry = schematicPropagation
+      ? {
+          type: 'LineString',
+          coordinates: [[source.lon, source.lat], [target.lon, target.lat]]
+        }
+      : resolveEdgeGeometry(source, target, edge)
+    const schematic = grounding === 'schematic' || schematicPropagation
+    const isPropagationWave = props.highlightMode === 'animation'
+      && ['new', 'active'].includes(status)
+      && (grounding === 'geographic' || grounding === 'curated_fixture' || eligibleSchematicPropagation)
+
+    const addFeature = (id, featureGeometry, visual, role) => {
+      features.push({
+        id,
+        type: 'Feature',
+        geometry: featureGeometry,
+        properties: {
+          id,
+          edge_id: edgeId,
+          renderKey: id,
+          name: schematicPropagation
+            ? '节点响应示意（非物理路径）'
+            : grounding === 'curated_fixture'
+              ? `${safeMapToken(edge?.name || edge?.fact_type, '传播通道')}（金标推演路径）`
+            : schematic
+              ? '区域关系示意（非物理路径）'
+              : safeMapToken(edge?.name || edge?.fact_type, '关联'),
+          color: visual.color,
+          weight: visual.weight,
+          opacity: visual.opacity,
+          dashArray: visual.dashArray,
+          fillOpacity: 0,
+          relation_role: role,
+          geographic_grounding: grounding === 'curated_fixture'
+            ? CURATED_FIXTURE_GROUNDING
+            : grounding
+        }
+      })
+    }
+
+    if (isPropagationWave) {
+      addFeature(`${edgeId}:base`, geometry, edgeContextVisualState(edge, schematic), schematic ? 'schematic_context' : 'context')
+      addFeature(
+        `${edgeId}:wave`,
+        sliceGeometryByProgress(geometry, entityAnimationProgress(edge)),
+        edgeVisualState(edge, highlighted, false),
+        'propagation_wave'
+      )
+      continue
+    }
+
+    const visual = schematic
+      ? edgeContextVisualState(edge, true)
+      : edgeVisualState(edge, highlighted, false)
+    addFeature(`${edgeId}:base`, geometry, visual, schematic ? 'schematic_context' : 'context')
   }
 
   if (!features.length) return null
   return {
     id: 'relation-edges',
-    name: 'key interactions',
+    name: '重点关系',
     type: 'geojson',
     color: '#475569',
     visible: true,
-    note: 'Key interaction edges on map',
+    note: '地图中的重点关系连线',
     data: {
       type: 'FeatureCollection',
       features
@@ -308,12 +438,15 @@ const nodeHaloLayers = computed(() => {
     if (!Number.isFinite(lat) || !Number.isFinite(lon)) continue
     const kind = String(node?.kind || node?.attributes?.map_kind || 'entity').toLowerCase()
     const isHighlighted = isNodeHighlighted(node)
-    const visual = nodeVisualState(node, kind, isHighlighted)
-    if (visual.status === 'hidden' && !isHighlighted) continue
+    const placement = effectiveNodePlacement(node)
+    const visual = nodeVisualState(node, kind, isHighlighted, placement === 'synthetic')
+    if (visual.status === 'hidden') continue
     if (!['new', 'active'].includes(visual.status) && !isHighlighted) continue
-    const key = `${visual.status}:${kind}:${visual.group}`
-    if (!grouped.has(key)) grouped.set(key, { kind, status: visual.status, group: visual.group, points: [] })
+    const key = `${placement}:${kind}:${visual.group}`
+    if (!grouped.has(key)) grouped.set(key, { placement, kind, group: visual.group, points: [] })
     grouped.get(key).points.push({
+      id: `${String(node?.uuid || `${kind}:${lat}:${lon}`)}:halo`,
+      renderKey: `${String(node?.uuid || `${kind}:${lat}:${lon}`)}:halo`,
       lat,
       lon,
       tooltip: nodeTooltip(node),
@@ -328,12 +461,12 @@ const nodeHaloLayers = computed(() => {
   }
 
   return [...grouped.values()].map((entry, index) => ({
-    id: `halo-${entry.status}-${entry.kind}`,
-    name: `${entry.kind} ${entry.status} halo`,
+    id: `halo-${entry.placement}-${entry.kind}-${entry.group}`,
+    name: `${safeMapToken(entry.kind, '节点')} · 动态光环`,
     type: 'points',
   color: nodeColor(null, entry.kind, entry.group),
     visible: true,
-    note: `Projected ${entry.kind} halo`,
+    note: '推演节点动态光环',
     data: entry.points,
     order: 80 + index,
   }))
@@ -351,7 +484,7 @@ const leafletLayers = computed(() => {
 const highlightModeLabel = computed(() => {
   if (props.highlightMode === 'focus') return '聚焦'
   if (props.highlightMode === 'none') return '无'
-  if (props.highlightMode) return props.highlightMode
+  if (props.highlightMode) return safeMapToken(props.highlightMode, '聚焦')
   return props.highlightLabel ? '聚焦' : '无'
 })
 
@@ -360,7 +493,7 @@ const HUB_PRIORITY_KEEP = 5
 const RELATION_GROUP_CAP = 42
 const RELATION_GROUP_PRIORITY_KEEP = 10
 
-const shownEdgeCount = computed(() => compactedEdgeResult.value.edges.length)
+const shownEdgeCount = computed(() => drawableEdgeEntries.value.length)
 const suppressedEdgeCount = computed(() => compactedEdgeResult.value.suppressedCount)
 
 const compactedEdgeResult = computed(() => {
@@ -374,7 +507,7 @@ const compactedEdgeResult = computed(() => {
     if (!source || !target) continue
 
     const highlighted = isEdgeHighlighted(edge)
-    if (entityAnimationStatus(edge) === 'hidden' && !highlighted) continue
+    if (entityAnimationStatus(edge) === 'hidden') continue
     if (highlighted) {
       alwaysVisible.push(edge)
       continue
@@ -428,7 +561,15 @@ function isNodeHighlighted(node) {
 
 function isEdgeHighlighted(edge) {
   const edgeId = String(edge?.uuid || '').trim()
-  return edgeId ? highlightedEdgeIdSet.value.has(edgeId) : false
+  if (edgeId && highlightedEdgeIdSet.value.has(edgeId)) return true
+  const attributes = edge?.attributes || {}
+  const mechanismIds = [
+    attributes.mechanism_edge_id,
+    attributes.mechanismEdgeId,
+    ...(Array.isArray(attributes.mechanism_edge_ids) ? attributes.mechanism_edge_ids : []),
+    ...(Array.isArray(attributes.mechanismEdgeIds) ? attributes.mechanismEdgeIds : [])
+  ]
+  return mechanismIds.some(item => highlightedEdgeIdSet.value.has(String(item || '').trim()))
 }
 
 function resolveHubNodeId(edge, sourceNode, targetNode) {
@@ -532,17 +673,12 @@ function nodeTooltip(node) {
     'node',
     'nodes'
   ])
-  const name = String(node?.name || '').trim()
-  if (name && !placeholderNames.has(name.toLowerCase())) return name
+  const name = safeMapText(node?.name, '')
+  if (name && !placeholderNames.has(String(node?.name || '').trim().toLowerCase())) return name
   const attrs = node?.attributes || {}
-  const displayName = String(attrs?.display_name || attrs?.actor_name || attrs?.title || '').trim()
+  const displayName = safeMapText(attrs?.display_name || attrs?.actor_name || attrs?.title, '')
   if (displayName) return displayName
-  const summary = String(node?.summary || '').trim()
-  if (summary) return summary.length > 56 ? `${summary.slice(0, 53)}...` : summary
-  const nodeId = String(node?.uuid || '').trim()
-  if (nodeId.includes('::')) return nodeId.split('::').slice(-1)[0]
-  if (nodeId) return nodeId
-  return 'node'
+  return '未命名节点'
 }
 
 function showNodeLabel(node, highlighted, status = 'steady') {
@@ -678,19 +814,6 @@ function edgeColor(edge, highlighted) {
   return '#64748b'
 }
 
-function normalizeAnimationStatus(value) {
-  const status = String(value || '').trim().toLowerCase()
-  return ['hidden', 'new', 'steady', 'active', 'faded'].includes(status) ? status : 'steady'
-}
-
-function animationStatusPriority(status) {
-  if (status === 'faded') return 0
-  if (status === 'steady') return 1
-  if (status === 'new') return 2
-  if (status === 'active') return 3
-  return 1
-}
-
 function nodeKindPriority(kind) {
   if (kind === 'region') return 0
   if (kind === 'subregion') return 1
@@ -699,11 +822,7 @@ function nodeKindPriority(kind) {
 }
 
 function entityAnimationStatus(entity) {
-  const status = normalizeAnimationStatus(entity?.attributes?.animation_status)
-  if (props.highlightMode === 'animation' && !['new', 'active'].includes(status)) {
-    return 'hidden'
-  }
-  return status
+  return normalizeMapAnimationStatus(entity?.attributes?.animation_status)
 }
 
 function entityAnimationProgress(entity) {
@@ -712,7 +831,7 @@ function entityAnimationProgress(entity) {
   return Math.max(0, Math.min(1, value))
 }
 
-function nodeVisualState(node, kind, highlighted) {
+function nodeVisualState(node, kind, highlighted, synthetic = false) {
   const status = entityAnimationStatus(node)
   const progress = entityAnimationProgress(node)
   const group = nodeGroup(node, kind)
@@ -762,7 +881,16 @@ function nodeVisualState(node, kind, highlighted) {
     fillOpacity *= 0.18 + progress * 0.82
   }
 
-  if (highlighted) {
+  if (synthetic && !highlighted && !['hidden', 'new', 'active'].includes(status)) {
+    radius = Math.max(2.5, radius * 0.82)
+    color = '#64748b'
+    fillColor = '#cbd5e1'
+    weight = Math.min(weight, 1.1)
+    opacity = Math.min(opacity, 0.5)
+    fillOpacity = Math.min(fillOpacity, 0.42)
+  }
+
+  if (highlighted && status !== 'hidden') {
     radius += 1.5
     color = '#7f1d1d'
     fillColor = '#dc2626'
@@ -834,7 +962,7 @@ function edgeVisualState(edge, highlighted) {
     opacity = Math.min(opacity, intraCluster ? 0.1 : 0.22)
   }
 
-  if (highlighted) {
+  if (highlighted && status !== 'hidden') {
     color = '#dc2626'
     weight = 3
     opacity = 0.98
@@ -844,35 +972,43 @@ function edgeVisualState(edge, highlighted) {
   return { color, weight, opacity, dashArray }
 }
 
-function curvedEdgeCoordinates(source, target, edge) {
-  const start = [source.lon, source.lat]
-  const end = [target.lon, target.lat]
-  const dx = end[0] - start[0]
-  const dy = end[1] - start[1]
-  const length = Math.sqrt(dx * dx + dy * dy)
-  if (!Number.isFinite(length) || length < 0.0008) return [start, end]
-
-  const seed = stableUnit(edge?.uuid || `${edge?.source_node_uuid}-${edge?.target_node_uuid}`)
-  const direction = seed > 0.5 ? 1 : -1
-  const type = String(edge?.fact_type || edge?.name || '').toLowerCase()
-  const baseBend = type === 'dynamic_edge' ? 0.22 : type === 'transport_edge' ? 0.1 : 0.15
-  const bend = direction * baseBend * (0.55 + Math.abs(seed - 0.5))
-  const mid = [
-    (start[0] + end[0]) / 2 + (-dy / length) * length * bend,
-    (start[1] + end[1]) / 2 + (dx / length) * length * bend
-  ]
-  return [start, mid, end]
-}
-
-function stableUnit(value) {
-  const text = String(value || '')
-  let hash = 2166136261
-  for (let index = 0; index < text.length; index += 1) {
-    hash ^= text.charCodeAt(index)
-    hash = Math.imul(hash, 16777619)
+function edgeContextVisualState(edge, schematic = false) {
+  if (schematic) {
+    return {
+      color: '#64748b',
+      weight: 1,
+      opacity: 0.2,
+      dashArray: '3 7'
+    }
   }
-  return (hash >>> 0) / 4294967295
+  const spatial = isSpatialFactEdge(edge)
+  const intraCluster = isIntraClusterSpatialEdge(edge)
+  return {
+    color: spatial ? '#94a3b8' : edgeColor(edge, false),
+    weight: spatial ? 0.75 : 1.1,
+    opacity: spatial ? (intraCluster ? 0.08 : 0.16) : 0.24,
+    dashArray: epistemicDashArray(edge)
+  }
 }
+
+function edgeGroundingPolicy(sourceNode, targetNode, edge) {
+  const sourcePlacement = effectiveNodePlacement(sourceNode)
+  const targetPlacement = effectiveNodePlacement(targetNode)
+  const curatedFixtureDecision = resolveCuratedFixtureEdgeGrounding(sourceNode, targetNode, edge)
+  if (curatedFixtureDecision) return curatedFixtureDecision
+  if (sourcePlacement === 'geographic' && targetPlacement === 'geographic') return 'geographic'
+
+  const sourceKind = nodeKind(sourceNode)
+  const targetKind = nodeKind(targetNode)
+  const regionKinds = new Set(['region', 'subregion'])
+  if (regionKinds.has(sourceKind) && regionKinds.has(targetKind)) {
+    // A synthetic region layout may retain a quiet relationship overview, but
+    // it must never look like a physical route or an animated diffusion path.
+    return 'schematic'
+  }
+  return 'omit'
+}
+
 </script>
 
 <style scoped>
@@ -923,8 +1059,9 @@ function stableUnit(value) {
   border-radius: 999px;
   font-size: 11px;
   font-weight: 600;
-  color: #1e3a8a;
-  background: #dbeafe;
+  color: var(--k-color-brand-600);
+  background: transparent;
+  border: 1px solid var(--k-color-border-strong);
 }
 
 .panel-actions {
@@ -972,19 +1109,19 @@ function stableUnit(value) {
   min-height: 30px;
   padding: 0 12px;
   border-radius: 999px;
-  background: rgba(255, 255, 255, 0.88);
-  border: 1px solid rgba(226, 232, 240, 0.92);
-  box-shadow: 0 12px 28px rgba(15, 23, 42, 0.08);
-  color: #334155;
+  background: rgba(255, 255, 255, 0.92);
+  border: 1px solid var(--k-color-border-strong);
+  box-shadow: 0 8px 20px rgba(28, 59, 46, 0.08);
+  color: var(--k-color-text-secondary);
   font-size: 12px;
   font-weight: 700;
   backdrop-filter: blur(8px);
 }
 
 .summary-chip-accent {
-  background: rgba(255, 247, 237, 0.92);
-  color: #b45309;
-  border-color: rgba(245, 158, 11, 0.26);
+  background: rgba(255, 255, 255, 0.92);
+  color: var(--k-color-brand-600);
+  border-color: var(--k-color-border-strong);
 }
 
 .summary-chip-muted {
@@ -998,10 +1135,23 @@ function stableUnit(value) {
   border-style: dashed;
 }
 
+.summary-chip-mixed {
+  background: rgba(254, 252, 232, 0.94);
+  color: #854d0e;
+  border-color: rgba(202, 138, 4, 0.38);
+  border-style: dashed;
+}
+
+.summary-chip-quality {
+  background: rgba(255, 247, 237, 0.96);
+  color: #9a3412;
+  border-color: rgba(234, 88, 12, 0.38);
+}
+
 .summary-chip-layers {
-  background: rgba(237, 233, 254, 0.9);
-  color: #6d28d9;
-  border-color: rgba(196, 181, 253, 0.6);
+  background: rgba(255, 255, 255, 0.92);
+  color: var(--k-color-text-secondary);
+  border-color: var(--k-color-border-strong);
 }
 
 .empty-state {

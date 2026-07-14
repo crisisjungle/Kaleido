@@ -85,10 +85,12 @@ body,
 }
 
 #app {
-  font-family: 'IBM Plex Sans', 'Noto Sans SC', sans-serif;
+  font-family: var(--k-font-sans);
+  font-size: var(--k-text-body);
+  line-height: var(--k-leading-body);
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
-  color: #173126;
+  color: var(--k-color-text);
   position: relative;
 }
 

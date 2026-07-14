@@ -1,34 +1,36 @@
 <template>
   <div class="workflow-menu" ref="menuRef">
-    <button class="workflow-trigger" type="button" @click="open = !open">
+    <button ref="triggerRef" class="workflow-trigger" type="button" @click="toggleOpen">
       <span class="step-num">Step {{ currentStep }}/4</span>
       <span class="step-name">{{ currentName }}</span>
       <span class="chevron" :class="{ open }">⌄</span>
     </button>
 
-    <div v-if="open" class="workflow-popover">
-      <button
-        v-for="item in visibleSteps"
-        :key="item.step"
-        class="workflow-item"
-        :class="{ active: item.step === currentStep, disabled: !item.visited && item.step !== currentStep }"
-        type="button"
-        :disabled="!item.visited && item.step !== currentStep"
-        @click="goToStep(item)"
-      >
-        <span class="item-index">{{ String(item.step).padStart(2, '0') }}</span>
-        <span class="item-main">
-          <strong>{{ item.name }}</strong>
-          <small>{{ item.summary || statusLabel(item) }}</small>
-        </span>
-        <span class="item-status" :class="item.status || 'todo'">{{ item.step === currentStep ? '当前' : statusLabel(item) }}</span>
-      </button>
-    </div>
+    <Teleport to="body">
+      <div v-if="open" ref="popoverRef" class="workflow-popover" :style="popoverStyle">
+        <button
+          v-for="item in visibleSteps"
+          :key="item.step"
+          class="workflow-item"
+          :class="{ active: item.step === currentStep, disabled: !item.visited && item.step !== currentStep }"
+          type="button"
+          :disabled="!item.visited && item.step !== currentStep"
+          @click="goToStep(item)"
+        >
+          <span class="item-index">{{ String(item.step).padStart(2, '0') }}</span>
+          <span class="item-main">
+            <strong>{{ item.name }}</strong>
+            <small>{{ item.summary || statusLabel(item) }}</small>
+          </span>
+          <span class="item-status" :class="item.status || 'todo'">{{ statusLabel(item) }}</span>
+        </button>
+      </div>
+    </Teleport>
   </div>
 </template>
 
 <script setup>
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { getWorkflowSteps } from '../store/workflowNavigation'
 
@@ -46,15 +48,17 @@ const props = defineProps({
 const router = useRouter()
 const open = ref(false)
 const menuRef = ref(null)
+const triggerRef = ref(null)
+const popoverRef = ref(null)
+const popoverStyle = ref({})
 const steps = getWorkflowSteps()
 
 const visibleSteps = computed(() => steps)
 
 function statusLabel(item) {
-  if (item.status === 'done') return '已完成'
-  if (item.status === 'active') return '进行中'
-  if (item.visited) return '已访问'
-  return '未开始'
+  if (item.status === 'active') return '当前步骤'
+  if (item.status === 'done' || item.visited) return '可查看'
+  return '后续步骤'
 }
 
 function goToStep(item) {
@@ -66,18 +70,55 @@ function goToStep(item) {
   }
 }
 
+function updatePopoverPosition() {
+  if (!open.value || typeof window === 'undefined') return
+  const trigger = triggerRef.value
+  if (!trigger) return
+
+  const rect = trigger.getBoundingClientRect()
+  const viewportWidth = window.innerWidth || document.documentElement.clientWidth || 0
+  const menuWidth = Math.max(180, Math.min(320, viewportWidth - 24))
+  const left = Math.min(
+    Math.max(12, rect.right - menuWidth),
+    Math.max(12, viewportWidth - menuWidth - 12)
+  )
+
+  popoverStyle.value = {
+    top: `${Math.round(rect.bottom + 10)}px`,
+    left: `${Math.round(left)}px`,
+    width: `${Math.round(menuWidth)}px`
+  }
+}
+
+function toggleOpen() {
+  open.value = !open.value
+}
+
 function handleDocumentClick(event) {
-  if (!menuRef.value?.contains(event.target)) {
+  if (menuRef.value?.contains(event.target) || popoverRef.value?.contains(event.target)) {
+    return
+  }
+  if (open.value) {
     open.value = false
   }
 }
 
 onMounted(() => {
   document.addEventListener('click', handleDocumentClick)
+  window.addEventListener('resize', updatePopoverPosition)
+  window.addEventListener('scroll', updatePopoverPosition, true)
 })
 
 onBeforeUnmount(() => {
   document.removeEventListener('click', handleDocumentClick)
+  window.removeEventListener('resize', updatePopoverPosition)
+  window.removeEventListener('scroll', updatePopoverPosition, true)
+})
+
+watch(open, async (value) => {
+  if (!value) return
+  await nextTick()
+  updatePopoverPosition()
 })
 </script>
 
@@ -128,16 +169,15 @@ onBeforeUnmount(() => {
 }
 
 .workflow-popover {
-  position: absolute;
-  top: calc(100% + 10px);
-  right: 0;
+  position: fixed;
   width: 320px;
   padding: 8px;
   border-radius: 14px;
   border: 1px solid rgba(16, 35, 29, 0.1);
   background: rgba(255, 255, 255, 0.96);
+  backdrop-filter: blur(18px);
   box-shadow: 0 18px 48px rgba(16, 35, 29, 0.16);
-  z-index: 300;
+  z-index: 10000;
 }
 
 .workflow-item {

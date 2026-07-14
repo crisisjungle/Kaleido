@@ -1,25 +1,14 @@
 <template>
-  <div class="main-view">
-    <header class="app-header">
-      <div class="header-left">
-        <KaleidoNavBrand to="/" />
-      </div>
-
-      <div class="header-right">
-        <button class="layout-toggle" @click="toggleGraphCollapse">
-          {{ viewMode === 'workbench' ? '◧ 展开图谱' : '▣ 收起图谱' }}
-        </button>
-        <WorkflowStepMenu :current-step="4" current-name="结果分析" />
-        <div class="step-divider"></div>
-        <span class="status-indicator" :class="statusClass">
-          <span class="dot"></span>
-          {{ statusText }}
-        </span>
-      </div>
-    </header>
-
-    <main class="content-area">
-      <div class="panel-wrapper left" :style="leftPanelStyle">
+  <KaleidoWorkflowShell
+    :step="4"
+    step-name="分析与报告"
+    :status-text="statusText"
+    :status-tone="shellStatusTone"
+    :view-mode="viewMode"
+    :visual-ratio="46"
+    @toggle-visual="toggleGraphCollapse"
+  >
+    <template #visual>
         <GraphPanel
           :graphData="animatedGraphData"
           :mapData="animatedMapProjection"
@@ -37,9 +26,8 @@
           @node-select="handleNodeSelect"
           @node-action="handleNodeAction"
         />
-      </div>
+    </template>
 
-      <div class="panel-wrapper right" :style="rightPanelStyle">
         <div class="analysis-panel">
           <div v-if="overviewLoading" class="analysis-state loading">
             <div class="loading-spinner"></div>
@@ -52,76 +40,145 @@
           </div>
 
           <template v-else-if="overview">
-            <section class="analysis-hero">
-              <div class="hero-main">
-                <div class="hero-kicker">Result Analysis</div>
-                <h1 class="hero-title">{{ overview.report_title || 'Kaleido 结果分析' }}</h1>
-                <p class="hero-summary">
-                  {{ overview.report_summary || '基于多轮区域状态、反馈链、角色透镜与节点探索的统一结果输出。' }}
-                </p>
-              </div>
-              <div class="hero-metrics">
-                <div class="hero-metric">
-                  <span class="metric-label">默认轮次</span>
-                  <strong>{{ overview.default_round || 0 }}</strong>
+            <div class="analysis-top-context">
+              <section class="analysis-hero">
+                <div class="hero-main">
+                  <div class="hero-kicker">推演分析 · 第四步</div>
+                  <h1 class="hero-title">{{ sanitizeDisplayCopy(overview.report_title, 'Kaleido 分析与报告') }}</h1>
+                  <p class="hero-summary">
+                    {{ overviewSummaryText }}
+                  </p>
                 </div>
-                <div class="hero-metric">
-                  <span class="metric-label">代理体</span>
-                  <strong>{{ overview.node_stats?.agent_count || 0 }}</strong>
+                <div class="hero-metrics">
+                  <div class="hero-metric">
+                    <span class="metric-label">推演轮次</span>
+                    <strong>{{ overview.max_round || overview.default_round || 0 }}</strong>
+                  </div>
+                  <div class="hero-metric">
+                    <span class="metric-label">代理体</span>
+                    <strong>{{ overview.node_stats?.agent_count || 0 }}</strong>
+                  </div>
+                  <div class="hero-metric">
+                    <span class="metric-label">区域</span>
+                    <strong>{{ overview.node_stats?.region_count || 0 }}</strong>
+                  </div>
+                  <div class="hero-metric">
+                    <span class="metric-label">风险对象</span>
+                    <strong>{{ overview.node_stats?.risk_object_count || 0 }}</strong>
+                  </div>
+                  <div class="hero-metric">
+                    <span class="metric-label">涌现关系</span>
+                    <strong>{{ overview.node_stats?.dynamic_edge_count || 0 }}</strong>
+                  </div>
                 </div>
-                <div class="hero-metric">
-                  <span class="metric-label">区域</span>
-                  <strong>{{ overview.node_stats?.region_count || 0 }}</strong>
-                </div>
-                <div class="hero-metric">
-                  <span class="metric-label">子区域</span>
-                  <strong>{{ overview.node_stats?.subregion_count || 0 }}</strong>
-                </div>
-                <div class="hero-metric">
-                  <span class="metric-label">风险对象</span>
-                  <strong>{{ overview.node_stats?.risk_object_count || 0 }}</strong>
-                </div>
-                <div class="hero-metric">
-                  <span class="metric-label">涌现关系</span>
-                  <strong>{{ overview.node_stats?.dynamic_edge_count || 0 }}</strong>
-                </div>
-              </div>
-            </section>
+              </section>
 
-            <section class="tab-bar">
-              <button
-                v-for="tab in tabs"
-                :key="tab.id"
-                class="tab-btn"
-                :class="{ active: activeTab === tab.id }"
-                @click="selectTab(tab.id)"
-              >
-                {{ tab.label }}
-              </button>
-            </section>
+              <KWorkflowTabs
+                class="analysis-primary-tabs"
+                :items="tabs"
+                :model-value="activeTab"
+                variant="compact"
+                :equal="true"
+                :collapse-on-narrow="false"
+                aria-label="分析与报告视图"
+                @change="selectTab"
+              />
+            </div>
 
             <section class="tab-content">
-              <div v-if="activeTab !== 'node-explore' && activeTab !== 'report' && tabLoading[activeTab]" class="analysis-state loading compact">
+              <div v-if="activeDataTab && tabLoading[activeDataTab]" class="analysis-state loading compact">
                 <div class="loading-spinner"></div>
                 <p>正在加载 {{ activeTabLabel }}...</p>
               </div>
 
-              <div v-else-if="activeTab !== 'node-explore' && activeTab !== 'report' && tabErrors[activeTab]" class="analysis-state error compact">
+              <div v-else-if="activeDataTab && tabErrors[activeDataTab]" class="analysis-state error compact">
                 <div class="state-icon">!</div>
-                <p>{{ tabErrors[activeTab] }}</p>
+                <p>{{ tabErrors[activeDataTab] }}</p>
               </div>
 
-              <template v-else-if="activeTab === 'regions'">
-                <div class="subview-switch">
-                  <button type="button" :class="{ active: regionRolesView === 'regions' }" @click="setRegionRolesView('regions')">区域态势</button>
-                  <button type="button" :class="{ active: regionRolesView === 'roles' }" @click="setRegionRolesView('roles')">角色透镜</button>
-                </div>
-                <section class="control-bar" v-if="regionsTab" v-show="regionRolesView === 'regions'">
+              <template v-else-if="activeTab === 'conclusion'">
+                <section class="conclusion-lead">
+                  <div class="conclusion-lead-copy">
+                    <span class="conclusion-label">当前结论</span>
+                    <h2>{{ conclusionHeadline }}</h2>
+                    <p>{{ conclusionSummary }}</p>
+                  </div>
+                  <div class="conclusion-round">
+                    <span>结论轮次</span>
+                    <strong>R{{ conclusionLatestRound?.round || overview.default_round || 0 }}</strong>
+                  </div>
+                </section>
+
+                <section class="conclusion-grid">
+                  <article class="conclusion-card is-focus">
+                    <span>重点区域</span>
+                    <strong>{{ safeVisibleText(conclusionLatestRound?.top_region?.name, '当前分析范围') }}</strong>
+                    <p>脆弱性 {{ formatMetricValue(conclusionLatestRound?.top_region?.vulnerability_score) }}</p>
+                  </article>
+                  <article class="conclusion-card">
+                    <span>主要放大器</span>
+                    <strong>{{ safeVisibleText(conclusionLatestRound?.amplifier, '尚未检测到明确放大器') }}</strong>
+                  </article>
+                  <article class="conclusion-card">
+                    <span>结论边界</span>
+                    <strong>{{ safeVisibleText(conclusionLatestRound?.uncertainty, '当前结论需要结合演化轨迹和证据图理解。') }}</strong>
+                  </article>
+                </section>
+
+                <section class="conclusion-evidence">
+                  <div class="section-header">
+                    <div>
+                      <h3>结论依据</h3>
+                      <p>结论来自真实轮次叙事、风险对象、动态关系和机制工件，不替代对原始证据的核查。</p>
+                    </div>
+                    <span>{{ conclusionEvidenceCount }} 项可追溯产物</span>
+                  </div>
+                  <div class="conclusion-stat-grid">
+                    <div><span>轮次记录</span><strong>{{ narrativeTab?.rounds?.length || 0 }}</strong></div>
+                    <div><span>风险事件</span><strong>{{ overview.node_stats?.risk_event_count || 0 }}</strong></div>
+                    <div><span>机制关系</span><strong>{{ overview.node_stats?.mechanism_edge_count || 0 }}</strong></div>
+                    <div><span>图谱证据</span><strong>{{ overview.node_stats?.graph_node_count || 0 }}</strong></div>
+                  </div>
+                </section>
+
+                <section v-if="conclusionTurningPoints.length" class="conclusion-evidence">
+                  <div class="section-header">
+                    <h3>关键转折点</h3>
+                    <span>{{ conclusionTurningPoints.length }} 条</span>
+                  </div>
+                  <ol class="turning-timeline conclusion-turning-list">
+                    <li v-for="point in conclusionTurningPoints" :key="point" class="turning-item">
+                      <span class="turning-marker"></span>
+                      <span class="turning-text">{{ point }}</span>
+                    </li>
+                  </ol>
+                </section>
+
+                <nav class="conclusion-next-actions" aria-label="继续查看分析">
+                  <button type="button" class="mini-btn primary" @click="openEvolutionView('narrative')">查看演化过程</button>
+                  <button type="button" class="mini-btn" @click="selectTab('mechanisms')">查看风险与机制</button>
+                  <button type="button" class="mini-btn" @click="selectTab('node-explore')">追溯图谱证据</button>
+                  <button type="button" class="mini-btn" @click="selectTab('report')">打开正式报告</button>
+                </nav>
+              </template>
+
+              <template v-else-if="activeTab === 'evolution'">
+                <KWorkflowTabs
+                  class="evolution-view-tabs"
+                  :items="evolutionViews"
+                  :model-value="evolutionView"
+                  variant="compact"
+                  :equal="true"
+                  :collapse-on-narrow="false"
+                  aria-label="演化复盘视角"
+                  @change="setEvolutionView"
+                />
+                <section class="control-bar" v-if="regionsTab" v-show="evolutionView === 'regions'">
                   <div class="control-group">
                     <span class="control-label">指标</span>
                     <select v-model="selectedMetric" class="control-select">
                       <option v-for="metric in regionsTab.metric_options || []" :key="metric.key" :value="metric.key">
-                        {{ metric.label }}
+                        {{ safeVisibleText(metric.label, '状态指标') }}
                       </option>
                     </select>
                   </div>
@@ -146,14 +203,14 @@
                   </div>
                 </section>
 
-                <section v-if="currentRoundSnapshot" v-show="regionRolesView === 'regions'" class="region-layout">
+                <section v-if="currentRoundSnapshot" v-show="evolutionView === 'regions'" class="region-layout">
                   <div class="metric-highlight">
                     <div class="metric-highlight-head">
                       <span class="metric-highlight-title">区域态势</span>
                       <span class="metric-highlight-meta">当前指标：{{ currentMetricLabel }}</span>
                     </div>
                     <div class="metric-highlight-sub">
-                      {{ selectedFrameNarrative || `当前展示第 ${selectedRound} 轮的区域与子区域状态，数值越高表示该指标越强。` }}
+                      {{ safeVisibleText(selectedFrameNarrative, `当前展示第 ${selectedRound} 轮的区域与子区域状态，数值越高表示该指标越强。`) }}
                     </div>
                   </div>
 
@@ -166,8 +223,8 @@
                       <article v-for="region in currentRoundSnapshot.regions || []" :key="region.region_id || region.name" class="metric-card">
                         <div class="metric-card-head">
                           <div>
-                            <h4>{{ region.name }}</h4>
-                            <p>{{ translateDisplayToken(region.region_type, '区域') }}</p>
+                            <h4>{{ safeVisibleText(region.name, '未命名区域') }}</h4>
+                            <p>{{ safeToken(region.region_type, '区域') }}</p>
                           </div>
                           <span class="metric-pill">{{ formatMetricValue(region[selectedMetric]) }}</span>
                         </div>
@@ -192,8 +249,8 @@
                       <article v-for="subregion in currentRoundSnapshot.subregions || []" :key="subregion.region_id || subregion.name" class="metric-card compact">
                         <div class="metric-card-head">
                           <div>
-                            <h4>{{ subregion.name }}</h4>
-                            <p>{{ resolveRegionName(subregion.parent_region_id) || translateDisplayToken(subregion.region_type, '子区域') }}</p>
+                            <h4>{{ safeVisibleText(subregion.name, '未命名子区域') }}</h4>
+                            <p>{{ resolveRegionName(subregion.parent_region_id) || safeToken(subregion.region_type, '子区域') }}</p>
                           </div>
                           <span class="metric-pill">{{ formatMetricValue(subregion[selectedMetric]) }}</span>
                         </div>
@@ -204,256 +261,248 @@
                     </div>
                   </div>
                 </section>
-                <section class="role-grid" v-if="rolesTab" v-show="regionRolesView === 'roles'">
-                  <article v-for="group in rolesTab.groups || []" :key="group.group_id" class="role-card">
-                    <div class="role-card-head">
-                      <div>
-                        <h3>{{ group.title }}</h3>
-                        <p>{{ group.description }}</p>
-                      </div>
-                      <span class="metric-pill">{{ group.node_count }} 个节点</span>
+                <section class="role-comparison" v-if="rolesTab" v-show="evolutionView === 'roles'">
+                  <div class="role-table-head" aria-hidden="true">
+                    <span>角色群体</span>
+                    <span>节点</span>
+                    <span>核心状态</span>
+                    <span>主要影响区域</span>
+                  </div>
+                  <article v-for="group in roleGroupsForDisplay" :key="group.group_id" class="role-table-row">
+                    <div class="role-identity">
+                      <h3>{{ safeVisibleText(group.title, '角色分组') }}</h3>
+                      <p>{{ safeVisibleText(group.description, '该分组汇总了相近角色的状态。') }}</p>
                     </div>
-                    <div class="role-metrics">
-                      <div v-for="metric in group.focus_metrics || []" :key="metric.key" class="role-metric-item">
-                        <span>{{ metric.label }}</span>
-                        <strong>{{ formatMetricValue(group.metric_averages?.[metric.key]) }}</strong>
+                    <strong class="role-node-count">{{ group.node_count }}</strong>
+                    <dl class="role-metrics-flat">
+                      <div v-for="metric in group.focus_metrics || []" :key="metric.key">
+                        <dt>{{ safeVisibleText(metric.label, '状态指标') }}</dt>
+                        <dd>{{ formatMetricValue(group.metric_averages?.[metric.key]) }}</dd>
                       </div>
+                    </dl>
+                    <div v-if="group.visible_dominant_regions.length" class="role-region-primary">
+                      <span>{{ group.visible_dominant_regions[0].display_name }}</span>
+                      <strong>{{ formatMetricValue(group.visible_dominant_regions[0].score) }}</strong>
                     </div>
-                    <div class="role-subsection">
-                      <span class="subsection-title">代表节点</span>
-                      <div class="chip-wrap">
-                        <span v-for="node in group.sample_nodes || []" :key="`${group.group_id}-${node.agent_id || node.name}`" class="data-chip">
-                          {{ node.name }}
-                        </span>
-                      </div>
-                    </div>
-                    <div class="role-subsection" v-if="group.dominant_regions?.length">
-                      <span class="subsection-title">主受影响区域</span>
-                      <div class="region-score-list">
-                        <div v-for="region in group.dominant_regions" :key="`${group.group_id}-${region.region_name}`" class="region-score-item">
-                          <span>{{ resolveRegionName(region.region_name) || region.region_name }}</span>
-                          <strong>{{ formatMetricValue(region.score) }}</strong>
-                        </div>
-                      </div>
-                    </div>
+                    <span v-else class="role-region-empty">暂无明确区域</span>
                   </article>
                 </section>
+
+                <template v-if="evolutionView === 'feedback'">
+                  <section class="feedback-header" v-if="feedbackTab">
+                    <div class="feedback-chain-template">
+                      <span v-for="(stage, idx) in feedbackTab.chain_template || []" :key="stage" class="chain-stage">
+                        {{ safeVisibleText(stage, '反馈阶段') }}<span v-if="idx < (feedbackTab.chain_template || []).length - 1" class="chain-arrow">→</span>
+                      </span>
+                    </div>
+                  </section>
+                  <section class="feedback-grid" v-if="feedbackTab">
+                    <article v-for="item in feedbackTab.items || []" :key="item.id" class="feedback-card">
+                      <div class="feedback-card-head">
+                        <div>
+                          <h4>{{ safeVisibleText(item.region_name, resolveRegionName(item.region_id) || '反馈传播链') }}</h4>
+                          <p>第 {{ item.round || feedbackTab.current_round }} 轮</p>
+                        </div>
+                        <span class="source-chip">{{ safeToken(item.source_type, '运行反馈') }}</span>
+                      </div>
+                      <div class="feedback-loop">{{ safeVisibleText(item.loop, '系统记录到一次反馈变化。') }}</div>
+                      <div class="delta-grid">
+                        <span v-for="(value, key) in item.delta || {}" :key="key" class="delta-chip">
+                          {{ feedbackDeltaLabel(key) }} {{ formatDelta(value) }}
+                        </span>
+                      </div>
+                      <div v-if="safeSourceText(item.source)" class="feedback-source">{{ safeSourceText(item.source) }}</div>
+                    </article>
+                  </section>
+                  <section v-if="feedbackTab?.ecological_impacts?.length" class="secondary-section">
+                    <div class="section-header">
+                      <h3>生态影响</h3>
+                      <span>{{ feedbackTab.ecological_impacts.length }} 条</span>
+                    </div>
+                    <div class="secondary-list">
+                      <article v-for="item in feedbackTab.ecological_impacts" :key="item.id" class="secondary-card">
+                        <strong>{{ safeVisibleText(item.region_name, '未知区域') }}</strong>
+                        <p>{{ safeVisibleText(item.note, '已记录生态影响。') }}</p>
+                      </article>
+                    </div>
+                  </section>
+                </template>
+
+                <template v-if="evolutionView === 'narrative'">
+                  <section class="narrative-trace-note" v-if="narrativeTab">
+                    这是一条<strong>探索轨迹</strong>，记录每轮的关系张力与不确定性，不是对未来的预测。
+                  </section>
+                  <section class="narrative-list" v-if="narrativeTab">
+                    <article v-for="round in (narrativeTab.rounds || []).slice(-4).reverse()" :key="round.round" class="narrative-card">
+                      <div class="narrative-head">
+                        <div>
+                          <h3>第 {{ round.round }} 轮</h3>
+                          <p>{{ formatTimestamp(round.timestamp) }}</p>
+                        </div>
+                        <div class="narrative-head-tags">
+                          <span
+                            v-if="round.narrative_source"
+                            class="source-badge"
+                            :class="isLiveNarrative(round.narrative_source) ? 'live' : 'template'"
+                            :title="isLiveNarrative(round.narrative_source) ? '叙事来源：实时推理' : '叙事来源：规则归纳'"
+                          >
+                            {{ isLiveNarrative(round.narrative_source) ? '实时推理' : '规则归纳' }}
+                          </span>
+                          <span class="metric-pill">
+                            {{ safeVisibleText(round.top_region?.name, '当前分析范围') }}
+                          </span>
+                        </div>
+                      </div>
+                      <div class="narrative-columns">
+                        <div class="narrative-block">
+                          <span class="block-label">本轮最关键变化</span>
+                          <p>{{ safeVisibleText(round.headline, '本轮未记录显著变化。') }}</p>
+                        </div>
+                        <div class="narrative-block">
+                          <span class="block-label">主要传播或放大器</span>
+                          <p>{{ safeVisibleText(round.amplifier, '本轮变化主要由场景内既有机制共同作用。') }}</p>
+                        </div>
+                        <div class="narrative-block">
+                          <span class="block-label">最大不确定性</span>
+                          <p>{{ safeVisibleText(round.uncertainty, '当前结论仍需结合证据核查。') }}</p>
+                        </div>
+                      </div>
+
+                      <div
+                        v-if="normalizeFeedbackLoops(round.detected_feedback_loops).length"
+                        class="loop-chip-section"
+                      >
+                        <span class="block-label">检测到的反馈环</span>
+                        <div class="loop-chip-wrap">
+                          <span
+                            v-for="(loop, idx) in normalizeFeedbackLoops(round.detected_feedback_loops).slice(0, 3)"
+                            :key="`${round.round}-loop-${idx}`"
+                            class="loop-chip"
+                            :class="`loop-${loop.loopType || 'unknown'}`"
+                            :title="loop.loopType ? loopTypeLabel(loop.loopType) + '回路' : '反馈环'"
+                          >
+                            <span class="loop-chip-dot"></span>
+                            <span class="loop-chip-label">{{ safeVisibleText(loop.label, '反馈环') }}</span>
+                            <span v-if="loop.loopType" class="loop-chip-type">{{ loopTypeLabel(loop.loopType) }}</span>
+                          </span>
+                          <span v-if="normalizeFeedbackLoops(round.detected_feedback_loops).length > 3" class="loop-chip">+{{ normalizeFeedbackLoops(round.detected_feedback_loops).length - 3 }}</span>
+                        </div>
+                      </div>
+
+                      <div
+                        v-if="normalizeTurningPoints(round.turning_points).length"
+                        class="turning-section"
+                      >
+                        <span class="block-label">转折点</span>
+                        <ol class="turning-timeline">
+                          <li
+                            v-for="(point, idx) in normalizeTurningPoints(round.turning_points).slice(0, 3)"
+                            :key="`${round.round}-turn-${idx}`"
+                            class="turning-item"
+                          >
+                            <span class="turning-marker"></span>
+                            <span class="turning-text">{{ safeVisibleText(point, '已记录一次转折。') }}</span>
+                          </li>
+                        </ol>
+                      </div>
+                    </article>
+                  </section>
+                </template>
               </template>
 
               <template v-else-if="activeTab === 'mechanisms'">
                 <section class="mechanism-layout" v-if="mechanismsTab">
-                  <div class="metric-highlight">
-                    <div class="metric-highlight-head">
-                      <span class="metric-highlight-title">机制推演</span>
-                      <span class="metric-highlight-meta">
-                        {{ mechanismsTab.counts?.mechanism_nodes || 0 }} 节点 · {{ mechanismsTab.counts?.validated_relations || 0 }} 关系
-                      </span>
+                  <header class="mechanism-overview">
+                    <div class="mechanism-overview-copy">
+                      <h2>风险与机制链</h2>
+                      <p>{{ safeVisibleText(mechanismsTab.scenario_model?.scenario_summary, '当前案例尚未生成机制工件。') }}</p>
                     </div>
-                    <div class="metric-highlight-sub">
-                      {{ mechanismsTab.scenario_model?.scenario_summary || '当前案例尚未生成机制工件（机制推演模式才会产出机制图、状态变量与推理账本）。' }}
-                    </div>
-                  </div>
+                    <dl class="mechanism-inline-stats" aria-label="风险与机制统计">
+                      <div><dt>风险对象</dt><dd>{{ overview.node_stats?.risk_object_count || 0 }}</dd></div>
+                      <div><dt>风险事件</dt><dd>{{ overview.node_stats?.risk_event_count || 0 }}</dd></div>
+                      <div><dt>机制节点</dt><dd>{{ overview.node_stats?.mechanism_node_count || 0 }}</dd></div>
+                      <div><dt>机制关系</dt><dd>{{ overview.node_stats?.mechanism_edge_count || 0 }}</dd></div>
+                    </dl>
+                  </header>
 
                   <template v-if="mechanismHasDetail">
-                  <div class="secondary-section">
-                    <div class="section-header">
+                  <section v-if="mechanismsTab.scenario_model?.state_variables?.length" class="mechanism-section">
+                    <div class="mechanism-section-head">
                       <h3>场景状态变量</h3>
                       <span>{{ mechanismsTab.scenario_model?.state_variables?.length || 0 }} 个</span>
                     </div>
-                    <div class="card-grid dense">
-                      <article v-for="item in mechanismsTab.scenario_model?.state_variables || []" :key="item.key" class="metric-card compact">
-                        <div class="metric-card-head">
-                          <div>
-                            <h4>{{ item.label || item.key }}</h4>
-                            <p>{{ translateDisplayToken(item.polarity, '中性') }}</p>
-                          </div>
-                        </div>
-                        <div class="feedback-loop">{{ item.description }}</div>
+                    <div class="mechanism-state-list">
+                      <article v-for="item in mechanismsTab.scenario_model.state_variables" :key="item.key" class="mechanism-state-row">
+                        <strong>{{ safeVisibleText(item.label, '状态变量') }}</strong>
+                        <span>{{ safeToken(item.polarity, '中性') }}</span>
+                        <p>{{ safeVisibleText(item.description, '该变量参与场景状态演化。') }}</p>
                       </article>
                     </div>
-                  </div>
+                  </section>
 
-                  <div class="secondary-section">
-                    <div class="section-header">
+                  <section v-if="mechanismsTab.mechanism_graph?.edges?.length" class="mechanism-section">
+                    <div class="mechanism-section-head">
                       <h3>机制链</h3>
-                      <span>{{ mechanismsTab.mechanism_graph?.edges?.length || 0 }} 条</span>
+                      <span>前 {{ Math.min(mechanismsTab.mechanism_graph.edges.length, 5) }} 条 · 共 {{ mechanismsTab.mechanism_graph.edges.length }} 条</span>
                     </div>
-                    <div class="feedback-grid">
-                      <article v-for="edge in mechanismsTab.mechanism_graph?.edges || []" :key="edge.id" class="feedback-card">
-                        <div class="feedback-card-head">
-                          <div>
-                            <h4>{{ edge.relation_label }}</h4>
-                            <p>{{ edge.source }} → {{ edge.target }}</p>
-                          </div>
-                          <span class="source-chip">{{ translateDisplayToken(edge.scope, '机制') }}</span>
+                    <div class="mechanism-relation-list">
+                      <article v-for="edge in mechanismsTab.mechanism_graph.edges.slice(0, 5)" :key="edge.id" class="mechanism-relation-row">
+                        <div class="mechanism-relation-route">
+                          <span>{{ safeVisibleText(edge.source_label, '上游机制') }}</span>
+                          <span aria-hidden="true">→</span>
+                          <span>{{ safeVisibleText(edge.target_label, '下游机制') }}</span>
                         </div>
-                        <div class="feedback-loop">{{ edge.mechanism }}</div>
-                        <div class="delta-grid">
-                          <span class="delta-chip">延迟 {{ translateDisplayToken(edge.latency, '未知') }}</span>
-                          <span class="delta-chip">置信 {{ formatMetricValue((edge.confidence || 0) * 100) }}</span>
+                        <div class="mechanism-relation-copy">
+                          <strong>{{ safeVisibleText(edge.relation_label, safeToken(edge.relation_type, '机制链')) }}</strong>
+                          <p>{{ safeVisibleText(edge.mechanism, '已记录机制关系。') }}</p>
+                        </div>
+                        <div class="mechanism-relation-meta">
+                          <span>{{ safeVisibleText(edge.scope_label, safeToken(edge.scope, '机制')) }}</span>
+                          <span>延迟 {{ safeToken(edge.latency, '未知') }}</span>
+                          <span>置信 {{ formatMetricValue((edge.confidence || 0) * 100) }}</span>
                         </div>
                       </article>
                     </div>
-                  </div>
+                  </section>
 
-                  <div class="secondary-section">
-                    <div class="section-header">
+                  <section v-if="mechanismsTab.relation_samples?.length" class="mechanism-section">
+                    <div class="mechanism-section-head">
                       <h3>关系发现样本</h3>
-                      <span>{{ mechanismsTab.relation_samples?.length || 0 }} 条</span>
+                      <span>前 {{ Math.min(mechanismsTab.relation_samples.length, 5) }} 条 · 共 {{ mechanismsTab.relation_samples.length }} 条</span>
                     </div>
-                    <div class="secondary-list">
-                      <article v-for="item in mechanismsTab.relation_samples || []" :key="item.edge_id || item.index" class="secondary-card">
-                        <strong>{{ item.relation_label || item.candidate?.relation_label }}</strong>
-                        <p>{{ item.candidate?.mechanism || item.reason }}</p>
+                    <div class="mechanism-note-list">
+                      <article v-for="item in mechanismsTab.relation_samples.slice(0, 5)" :key="item.edge_id || item.index" class="mechanism-note-row">
+                        <strong>{{ safeVisibleText(item.relation_label, safeToken(item.candidate?.relation_label, '关系')) }}</strong>
+                        <p>{{ safeVisibleText(item.candidate?.mechanism || item.reason, '已记录一条关系发现。') }}</p>
                       </article>
                     </div>
-                  </div>
+                  </section>
 
-                  <div class="secondary-section">
-                    <div class="section-header">
+                  <section v-if="mechanismsTab.round_reasoning?.length" class="mechanism-section">
+                    <div class="mechanism-section-head">
                       <h3>轮次推理账本</h3>
-                      <span>{{ mechanismsTab.counts?.reasoning_rounds || 0 }} 轮</span>
+                      <span>最近 {{ Math.min(mechanismsTab.round_reasoning.length, 5) }} 轮 · 共 {{ mechanismsTab.round_reasoning.length }} 轮</span>
                     </div>
-                    <div class="secondary-list">
-                      <article v-for="item in mechanismsTab.round_reasoning || []" :key="item.round" class="secondary-card">
-                        <strong>第 {{ item.round }} 轮 · {{ translateDisplayToken(item.llm_participation, '已记录') }}</strong>
-                        <p>{{ item.summary || item.reasoning_summary || item.fallback_reason }}</p>
+                    <div class="mechanism-note-list">
+                      <article v-for="item in mechanismsTab.round_reasoning.slice(-5).reverse()" :key="item.round" class="mechanism-note-row">
+                        <strong>第 {{ item.round }} 轮 · {{ safeToken(item.llm_participation, '已记录') }}</strong>
+                        <p>{{ safeVisibleText(item.summary || item.reasoning_summary, safeToken(item.fallback_reason, '本轮已记录机制推理。')) }}</p>
                       </article>
                     </div>
-                  </div>
+                  </section>
 
-                  <div v-if="mechanismsTab.simulation_audit?.quality_flags?.length" class="secondary-section">
-                    <div class="section-header">
+                  <section v-if="mechanismsTab.simulation_audit?.quality_flags?.length" class="mechanism-section">
+                    <div class="mechanism-section-head">
                       <h3>质量标记</h3>
                       <span>{{ mechanismsTab.simulation_audit.quality_flags.length }} 个</span>
                     </div>
-                    <div class="delta-grid">
-                      <span v-for="flag in mechanismsTab.simulation_audit.quality_flags" :key="flag" class="delta-chip">
-                        {{ flag }}
-                      </span>
-                    </div>
-                  </div>
+                    <ul class="mechanism-quality-list">
+                      <li v-for="flag in mechanismsTab.simulation_audit.quality_flags" :key="flag">
+                        {{ safeVisibleText(flag, '质量复核项') }}
+                      </li>
+                    </ul>
+                  </section>
                   </template>
-                </section>
-              </template>
-
-              <template v-else-if="activeTab === 'feedback'">
-                <section class="feedback-header" v-if="feedbackTab">
-                  <div class="feedback-chain-template">
-                    <span v-for="(stage, idx) in feedbackTab.chain_template || []" :key="stage" class="chain-stage">
-                      {{ stage }}<span v-if="idx < (feedbackTab.chain_template || []).length - 1" class="chain-arrow">→</span>
-                    </span>
-                  </div>
-                </section>
-                <section class="feedback-grid" v-if="feedbackTab">
-                  <article v-for="item in feedbackTab.items || []" :key="item.id" class="feedback-card">
-                    <div class="feedback-card-head">
-                      <div>
-                        <h4>{{ item.region_name || resolveRegionName(item.region_id) || '反馈传播链' }}</h4>
-                        <p>第 {{ item.round || feedbackTab.current_round }} 轮</p>
-                      </div>
-                      <span class="source-chip">{{ item.source_type }}</span>
-                    </div>
-                    <div class="feedback-loop">{{ item.loop }}</div>
-                    <div class="delta-grid">
-                      <span v-for="(value, key) in item.delta || {}" :key="key" class="delta-chip">
-                        {{ feedbackDeltaLabel(key) }} {{ formatDelta(value) }}
-                      </span>
-                    </div>
-                    <div v-if="item.source && !isInternalSourcePath(item.source)" class="feedback-source">{{ item.source }}</div>
-                  </article>
-                </section>
-                <section v-if="feedbackTab?.ecological_impacts?.length" class="secondary-section">
-                  <div class="section-header">
-                    <h3>生态影响</h3>
-                    <span>{{ feedbackTab.ecological_impacts.length }} 条</span>
-                  </div>
-                  <div class="secondary-list">
-                    <article v-for="item in feedbackTab.ecological_impacts" :key="item.id" class="secondary-card">
-                      <strong>{{ item.region_name }}</strong>
-                      <p>{{ item.note }}</p>
-                    </article>
-                  </div>
-                </section>
-              </template>
-
-              <template v-else-if="activeTab === 'narrative'">
-                <section class="narrative-trace-note" v-if="narrativeTab">
-                  这是一条<strong>探索轨迹</strong>，记录每轮的关系张力与不确定性，不是对未来的预测。
-                </section>
-                <section class="narrative-list" v-if="narrativeTab">
-                  <article v-for="round in narrativeTab.rounds || []" :key="round.round" class="narrative-card">
-                    <div class="narrative-head">
-                      <div>
-                        <h3>第 {{ round.round }} 轮</h3>
-                        <p>{{ formatTimestamp(round.timestamp) }}</p>
-                      </div>
-                      <div class="narrative-head-tags">
-                        <span
-                          v-if="round.narrative_source"
-                          class="source-badge"
-                          :class="isLiveNarrative(round.narrative_source) ? 'live' : 'template'"
-                          :title="round.narrative_source"
-                        >
-                          {{ isLiveNarrative(round.narrative_source) ? '实时推理' : '模板' }}
-                        </span>
-                        <span class="metric-pill">
-                          {{ round.top_region?.name || '未识别区域' }}
-                        </span>
-                      </div>
-                    </div>
-                    <div class="narrative-columns">
-                      <div class="narrative-block">
-                        <span class="block-label">本轮最关键变化</span>
-                        <p>{{ round.headline }}</p>
-                      </div>
-                      <div class="narrative-block">
-                        <span class="block-label">主要传播/放大器</span>
-                        <p>{{ round.amplifier }}</p>
-                      </div>
-                      <div class="narrative-block">
-                        <span class="block-label">最大不确定性</span>
-                        <p>{{ round.uncertainty }}</p>
-                      </div>
-                    </div>
-
-                    <div
-                      v-if="normalizeFeedbackLoops(round.detected_feedback_loops).length"
-                      class="loop-chip-section"
-                    >
-                      <span class="block-label">检测到的反馈环</span>
-                      <div class="loop-chip-wrap">
-                        <span
-                          v-for="(loop, idx) in normalizeFeedbackLoops(round.detected_feedback_loops)"
-                          :key="`${round.round}-loop-${idx}`"
-                          class="loop-chip"
-                          :class="`loop-${loop.loopType || 'unknown'}`"
-                          :title="loop.loopType ? loopTypeLabel(loop.loopType) + '回路' : '反馈环'"
-                        >
-                          <span class="loop-chip-dot"></span>
-                          <span class="loop-chip-label">{{ loop.label }}</span>
-                          <span v-if="loop.loopType" class="loop-chip-type">{{ loopTypeLabel(loop.loopType) }}</span>
-                        </span>
-                      </div>
-                    </div>
-
-                    <div
-                      v-if="normalizeTurningPoints(round.turning_points).length"
-                      class="turning-section"
-                    >
-                      <span class="block-label">转折点</span>
-                      <ol class="turning-timeline">
-                        <li
-                          v-for="(point, idx) in normalizeTurningPoints(round.turning_points)"
-                          :key="`${round.round}-turn-${idx}`"
-                          class="turning-item"
-                        >
-                          <span class="turning-marker"></span>
-                          <span class="turning-text">{{ point }}</span>
-                        </li>
-                      </ol>
-                    </div>
-                  </article>
                 </section>
               </template>
 
@@ -466,8 +515,8 @@
                 <template v-else>
                   <section class="node-hero">
                     <div class="node-hero-main">
-                      <div class="hero-kicker">Node Exploration</div>
-                      <h2>{{ selectedNode.name }}</h2>
+                      <div class="hero-kicker node-kicker">证据探索</div>
+                      <h2>{{ safeVisibleText(selectedNode.name, '未命名节点') }}</h2>
                       <div class="chip-wrap">
                         <span
                           v-if="selectedNodeProvenance"
@@ -477,10 +526,10 @@
                         >
                           {{ selectedNodeProvenance.label }}
                         </span>
-                        <span v-for="label in selectedNode.labels || []" :key="label" class="data-chip">{{ label }}</span>
+                        <span v-for="label in safeVisibleList(selectedNode.labels, 3)" :key="label" class="data-chip">{{ label }}</span>
                       </div>
                       <p v-if="selectedNodeGroundingReason" class="grounding-reason">
-                        来源说明：{{ selectedNodeGroundingReason }}
+                        来源说明：{{ safeVisibleText(selectedNodeGroundingReason, '来源信息已记录。') }}
                       </p>
                     </div>
                     <div class="node-hero-actions">
@@ -509,8 +558,8 @@
                     </div>
                     <ul class="evidence-list">
                       <li v-for="(ref, idx) in selectedNodeEvidenceRefs" :key="`evidence-${idx}`" class="evidence-item">
-                        <strong>{{ ref.label }}</strong>
-                        <span v-if="ref.detail">{{ ref.detail }}</span>
+                        <strong>{{ safeVisibleText(ref.label, `证据 ${idx + 1}`) }}</strong>
+                        <span v-if="ref.detail">{{ safeVisibleText(ref.detail, '已记录证据说明。') }}</span>
                       </li>
                     </ul>
                   </section>
@@ -530,12 +579,12 @@
                       <article class="context-card">
                         <div class="section-header">
                           <h3>上下文摘要</h3>
-                          <span>{{ nodeContext.supported_modes?.exploration_mode }}</span>
+                          <span>{{ safeToken(nodeContext.supported_modes?.exploration_mode, '上下文探索') }}</span>
                         </div>
                         <div class="context-list">
                           <div class="context-item">
                             <span>节点类型</span>
-                            <strong>{{ nodeContext.node_kind }}</strong>
+                            <strong>{{ safeToken(nodeContext.node_kind, '图谱节点') }}</strong>
                           </div>
                           <div class="context-item">
                             <span>轮次范围</span>
@@ -559,7 +608,7 @@
                           </div>
                         </div>
                         <div v-if="nodeContext.missing_data?.length" class="warning-list">
-                          <span v-for="item in nodeContext.missing_data" :key="item" class="warning-chip">{{ item }}</span>
+                          <span v-for="item in safeVisibleList(nodeContext.missing_data, 3, '待补充数据')" :key="item" class="warning-chip">{{ item }}</span>
                         </div>
                       </article>
 
@@ -570,9 +619,9 @@
                         </div>
                         <div class="subgraph-list">
                           <div v-for="edge in (nodeContext.subgraph?.edges || []).slice(0, 8)" :key="edge.uuid || `${edge.source_node_uuid}-${edge.target_node_uuid}`" class="subgraph-item">
-                            <strong>{{ edge.source_node_name }}</strong>
-                            <span>{{ edge.name }}</span>
-                            <strong>{{ edge.target_node_name }}</strong>
+                            <strong>{{ safeVisibleText(edge.source_node_name, '来源节点') }}</strong>
+                            <span>{{ safeToken(edge.name, '关联') }}</span>
+                            <strong>{{ safeVisibleText(edge.target_node_name, '目标节点') }}</strong>
                           </div>
                         </div>
                       </article>
@@ -586,19 +635,19 @@
                     <section v-if="nodeExploreResult" class="explore-sections">
                       <article v-for="section in nodeExploreResult.sections || []" :key="section.id" class="explore-card">
                         <div class="section-header">
-                          <h3>{{ section.title }}</h3>
-                          <span>{{ selectedNode.name }}</span>
+                          <h3>{{ safeVisibleText(section.title, '探索结果') }}</h3>
+                          <span>{{ safeVisibleText(selectedNode.name, '当前节点') }}</span>
                         </div>
                         <div class="explore-items">
                           <div v-for="item in section.items || []" :key="`${section.id}-${item.label}-${item.content}`" class="explore-item">
                             <div class="explore-item-head">
-                              <strong>{{ item.label }}</strong>
+                              <strong>{{ safeVisibleText(item.label, '分析项') }}</strong>
                               <span
                                 class="source-chip"
                                 :class="provenanceMeta(item.source_type) ? `prov-${provenanceMeta(item.source_type).tone}` : ''"
-                              >{{ item.source_type }}</span>
+                              >{{ provenanceMeta(item.source_type)?.label || '推断' }}</span>
                             </div>
-                            <p>{{ item.content }}</p>
+                            <p>{{ safeVisibleText(item.content, '该分析项暂无可展示内容。') }}</p>
                           </div>
                         </div>
                       </article>
@@ -607,7 +656,7 @@
                     <section class="chat-box">
                       <div class="section-header">
                         <h3>围绕该节点继续追问</h3>
-                        <span>上下文锁定为 {{ selectedNode.name }}</span>
+                        <span>上下文锁定为 {{ safeVisibleText(selectedNode.name, '当前节点') }}</span>
                       </div>
                       <div class="chat-history">
                         <div v-if="nodeChatHistory.length === 0" class="chat-empty">
@@ -620,7 +669,7 @@
                           :class="message.role"
                         >
                           <span class="chat-role">{{ message.role === 'user' ? '你' : '系统' }}</span>
-                          <p>{{ message.content }}</p>
+                          <p>{{ safeVisibleText(message.content, '消息内容不可用。') }}</p>
                         </div>
                       </div>
                       <div class="chat-input-row">
@@ -643,11 +692,10 @@
               <template v-else-if="activeTab === 'report'">
                 <div class="report-tab-shell">
                   <Step4Report
-                    v-if="reportId && simulationId"
+                    v-if="reportId"
                     :reportId="reportId"
                     :simulationId="simulationId"
                     :systemLogs="systemLogs"
-                    :showNextStep="false"
                     @add-log="addLog"
                     @update-status="updateStatus"
                   />
@@ -656,18 +704,16 @@
             </section>
           </template>
         </div>
-      </div>
-    </main>
-  </div>
+  </KaleidoWorkflowShell>
 </template>
 
 <script setup>
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import KaleidoNavBrand from '../components/KaleidoNavBrand.vue'
-import WorkflowStepMenu from '../components/WorkflowStepMenu.vue'
+import KaleidoWorkflowShell from '../components/KaleidoWorkflowShell.vue'
 import GraphPanel from '../components/GraphPanel.vue'
 import Step4Report from '../components/Step4Report.vue'
+import KWorkflowTabs from '../components/ui/KWorkflowTabs.vue'
 import {
   chatWithReportNode,
   exploreReportNode,
@@ -678,22 +724,45 @@ import {
 } from '../api/report'
 import { getSimulationAnimation } from '../api/simulation'
 import { markWorkflowStep } from '../store/workflowNavigation'
-import { translateDisplayToken } from '../utils/displayText'
+import { safeDisplayError, safeDisplayText as safeDisplayCopyText, sanitizeDisplayCopy, translateDisplayToken } from '../utils/displayText'
+import { normalizeDominantRegions } from '../utils/analysisDisplay'
 
 const route = useRoute()
 const router = useRouter()
 
-// 7 tab → 4：轮次叙事为主 + 反馈环 + 区域·角色(合并) + 节点探索；机制/报告靠后
+const INVALID_VISIBLE_COPY = new Set(['内部标识', '未命名项', '内容待本地化'])
+const safeVisibleText = (value, fallback = '') => {
+  const text = safeDisplayCopyText(value, '').trim()
+  if (!text || INVALID_VISIBLE_COPY.has(text)) return fallback
+  return text
+}
+const safeToken = (value, fallback = '') => safeVisibleText(translateDisplayToken(value, ''), fallback)
+const safeVisibleList = (values, limit = 3, fallback = '') => {
+  if (!Array.isArray(values)) return []
+  const normalized = values.map(value => safeVisibleText(value, fallback)).filter(Boolean)
+  return [...new Set(normalized)].slice(0, limit)
+}
+const safeErrorMessage = (error, fallback) => {
+  return safeDisplayError(error, fallback)
+}
+
+// Step 4 保持五个稳定入口；旧的数据 tab 作为「演化复盘」子视图继续按需读取。
 const tabs = [
-  { id: 'narrative', label: '轮次叙事' },
-  { id: 'feedback', label: '反馈环' },
-  { id: 'regions', label: '区域·角色' },
-  { id: 'node-explore', label: '节点探索' },
-  { id: 'mechanisms', label: '机制推演' },
-  { id: 'report', label: '报告' },
+  { id: 'conclusion', label: '结论总览' },
+  { id: 'evolution', label: '演化复盘' },
+  { id: 'mechanisms', label: '风险与机制' },
+  { id: 'node-explore', label: '证据探索' },
+  { id: 'report', label: '正式报告' },
 ]
 
-const viewMode = ref('workbench') // 默认全宽，图谱可一键展开
+const evolutionViews = [
+  { id: 'narrative', label: '轮次叙事' },
+  { id: 'regions', label: '区域态势' },
+  { id: 'roles', label: '角色透镜' },
+  { id: 'feedback', label: '反馈链' },
+]
+
+const viewMode = ref('split') // 与 Step 2/3 保持一致，默认同时查看图谱与分析内容
 const reportId = ref(route.params.reportId)
 const simulationId = ref('')
 const graphId = ref('')
@@ -708,8 +777,8 @@ const overview = ref(null)
 const overviewLoading = ref(false)
 const overviewError = ref('')
 
-const activeTab = ref('narrative') // 轮次叙事为主
-const regionRolesView = ref('regions') // 「区域·角色」合并 tab 的子视图：regions | roles
+const activeTab = ref('conclusion')
+const evolutionView = ref('narrative')
 const loadedTabs = ref(new Set())
 const tabData = ref({
   regions: null,
@@ -717,7 +786,6 @@ const tabData = ref({
   feedback: null,
   roles: null,
   narrative: null,
-  report: null,
 })
 const tabLoading = ref({
   regions: false,
@@ -725,7 +793,6 @@ const tabLoading = ref({
   feedback: false,
   roles: false,
   narrative: false,
-  report: false,
 })
 const tabErrors = ref({
   regions: '',
@@ -733,7 +800,6 @@ const tabErrors = ref({
   feedback: '',
   roles: '',
   narrative: '',
-  report: '',
 })
 
 const selectedMetric = ref('vulnerability_score')
@@ -752,26 +818,26 @@ const nodeChatHistory = ref([])
 const nodeChatInput = ref('')
 const nodeChatLoading = ref(false)
 let overviewPoller = null
+let overviewPollErrorCount = 0
 
-const leftPanelStyle = computed(() => {
-  if (viewMode.value === 'graph') return { width: '100%', opacity: 1, transform: 'translateX(0)' }
-  if (viewMode.value === 'workbench') return { width: '0%', opacity: 0, transform: 'translateX(-20px)' }
-  return { width: '46%', opacity: 1, transform: 'translateX(0)' }
+const statusClass = computed(() => {
+  if (overview.value?.report_status === 'failed') return 'error'
+  if (overview.value?.report_status === 'completed') return 'completed'
+  return currentStatus.value
 })
-
-const rightPanelStyle = computed(() => {
-  if (viewMode.value === 'workbench') return { width: '100%', opacity: 1, transform: 'translateX(0)' }
-  if (viewMode.value === 'graph') return { width: '0%', opacity: 0, transform: 'translateX(20px)' }
-  return { width: '54%', opacity: 1, transform: 'translateX(0)' }
-})
-
-const statusClass = computed(() => currentStatus.value)
 
 const statusText = computed(() => {
-  if (currentStatus.value === 'error') return 'Error'
-  if (currentStatus.value === 'completed') return 'Completed'
-  if (currentStatus.value === 'ready') return 'Ready'
-  return 'Generating'
+  if (statusClass.value === 'error') return '展示当前可用分析内容'
+  if (statusClass.value === 'completed') return '分析与报告'
+  if (currentStatus.value === 'ready' && overview.value?.report_status !== 'completed') return '分析结果 · 报告生成中'
+  if (currentStatus.value === 'ready') return '分析结果'
+  return '分析生成中'
+})
+
+const shellStatusTone = computed(() => {
+  if (statusClass.value === 'error') return 'error'
+  if (statusClass.value === 'processing') return 'processing'
+  return 'ready'
 })
 
 const activeTabLabel = computed(() => tabs.find(tab => tab.id === activeTab.value)?.label || '分析')
@@ -780,11 +846,46 @@ const mechanismsTab = computed(() => tabData.value.mechanisms)
 const feedbackTab = computed(() => tabData.value.feedback)
 const rolesTab = computed(() => tabData.value.roles)
 const narrativeTab = computed(() => tabData.value.narrative)
-// 「区域·角色」子视图切换；切到角色时按需加载 roles 数据
-const setRegionRolesView = (view) => {
-  regionRolesView.value = view
-  if (view === 'roles') ensureTabLoaded('roles')
+const activeDataTab = computed(() => {
+  if (activeTab.value === 'conclusion') return 'narrative'
+  if (activeTab.value === 'evolution') return evolutionView.value
+  if (activeTab.value === 'mechanisms') return 'mechanisms'
+  return ''
+})
+const conclusionRounds = computed(() => Array.isArray(narrativeTab.value?.rounds) ? narrativeTab.value.rounds : [])
+const conclusionLatestRound = computed(() => conclusionRounds.value[conclusionRounds.value.length - 1] || null)
+const GENERIC_REPORT_SUMMARIES = new Set(['暂无摘要', '暂无说明', '暂无可展示内容', '结果正在整理'])
+const concreteReportSummary = value => {
+  const text = sanitizeDisplayCopy(value, '').trim()
+  return text && !GENERIC_REPORT_SUMMARIES.has(text) ? text : ''
 }
+const reportSummaryText = computed(() => concreteReportSummary(overview.value?.report_summary))
+const overviewSummaryText = computed(() => (
+  reportSummaryText.value
+  || concreteReportSummary(conclusionLatestRound.value?.headline)
+  || concreteReportSummary(conclusionLatestRound.value?.amplifier)
+  || '基于多轮区域状态、反馈链、角色透镜与节点证据形成分析结果。'
+))
+const conclusionHeadline = computed(() => sanitizeDisplayCopy(
+  conclusionLatestRound.value?.headline || reportSummaryText.value,
+  '推演结果正在形成结论。'
+))
+const conclusionSummary = computed(() => {
+  if (reportSummaryText.value) return reportSummaryText.value
+  if (conclusionLatestRound.value?.amplifier) return sanitizeDisplayCopy(conclusionLatestRound.value.amplifier)
+  return '请结合演化复盘、机制链和证据图理解本次推演结果。'
+})
+const conclusionTurningPoints = computed(() => {
+  const points = conclusionRounds.value.flatMap(round => normalizeTurningPoints(round?.turning_points))
+  return [...new Set(points.filter(Boolean))].slice(-6)
+})
+const conclusionEvidenceCount = computed(() => {
+  const stats = overview.value?.node_stats || {}
+  return Number(conclusionRounds.value.length || 0)
+    + Number(stats.risk_event_count || 0)
+    + Number(stats.mechanism_edge_count || 0)
+    + Number(stats.graph_node_count || 0)
+})
 // 机制空则折叠：没有任何机制工件时，只显示一句说明，不再渲染 5 个空段
 const mechanismHasDetail = computed(() => {
   const m = mechanismsTab.value
@@ -853,7 +954,8 @@ const currentRoundSnapshot = computed(() => {
 })
 const currentMetricLabel = computed(() => {
   const options = regionsTab.value?.metric_options || []
-  return options.find(item => item.key === selectedMetric.value)?.label || selectedMetric.value
+  const configuredLabel = options.find(item => item.key === selectedMetric.value)?.label
+  return safeVisibleText(configuredLabel, safeToken(selectedMetric.value, '状态指标'))
 })
 
 const addLog = (msg) => {
@@ -998,7 +1100,14 @@ const applyAnimationToMapProjection = (projection, frame) => {
 }
 
 const updateStatus = (status) => {
-  currentStatus.value = status
+  if (!status) return
+  overview.value = {
+    ...(overview.value || {}),
+    report_status: status,
+  }
+  currentStatus.value = resolveAnalysisStatus(overview.value)
+  syncWorkflowStatus(currentStatus.value)
+  if (status === 'completed' || status === 'failed') stopOverviewPolling()
 }
 
 const toggleMaximize = (target) => {
@@ -1025,7 +1134,7 @@ const regionNameById = computed(() => {
   const add = (list) => {
     ;(list || []).forEach(r => {
       const id = r?.region_id || r?.id || r?.uuid
-      const name = r?.name || r?.region_name
+      const name = safeVisibleText(r?.name || r?.region_name, '')
       if (id && name) map[String(id)] = name
     })
   }
@@ -1036,33 +1145,43 @@ const regionNameById = computed(() => {
   add(graphData.value?.nodes)
   return map
 })
-const resolveRegionName = (id) => (id ? (regionNameById.value[String(id)] || '') : '')
+const resolveRegionName = (id) => (id ? safeVisibleText(regionNameById.value[String(id)], '') : '')
+const roleGroupsForDisplay = computed(() => (rolesTab.value?.groups || []).map(group => ({
+  ...group,
+  visible_dominant_regions: normalizeDominantRegions(group?.dominant_regions, resolveRegionName),
+})))
 // 内部点分路径（latest_snapshot.feedback.xxx）不上屏
 const isInternalSourcePath = (text) => /^[a-z0-9_]+(\.[a-z0-9_]+)+$/i.test(String(text || '').trim())
+const safeSourceText = (value) => {
+  if (!value || isInternalSourcePath(value)) return ''
+  return safeVisibleText(value, '')
+}
 
 const formatMetricValue = (value) => {
   if (value === null || value === undefined || value === '') return '暂无'
   const num = Number(value)
-  return Number.isFinite(num) ? num.toFixed(1) : value
+  return Number.isFinite(num) ? num.toFixed(1) : '暂无'
 }
 
 const formatDelta = (value) => {
   const num = Number(value || 0)
-  if (!Number.isFinite(num)) return value
+  if (!Number.isFinite(num)) return '暂无'
   return `${num > 0 ? '+' : ''}${num.toFixed(1)}`
 }
 
 const formatTimestamp = (value) => {
   if (!value) return '无时间戳'
   try {
-    return new Date(value).toLocaleString('zh-CN', {
+    const date = new Date(value)
+    if (Number.isNaN(date.getTime())) return '时间不可用'
+    return date.toLocaleString('zh-CN', {
       month: '2-digit',
       day: '2-digit',
       hour: '2-digit',
       minute: '2-digit',
     })
   } catch {
-    return value
+    return '时间不可用'
   }
 }
 
@@ -1082,7 +1201,7 @@ const feedbackDeltaLabel = (key) => {
     spread_pressure: '扩散',
     vulnerability_score: '脆弱性',
   }
-  return map[key] || key
+  return map[key] || '其他指标'
 }
 
 // --- M9 honesty helpers (additive, guarded) -------------------------------
@@ -1094,7 +1213,7 @@ const normalizeFeedbackLoop = (loop) => {
   if (typeof loop === 'string') {
     const text = loop.trim()
     if (!text) return null
-    return { label: text, loopType: '', regions: [] }
+    return { label: safeVisibleText(text, '反馈环'), loopType: '', regions: [] }
   }
   if (typeof loop !== 'object') return null
   const regions = Array.isArray(loop.region_names)
@@ -1104,7 +1223,7 @@ const normalizeFeedbackLoop = (loop) => {
   const label = regions.length
     ? regions.join(' → ')
     : String(loop.loop || loop.description || loop.label || loop.name || '反馈环')
-  return { label, loopType, regions }
+  return { label: safeVisibleText(label, '反馈环'), loopType, regions: safeVisibleList(regions, 3, '未知区域') }
 }
 
 const normalizeFeedbackLoops = (loops) => {
@@ -1115,18 +1234,18 @@ const normalizeFeedbackLoops = (loops) => {
 const loopTypeLabel = (loopType) => {
   if (loopType === 'reinforcing') return '增强'
   if (loopType === 'balancing') return '平衡'
-  return loopType || '回路'
+  return safeToken(loopType, '回路')
 }
 
 const normalizeTurningPoint = (point) => {
   if (point === null || point === undefined) return null
   if (typeof point === 'string') {
     const text = point.trim()
-    return text || null
+    return safeVisibleText(text, '') || null
   }
   if (typeof point !== 'object') return null
   const text = point.description || point.note || point.label || point.name || ''
-  return String(text).trim() || null
+  return safeVisibleText(text, '') || null
 }
 
 const normalizeTurningPoints = (points) => {
@@ -1154,7 +1273,7 @@ const provenanceMeta = (raw) => {
     return { key: 'assumed', label: '假设', tone: 'assumed' }
   }
   if (!raw) return null
-  return { key: 'other', label: String(raw), tone: 'neutral' }
+  return { key: 'other', label: '其他来源', tone: 'neutral' }
 }
 
 const selectedNodeProvenance = computed(() => {
@@ -1169,11 +1288,17 @@ const selectedNodeEvidenceRefs = computed(() => {
   return refs
     .map((ref) => {
       if (ref === null || ref === undefined) return null
-      if (typeof ref === 'string') return { label: ref.trim(), detail: '' }
+      if (typeof ref === 'string') {
+        const label = safeVisibleText(ref, '')
+        return label ? { label, detail: '' } : null
+      }
       if (typeof ref !== 'object') return null
-      const label = ref.label || ref.ref || ref.id || ref.source || ref.name || '证据'
+      const label = ref.label || ref.ref || ref.source || ref.name || ''
       const detail = ref.detail || ref.note || ref.description || ref.quote || ''
-      return { label: String(label).trim(), detail: String(detail).trim() }
+      return {
+        label: safeVisibleText(label, ''),
+        detail: safeVisibleText(detail, '')
+      }
     })
     .filter((item) => item && item.label)
 })
@@ -1181,7 +1306,7 @@ const selectedNodeEvidenceRefs = computed(() => {
 const selectedNodeGroundingReason = computed(() => {
   const attrs = nodeContext.value?.node?.attributes || {}
   const reason = attrs.grounding_reason
-  return reason ? String(reason).trim() : ''
+  return safeVisibleText(reason, '')
 })
 
 const evidenceDrawerOpen = ref(false)
@@ -1190,7 +1315,6 @@ const toggleEvidenceDrawer = () => {
 }
 
 const resolveAnalysisStatus = (data) => {
-  if (data?.analysis_ready && data?.report_status !== 'completed') return 'ready'
   const statusMap = {
     pending: 'processing',
     planning: 'processing',
@@ -1198,12 +1322,49 @@ const resolveAnalysisStatus = (data) => {
     completed: 'completed',
     failed: 'error',
   }
+  if (data?.report_status === 'failed' || data?.report_status === 'completed') {
+    return statusMap[data.report_status]
+  }
+  if (data?.analysis_ready) return 'ready'
   return statusMap[data?.report_status] || 'ready'
 }
 
+const syncWorkflowStatus = (status = currentStatus.value) => {
+  const reportStatus = overview.value?.report_status || ''
+  const reportDone = reportStatus === 'completed' || status === 'completed'
+  const reportFailed = reportStatus === 'failed' || status === 'error'
+  const analysisAvailable = Boolean(overview.value?.analysis_ready) || ['ready', 'completed'].includes(status)
+  const simulationRoute = simulationId.value
+    ? { name: 'SimulationRun', params: { simulationId: simulationId.value } }
+    : null
+  markWorkflowStep(3, {
+    visited: true,
+    status: 'done',
+    summary: '推演结果',
+    route: simulationRoute
+  })
+  markWorkflowStep(4, {
+    visited: true,
+    status: reportDone ? 'done' : 'active',
+    summary: reportDone
+      ? '分析与正式报告'
+      : reportFailed
+        ? '当前展示已生成的分析内容'
+        : analysisAvailable
+          ? '分析可查看，正式报告生成中'
+          : '结果分析中',
+    route: { name: 'Analysis', params: { reportId: reportId.value }, query: { ...route.query } }
+  })
+}
+
 const normalizeTab = (value) => {
-  if (value === 'roles') return 'regions' // 角色透镜已并入「区域·角色」
+  if (['narrative', 'feedback', 'regions', 'roles'].includes(value)) return 'evolution'
   const valid = new Set(tabs.map(tab => tab.id))
+  return valid.has(value) ? value : 'conclusion'
+}
+
+const normalizeEvolutionView = (value) => {
+  const valid = new Set(['narrative', 'regions', 'roles', 'feedback'])
   return valid.has(value) ? value : 'narrative'
 }
 
@@ -1217,11 +1378,11 @@ const refreshGraph = async () => {
       addLog(`结果图谱加载成功：${res.data.node_count || 0} 节点 / ${res.data.edge_count || 0} 条边`)
     } else {
       graphData.value = null
-      addLog(`结果图谱加载失败: ${res.error || '未知错误'}`)
+      addLog(`结果图谱加载失败：${safeErrorMessage(res.error, '服务暂时不可用')}`)
     }
   } catch (err) {
     graphData.value = null
-    addLog(`结果图谱加载异常: ${err.message}`)
+    addLog(`结果图谱加载异常：${safeErrorMessage(err, '服务暂时不可用')}`)
   } finally {
     graphLoading.value = false
   }
@@ -1236,10 +1397,10 @@ const loadAnimationData = async () => {
       animationData.value = res.data
       addLog(`统一动画载入：${res.data.frames?.length || 0} 帧 / ${res.data.layout?.nodes?.length || 0} 节点`)
     } else {
-      addLog(`统一动画载入失败: ${res.error || '未知错误'}`)
+      addLog(`统一动画载入失败：${safeErrorMessage(res.error, '动画数据不可用')}`)
     }
   } catch (err) {
-    addLog(`统一动画载入异常: ${err.message}`)
+    addLog(`统一动画载入异常：${safeErrorMessage(err, '动画数据不可用')}`)
   }
 }
 
@@ -1259,13 +1420,17 @@ const syncOverviewStatus = async () => {
       ...(overview.value || {}),
       ...res.data,
     }
+    overviewPollErrorCount = 0
     currentStatus.value = resolveAnalysisStatus(res.data)
+    syncWorkflowStatus(currentStatus.value)
     if (res.data.report_status === 'completed' || res.data.report_status === 'failed') {
       stopOverviewPolling()
     }
   } catch (err) {
-    addLog(`结果分析状态轮询失败: ${err.message}`)
-    stopOverviewPolling()
+    overviewPollErrorCount += 1
+    if (overviewPollErrorCount === 1 || overviewPollErrorCount % 5 === 0) {
+      addLog(`结果分析状态轮询暂时失败，将继续重试：${safeErrorMessage(err, '服务暂时不可用')}`)
+    }
   }
 }
 
@@ -1291,6 +1456,7 @@ const loadOverview = async () => {
     graphId.value = res.data.graph_id || ''
 
     currentStatus.value = resolveAnalysisStatus(res.data)
+    syncWorkflowStatus(currentStatus.value)
     selectedRound.value = res.data.default_round || 1
 
     await loadAnimationData()
@@ -1298,16 +1464,14 @@ const loadOverview = async () => {
 
     const nextTab = normalizeTab(route.query.tab)
     activeTab.value = nextTab
-    if (route.query.tab === 'roles') regionRolesView.value = 'roles'
-    if (nextTab !== 'node-explore') {
-      await ensureTabLoaded(nextTab)
-    }
-    if (nextTab === 'regions' && regionRolesView.value === 'roles') {
-      await ensureTabLoaded('roles')
-    }
+    const legacyEvolutionView = ['narrative', 'feedback', 'regions', 'roles'].includes(route.query.tab)
+      ? route.query.tab
+      : route.query.view
+    evolutionView.value = normalizeEvolutionView(legacyEvolutionView)
+    await ensureActiveViewLoaded(nextTab)
     startOverviewPolling()
   } catch (err) {
-    overviewError.value = err.message || '结果分析加载失败'
+    overviewError.value = safeErrorMessage(err, '结果分析加载失败')
     currentStatus.value = 'error'
     stopOverviewPolling()
   } finally {
@@ -1316,8 +1480,8 @@ const loadOverview = async () => {
 }
 
 const ensureTabLoaded = async (tabId) => {
-  if (!['regions', 'mechanisms', 'feedback', 'roles', 'narrative', 'report'].includes(tabId)) return
-  if (loadedTabs.value.has(tabId)) return
+  if (!['regions', 'mechanisms', 'feedback', 'roles', 'narrative'].includes(tabId)) return
+  if (loadedTabs.value.has(tabId) || tabLoading.value[tabId]) return
   tabLoading.value[tabId] = true
   tabErrors.value[tabId] = ''
   try {
@@ -1333,19 +1497,51 @@ const ensureTabLoaded = async (tabId) => {
       selectedRound.value = res.data.current_round || selectedRound.value
     }
   } catch (err) {
-    tabErrors.value[tabId] = err.message || `加载 ${tabId} 失败`
+    tabErrors.value[tabId] = safeErrorMessage(err, '当前分析视图加载失败')
   } finally {
     tabLoading.value[tabId] = false
   }
 }
 
-const selectTab = async (tabId) => {
-  activeTab.value = tabId
-  await router.replace({ query: { ...route.query, tab: tabId } })
-  stopPlayback()
-  if (tabId !== 'node-explore') {
-    await ensureTabLoaded(tabId)
+const ensureActiveViewLoaded = async (tabId = activeTab.value) => {
+  if (tabId === 'conclusion') {
+    await ensureTabLoaded('narrative')
+    return
   }
+  if (tabId === 'evolution') {
+    await ensureTabLoaded(evolutionView.value)
+    return
+  }
+  if (tabId === 'mechanisms') await ensureTabLoaded('mechanisms')
+}
+
+const setEvolutionView = async (view) => {
+  const normalized = normalizeEvolutionView(view)
+  evolutionView.value = normalized
+  stopPlayback()
+  if (activeTab.value === 'evolution') {
+    await router.replace({ query: { ...route.query, tab: 'evolution', view: normalized } })
+    await ensureTabLoaded(normalized)
+  }
+}
+
+const openEvolutionView = async (view = 'narrative') => {
+  const normalized = normalizeEvolutionView(view)
+  activeTab.value = 'evolution'
+  evolutionView.value = normalized
+  stopPlayback()
+  await router.replace({ query: { ...route.query, tab: 'evolution', view: normalized } })
+  await ensureTabLoaded(normalized)
+}
+
+const selectTab = async (tabId) => {
+  const normalized = normalizeTab(tabId)
+  activeTab.value = normalized
+  const nextQuery = { ...route.query, tab: normalized }
+  if (normalized === 'evolution') nextQuery.view = evolutionView.value
+  await router.replace({ query: nextQuery })
+  stopPlayback()
+  await ensureActiveViewLoaded(normalized)
 }
 
 const stopPlayback = () => {
@@ -1412,7 +1608,7 @@ const fetchNodeContext = async (node, { reset = false } = {}) => {
     nodeContext.value = res.data
   } catch (err) {
     nodeContext.value = null
-    nodeContextError.value = err.message || '节点上下文加载失败'
+    nodeContextError.value = safeErrorMessage(err, '节点上下文加载失败')
   } finally {
     nodeContextLoading.value = false
   }
@@ -1451,7 +1647,7 @@ const runNodeExplore = async () => {
     }
     nodeExploreResult.value = res.data
   } catch (err) {
-    nodeExploreError.value = err.message || '节点深度探索失败'
+    nodeExploreError.value = safeErrorMessage(err, '节点深度探索失败')
   } finally {
     nodeExploreLoading.value = false
   }
@@ -1480,8 +1676,9 @@ const sendNodeChat = async () => {
   } catch (err) {
     nodeChatHistory.value.push({
       role: 'assistant',
-      content: `请求失败：${err.message || '未知错误'}`,
+      content: '当前节点证据暂不足以形成进一步判断，请补充轮次范围或换一个具体问题。',
     })
+    addLog(`节点追问处理异常: ${safeErrorMessage(err, '服务暂时不可用')}`)
   } finally {
     nodeChatLoading.value = false
   }
@@ -1493,23 +1690,23 @@ watch(
     if (!newId) return
     reportId.value = newId
     loadedTabs.value = new Set()
-    tabData.value = { regions: null, mechanisms: null, feedback: null, roles: null, narrative: null, report: null }
+    tabData.value = { regions: null, mechanisms: null, feedback: null, roles: null, narrative: null }
     await loadOverview()
   },
   { immediate: true }
 )
 
 watch(
-  () => route.query.tab,
-  async (tab) => {
-    if (tab === 'roles') setRegionRolesView('roles')
+  [() => route.query.tab, () => route.query.view],
+  async ([tab, view]) => {
     const normalized = normalizeTab(tab)
-    if (normalized !== activeTab.value) {
-      activeTab.value = normalized
-      if (normalized !== 'node-explore') {
-        await ensureTabLoaded(normalized)
-      }
+    activeTab.value = normalized
+    if (normalized === 'evolution') {
+      const legacyView = ['narrative', 'feedback', 'regions', 'roles'].includes(tab) ? tab : view
+      evolutionView.value = normalizeEvolutionView(legacyView)
     }
+    stopPlayback()
+    await ensureActiveViewLoaded(normalized)
   }
 )
 
@@ -1524,7 +1721,7 @@ watch(
       nodeIds: Array.isArray(frame.focus_ids?.node_ids) ? frame.focus_ids.node_ids : [],
       nodeNames: [],
       edgeIds: Array.isArray(frame.focus_ids?.edge_ids) ? frame.focus_ids.edge_ids : [],
-      label: frame.phase ? `${frame.narrative?.title || ''} · ${frame.phase}` : (frame.narrative?.title || ''),
+      label: safeVisibleText(frame.narrative?.title, '当前轮次'),
       mode: 'animation',
     }
     if (isPlaying.value) {
@@ -1538,12 +1735,7 @@ watch(
 
 onMounted(() => {
   addLog('AnalysisView 初始化')
-  markWorkflowStep(4, {
-    visited: true,
-    status: 'active',
-    summary: '结果分析中',
-    route: { name: 'Analysis', params: { reportId: reportId.value }, query: { ...route.query } }
-  })
+  syncWorkflowStatus('processing')
 })
 
 onBeforeUnmount(() => {
@@ -1554,10 +1746,12 @@ onBeforeUnmount(() => {
 
 <style scoped>
 .main-view {
-  min-height: 100vh;
+  height: 100dvh;
+  min-height: 100dvh;
   display: flex;
   flex-direction: column;
   background: #f5f6f8;
+  overflow: hidden;
 }
 
 .app-header {
@@ -1569,6 +1763,8 @@ onBeforeUnmount(() => {
   border-bottom: 1px solid rgba(16, 35, 29, 0.08);
   background: rgba(244, 246, 241, 0.92);
   backdrop-filter: blur(14px);
+  position: relative;
+  z-index: 1000;
 }
 
 .view-switcher {
@@ -1683,31 +1879,41 @@ onBeforeUnmount(() => {
 }
 
 .content-area {
-  flex: 0 0 auto;
+  flex: 1 1 auto;
   display: flex;
-  min-height: calc(100vh - 60px);
-  overflow: visible;
+  height: calc(100dvh - 60px);
+  min-height: 0;
+  overflow: hidden;
 }
 
 .panel-wrapper {
-  min-height: calc(100vh - 60px);
-  height: auto;
+  min-height: 0;
+  height: 100%;
   transition: width 0.28s ease, opacity 0.28s ease, transform 0.28s ease;
-  overflow: visible;
+  overflow: hidden;
 }
 
 .panel-wrapper.left {
-  height: calc(100vh - 60px);
+  height: 100%;
 }
 
 .analysis-panel {
-  min-height: calc(100vh - 60px);
-  height: auto;
+  min-height: 0;
+  height: 100%;
   display: flex;
   flex-direction: column;
-  padding: 20px;
-  gap: 16px;
-  overflow: visible;
+  padding: 16px 20px 0;
+  gap: 0;
+  overflow: hidden;
+}
+
+.analysis-top-context {
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding-bottom: 12px;
+  background: #f5f6f8;
 }
 
 /* 巨型竖排 hero → 单行细条：标题 + 摘要（截断）在左，指标内联在右 */
@@ -1783,63 +1989,593 @@ onBeforeUnmount(() => {
 .tab-bar {
   display: flex;
   flex-wrap: wrap;
-  gap: 10px;
-}
-
-/* 「区域·角色」合并 tab 内的子视图切换 */
-.subview-switch {
-  display: inline-flex;
-  gap: 4px;
-  padding: 4px;
-  margin-bottom: 14px;
-  border: 1px solid rgba(148, 163, 184, 0.28);
-  border-radius: 999px;
-  background: rgba(248, 250, 253, 0.8);
-}
-
-.subview-switch button {
-  border: none;
-  background: transparent;
-  padding: 7px 18px;
-  border-radius: 999px;
-  font-size: 13px;
-  font-weight: 700;
-  color: #64748b;
-  cursor: pointer;
-  transition: all 0.18s ease;
-  font-family: inherit;
-}
-
-.subview-switch button.active {
-  background: #102a43;
-  color: #ffffff;
+  gap: 24px;
+  border-bottom: 1px solid rgba(15, 23, 42, 0.1);
 }
 
 .tab-btn {
-  border: 1px solid rgba(148, 163, 184, 0.28);
-  background: #ffffff;
-  padding: 10px 16px;
-  border-radius: 999px;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  background: transparent;
+  padding: 8px 2px 10px;
   font-size: 13px;
   font-weight: 700;
   color: #475569;
   cursor: pointer;
-  transition: all 0.2s ease;
+  transition: color 0.2s ease, border-color 0.2s ease;
 }
 
 .tab-btn.active {
-  background: #0f172a;
-  color: #f8fafc;
-  border-color: #0f172a;
+  color: #0f5f58;
+  border-bottom-color: #0f766e;
+}
+
+.tab-btn:hover {
+  color: #0f172a;
+}
+
+.tab-btn:focus-visible {
+  outline: 2px solid #0f766e;
+  outline-offset: 3px;
 }
 
 .tab-content {
-  flex: 0 0 auto;
-  min-height: auto;
-  overflow: visible;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
   display: flex;
   flex-direction: column;
   gap: 18px;
+  padding: 4px 4px 24px;
+  overscroll-behavior: contain;
+}
+
+.evolution-view-tabs {
+  flex: 0 0 auto;
+}
+
+.analysis-primary-tabs :deep(.k-workflow-tabs__list) {
+  gap: 0;
+}
+
+.analysis-primary-tabs :deep(.k-workflow-tabs__tab) {
+  justify-content: center;
+  min-width: 0;
+  padding-inline: 4px;
+  font-size: 13px;
+  white-space: nowrap;
+}
+
+.evolution-view-tabs :deep(.k-workflow-tabs__list) {
+  gap: 0;
+}
+
+.evolution-view-tabs :deep(.k-workflow-tabs__tab) {
+  justify-content: center;
+  min-width: 7rem;
+  min-height: 2.75rem;
+  padding-inline: 12px;
+  font-size: 13px;
+}
+
+.role-comparison {
+  display: flex;
+  flex-direction: column;
+}
+
+.role-table-head,
+.role-table-row {
+  display: grid;
+  grid-template-columns: minmax(170px, 1.15fr) 52px minmax(220px, 1fr) minmax(120px, 0.7fr);
+  gap: 18px;
+  align-items: center;
+}
+
+.role-table-head {
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--k-color-border-strong);
+  color: var(--k-color-text-muted);
+  font-size: 11px;
+  font-weight: 650;
+}
+
+.role-table-row {
+  padding: 18px 12px;
+  border-bottom: 1px solid var(--k-color-border);
+}
+
+.role-identity {
+  min-width: 0;
+}
+
+.role-identity h3 {
+  margin: 0;
+  color: var(--k-color-text);
+  font-size: 16px;
+  line-height: 1.35;
+}
+
+.role-identity p {
+  display: -webkit-box;
+  margin: 5px 0 0;
+  overflow: hidden;
+  color: var(--k-color-text-muted);
+  font-size: 12px;
+  line-height: 1.5;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.role-node-count {
+  color: var(--k-color-text);
+  font-size: 18px;
+  font-variant-numeric: tabular-nums;
+}
+
+.role-metrics-flat {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+  margin: 0;
+}
+
+.role-metrics-flat div {
+  min-width: 0;
+}
+
+.role-metrics-flat dt {
+  overflow: hidden;
+  color: var(--k-color-text-muted);
+  font-size: 11px;
+  line-height: 1.3;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.role-metrics-flat dd {
+  margin: 4px 0 0;
+  color: var(--k-color-text);
+  font-size: 15px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+.role-region-primary {
+  display: flex;
+  min-width: 0;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.role-region-primary span {
+  overflow: hidden;
+  color: var(--k-color-text-secondary);
+  font-size: 13px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.role-region-primary strong {
+  flex: 0 0 auto;
+  color: var(--k-color-brand-700);
+  font-size: 14px;
+  font-variant-numeric: tabular-nums;
+}
+
+.role-region-empty {
+  color: var(--k-color-text-muted);
+  font-size: 12px;
+}
+
+.mechanism-layout {
+  display: flex;
+  flex-direction: column;
+}
+
+.mechanism-overview {
+  display: grid;
+  grid-template-columns: minmax(0, 1.45fr) auto;
+  gap: 32px;
+  align-items: start;
+  padding: 18px 4px 24px;
+  border-bottom: 1px solid var(--k-color-border-strong);
+}
+
+.mechanism-overview-copy h2 {
+  margin: 0;
+  color: var(--k-color-text);
+  font-size: 20px;
+  line-height: 1.3;
+}
+
+.mechanism-overview-copy p {
+  max-width: 72ch;
+  margin: 9px 0 0;
+  color: var(--k-color-text-secondary);
+  font-size: 13px;
+  line-height: 1.65;
+}
+
+.mechanism-inline-stats {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(72px, 1fr));
+  margin: 0;
+}
+
+.mechanism-inline-stats div {
+  min-width: 0;
+  padding: 2px 14px;
+  border-left: 1px solid var(--k-color-border);
+}
+
+.mechanism-inline-stats dt {
+  color: var(--k-color-text-muted);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.mechanism-inline-stats dd {
+  margin: 5px 0 0;
+  color: var(--k-color-text);
+  font-size: 19px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+.mechanism-section {
+  padding: 24px 4px;
+  border-bottom: 1px solid var(--k-color-border);
+}
+
+.mechanism-section-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 18px;
+  margin-bottom: 8px;
+}
+
+.mechanism-section-head h3 {
+  margin: 0;
+  color: var(--k-color-text);
+  font-size: 16px;
+}
+
+.mechanism-section-head span {
+  color: var(--k-color-text-muted);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.mechanism-state-list,
+.mechanism-relation-list,
+.mechanism-note-list {
+  display: flex;
+  flex-direction: column;
+}
+
+.mechanism-state-row {
+  display: grid;
+  grid-template-columns: minmax(170px, 0.7fr) 92px minmax(280px, 1.7fr);
+  gap: 18px;
+  align-items: start;
+  padding: 14px 0;
+  border-top: 1px solid var(--k-color-border);
+}
+
+.mechanism-state-row strong,
+.mechanism-relation-copy strong,
+.mechanism-note-row strong {
+  color: var(--k-color-text);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.mechanism-state-row > span {
+  color: var(--k-color-text-muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.mechanism-state-row p,
+.mechanism-relation-copy p,
+.mechanism-note-row p {
+  margin: 0;
+  color: var(--k-color-text-secondary);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.mechanism-relation-row {
+  display: grid;
+  grid-template-columns: minmax(180px, 0.85fr) minmax(260px, 1.5fr) auto;
+  gap: 20px;
+  align-items: start;
+  padding: 16px 0;
+  border-top: 1px solid var(--k-color-border);
+}
+
+.mechanism-relation-route {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+  gap: 7px;
+  align-items: center;
+  color: var(--k-color-text-secondary);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.mechanism-relation-route span:not(:nth-child(2)) {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.mechanism-relation-copy {
+  min-width: 0;
+}
+
+.mechanism-relation-copy p {
+  margin-top: 4px;
+}
+
+.mechanism-relation-meta {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 4px 0;
+  max-width: 190px;
+  color: var(--k-color-text-muted);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.mechanism-relation-meta span + span::before {
+  margin: 0 6px;
+  content: '\00b7';
+}
+
+.mechanism-note-row {
+  display: grid;
+  grid-template-columns: minmax(170px, 0.55fr) minmax(280px, 1.45fr);
+  gap: 20px;
+  align-items: start;
+  padding: 14px 0;
+  border-top: 1px solid var(--k-color-border);
+}
+
+.mechanism-quality-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.mechanism-quality-list li {
+  padding: 12px 0;
+  border-top: 1px solid var(--k-color-border);
+  color: var(--k-color-text-secondary);
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+@container analysis (max-width: 44rem) {
+  .role-table-head {
+    display: none;
+  }
+
+  .role-table-row {
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 14px 18px;
+  }
+
+  .role-node-count::after {
+    margin-left: 4px;
+    color: var(--k-color-text-muted);
+    font-size: 11px;
+    font-weight: 500;
+    content: '个节点';
+  }
+
+  .role-metrics-flat,
+  .role-region-primary,
+  .role-region-empty {
+    grid-column: 1 / -1;
+  }
+
+  .mechanism-overview {
+    grid-template-columns: 1fr;
+    gap: 18px;
+  }
+
+  .mechanism-inline-stats div:first-child {
+    border-left: 0;
+  }
+
+  .mechanism-state-row {
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 5px 18px;
+  }
+
+  .mechanism-state-row p {
+    grid-column: 1 / -1;
+  }
+
+  .mechanism-relation-row,
+  .mechanism-note-row {
+    grid-template-columns: 1fr;
+    gap: 6px;
+  }
+
+  .mechanism-relation-meta {
+    justify-content: flex-start;
+    max-width: none;
+  }
+}
+
+@container analysis (max-width: 34rem) {
+  .mechanism-inline-stats {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .mechanism-inline-stats div:nth-child(3) {
+    border-left: 0;
+  }
+
+  .mechanism-inline-stats div:nth-child(n + 3) {
+    margin-top: 12px;
+  }
+
+  .mechanism-state-row {
+    grid-template-columns: 1fr;
+  }
+
+  .mechanism-state-row p {
+    grid-column: auto;
+  }
+}
+
+.conclusion-lead {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 28px;
+  align-items: end;
+  padding: 26px 28px 30px;
+  border-radius: 22px;
+  background: #ffffff;
+  border: 1px solid rgba(15, 118, 110, 0.14);
+}
+
+.conclusion-label {
+  display: block;
+  margin-bottom: 10px;
+  color: #0f766e;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+}
+
+.conclusion-lead h2 {
+  max-width: 920px;
+  margin: 0;
+  color: #10231d;
+  font-size: var(--k-text-display);
+  line-height: 1.25;
+  letter-spacing: -0.025em;
+  text-wrap: balance;
+}
+
+.conclusion-lead p {
+  max-width: 72ch;
+  margin: 14px 0 0;
+  color: #52635b;
+  line-height: 1.7;
+}
+
+.conclusion-round {
+  min-width: 112px;
+  padding-left: 24px;
+  border-left: 1px solid rgba(15, 118, 110, 0.16);
+}
+
+.conclusion-round span,
+.conclusion-card > span,
+.conclusion-stat-grid span {
+  display: block;
+  color: #6d7d74;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.conclusion-round strong {
+  display: block;
+  margin-top: 5px;
+  color: #0f5f58;
+  font-size: 28px;
+  font-variant-numeric: tabular-nums;
+}
+
+.conclusion-grid {
+  display: grid;
+  grid-template-columns: 0.85fr 1.2fr 1.2fr;
+  gap: 12px;
+}
+
+.conclusion-card {
+  min-width: 0;
+  padding: 18px 20px;
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.86);
+  border: 1px solid rgba(15, 23, 42, 0.08);
+}
+
+.conclusion-card.is-focus {
+  background: rgba(15, 118, 110, 0.08);
+  border-color: rgba(15, 118, 110, 0.14);
+}
+
+.conclusion-card strong {
+  display: block;
+  margin-top: 9px;
+  color: #173126;
+  font-size: 15px;
+  line-height: 1.55;
+}
+
+.conclusion-card p {
+  margin: 7px 0 0;
+  color: #5f7067;
+  font-size: 12px;
+}
+
+.conclusion-evidence {
+  padding: 20px 22px;
+  border-radius: 18px;
+  background: #ffffff;
+  border: 1px solid rgba(15, 23, 42, 0.08);
+}
+
+.conclusion-evidence .section-header p {
+  max-width: 72ch;
+  margin: 5px 0 0;
+  color: #647067;
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.conclusion-stat-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+  margin-top: 16px;
+}
+
+.conclusion-stat-grid > div {
+  padding: 14px 16px;
+  border-radius: 14px;
+  background: rgba(15, 23, 42, 0.04);
+}
+
+.conclusion-stat-grid strong {
+  display: block;
+  margin-top: 5px;
+  color: #173126;
+  font-size: 20px;
+  font-variant-numeric: tabular-nums;
+}
+
+.conclusion-turning-list {
+  margin-top: 16px;
+}
+
+.conclusion-next-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.node-kicker {
+  color: #0f766e;
 }
 
 .analysis-state {
@@ -1895,7 +2631,6 @@ onBeforeUnmount(() => {
 .explore-card,
 .chat-box,
 .secondary-section,
-.role-card,
 .narrative-card,
 .report-tab-shell {
   border-radius: 22px;
@@ -1961,7 +2696,6 @@ onBeforeUnmount(() => {
 
 .region-layout,
 .feedback-grid,
-.role-grid,
 .narrative-list,
 .node-context-grid,
 .explore-sections {
@@ -1977,7 +2711,6 @@ onBeforeUnmount(() => {
 .metric-highlight-head,
 .section-header,
 .feedback-card-head,
-.role-card-head,
 .narrative-head,
 .node-hero,
 .explore-item-head,
@@ -1991,7 +2724,6 @@ onBeforeUnmount(() => {
 
 .metric-highlight-title,
 .section-header h3,
-.role-card-head h3,
 .narrative-head h3,
 .node-hero h2 {
   margin: 0;
@@ -2051,7 +2783,6 @@ onBeforeUnmount(() => {
 
 .metric-card-head p,
 .feedback-card p,
-.role-card-head p,
 .narrative-head p,
 .secondary-card p {
   margin: 0;
@@ -2125,7 +2856,6 @@ onBeforeUnmount(() => {
 }
 
 .feedback-card,
-.role-card,
 .narrative-card,
 .context-card,
 .explore-card,
@@ -2187,53 +2917,12 @@ onBeforeUnmount(() => {
   padding: 14px;
 }
 
-.role-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
-}
-
-.role-metrics {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 10px;
-  margin-top: 14px;
-}
-
-.role-metric-item {
-  padding: 12px;
-  border-radius: 16px;
-  background: rgba(15, 23, 42, 0.04);
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-
-.role-subsection {
-  margin-top: 14px;
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-
-.subsection-title {
-  font-size: 12px;
-  font-weight: 700;
-  color: #64748b;
-}
-
 .chip-wrap {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
 }
 
-.region-score-list {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-
-.region-score-item,
 .context-item,
 .subgraph-item {
   display: flex;
@@ -2398,20 +3087,24 @@ onBeforeUnmount(() => {
 .source-badge {
   display: inline-flex;
   align-items: center;
+  border: 1px solid var(--k-color-border-strong);
   border-radius: 999px;
-  padding: 5px 10px;
-  font-size: 11px;
-  font-weight: 700;
+  padding: 3px 8px;
+  background: transparent;
+  font-size: var(--k-text-caption);
+  font-weight: var(--k-weight-semibold);
 }
 
 .source-badge.live {
-  background: rgba(5, 150, 105, 0.14);
-  color: #047857;
+  border-color: rgba(31, 93, 69, 0.35);
+  background: transparent;
+  color: var(--k-color-brand-600);
 }
 
 .source-badge.template {
-  background: rgba(148, 163, 184, 0.18);
-  color: #475569;
+  border-color: var(--k-color-border-strong);
+  background: transparent;
+  color: var(--k-color-text-muted);
 }
 
 .loop-chip-section,
@@ -2583,7 +3276,8 @@ onBeforeUnmount(() => {
 @media (max-width: 1280px) {
   .analysis-hero,
   .node-context-grid,
-  .narrative-columns {
+  .narrative-columns,
+  .conclusion-grid {
     grid-template-columns: 1fr;
     display: grid;
   }
@@ -2595,31 +3289,483 @@ onBeforeUnmount(() => {
 }
 
 @media (max-width: 900px) {
+  .main-view {
+    height: auto;
+    min-height: 100dvh;
+    overflow: visible;
+  }
+
   .app-header {
     padding: 0 14px;
   }
 
   .content-area {
     flex-direction: column;
+    height: auto;
+    min-height: calc(100dvh - 60px);
+    overflow: visible;
   }
 
   .panel-wrapper.left,
   .panel-wrapper.right {
     width: 100% !important;
+    height: auto;
+    min-height: 0;
     opacity: 1 !important;
     transform: none !important;
+    overflow: visible;
+  }
+
+  .panel-wrapper.left {
+    height: 52dvh;
   }
 
   .analysis-panel {
+    height: auto;
     padding: 14px;
+    overflow: visible;
+  }
+
+  .analysis-top-context {
+    position: static;
+  }
+
+  .tab-content {
+    flex: 0 0 auto;
+    overflow: visible;
+    padding-inline: 0;
   }
 
   .hero-metrics,
   .card-grid,
   .feedback-grid,
-  .role-grid,
-  .secondary-list {
+  .secondary-list,
+  .conclusion-stat-grid {
     grid-template-columns: 1fr;
   }
+
+  .conclusion-lead {
+    grid-template-columns: 1fr;
+    align-items: start;
+  }
+
+  .conclusion-round {
+    padding: 14px 0 0;
+    border-top: 1px solid rgba(15, 118, 110, 0.16);
+    border-left: 0;
+  }
+}
+
+/* Step 4 visual contract: shared shell, green interaction color and outline metadata. */
+.analysis-panel {
+  container-name: analysis;
+  container-type: inline-size;
+  padding: 14px 16px 0;
+  color: var(--k-color-text);
+  background: var(--k-color-page);
+}
+
+.analysis-top-context {
+  gap: 8px;
+  padding-bottom: 8px;
+  background: var(--k-color-page);
+}
+
+.analysis-hero {
+  padding: 12px 16px;
+  border: 1px solid var(--k-color-border);
+  border-radius: var(--k-radius-lg);
+  background: var(--k-color-surface);
+  color: var(--k-color-text);
+  box-shadow: var(--k-shadow-raised);
+}
+
+.hero-kicker,
+.metric-label,
+.hero-summary {
+  color: var(--k-color-text-muted);
+}
+
+.hero-title,
+.hero-metric strong {
+  color: var(--k-color-text);
+}
+
+.control-select,
+.chat-input {
+  min-height: var(--k-control-height-md);
+  border: 1px solid var(--k-color-border-strong);
+  border-radius: var(--k-radius-sm);
+  background: var(--k-color-surface);
+  color: var(--k-color-text);
+}
+
+.control-bar,
+.metric-highlight,
+.feedback-header,
+.node-hero,
+.context-card,
+.explore-card,
+.chat-box,
+.secondary-section,
+.narrative-card,
+.report-tab-shell,
+.conclusion-lead,
+.conclusion-card,
+.conclusion-evidence,
+.metric-card,
+.feedback-card,
+.evidence-drawer {
+  border-color: var(--k-color-border);
+  background: var(--k-color-surface);
+  box-shadow: none;
+}
+
+.conclusion-card.is-focus {
+  border-color: var(--k-color-border-strong);
+  background: var(--k-color-brand-050);
+}
+
+.conclusion-label,
+.conclusion-round strong,
+.node-kicker {
+  color: var(--k-color-brand-600);
+}
+
+.mini-btn {
+  border-color: var(--k-color-border-strong);
+  background: var(--k-color-surface);
+  color: var(--k-color-text-secondary);
+}
+
+.mini-btn.primary {
+  border-color: var(--k-color-brand-600);
+  background: var(--k-color-brand-600);
+  color: #fff;
+}
+
+.mini-btn.primary:hover {
+  border-color: var(--k-color-brand-hover);
+  background: var(--k-color-brand-hover);
+}
+
+.round-slider {
+  accent-color: var(--k-color-brand-600);
+}
+
+.metric-bar-track {
+  background: var(--k-color-surface-muted);
+}
+
+.metric-bar-fill {
+  background: var(--k-color-brand-600);
+}
+
+.metric-pill,
+.source-chip,
+.warning-chip,
+.data-chip,
+.delta-chip,
+.loop-chip,
+.loop-chip.loop-reinforcing,
+.loop-chip.loop-balancing,
+.provenance-badge,
+.provenance-badge.prov-observed,
+.provenance-badge.prov-inferred,
+.provenance-badge.prov-assumed,
+.provenance-badge.prov-neutral,
+.source-chip.prov-observed,
+.source-chip.prov-inferred,
+.source-chip.prov-assumed,
+.source-chip.prov-neutral {
+  border: 1px solid var(--k-color-border-strong);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--k-color-text-secondary);
+}
+
+.loop-chip-type {
+  padding: 0;
+  background: transparent;
+}
+
+.loading-spinner {
+  border-color: var(--k-color-border);
+  border-top-color: var(--k-color-brand-600);
+}
+
+.turning-timeline {
+  border-left-color: var(--k-color-border-strong);
+}
+
+.turning-marker {
+  background: var(--k-color-brand-600);
+  box-shadow: 0 0 0 3px var(--k-color-brand-100);
+}
+
+.status-indicator.processing {
+  background: var(--k-color-brand-100);
+  color: var(--k-color-brand-700);
+}
+
+.chat-message.user {
+  border: 1px solid var(--k-color-border);
+  background: var(--k-color-brand-050);
+}
+
+.chat-message.assistant {
+  border: 1px solid var(--k-color-border);
+  background: var(--k-color-surface-subtle);
+}
+
+/*
+ * Step 4 is a reading workspace, not a stack of cards. Section wrappers keep
+ * their semantic/layout role, but the page surface and dividers carry the
+ * hierarchy. Only repeated, comparable data items remain card-like.
+ */
+.analysis-hero,
+.conclusion-lead,
+.conclusion-evidence,
+.control-bar,
+.metric-highlight,
+.feedback-header,
+.node-hero,
+.context-card,
+.explore-card,
+.chat-box,
+.secondary-section,
+.narrative-card,
+.report-tab-shell,
+.evidence-drawer,
+.analysis-state {
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.analysis-hero {
+  padding: 10px 4px 14px;
+  border-bottom: 1px solid var(--k-color-border-strong);
+}
+
+.tab-content {
+  gap: 0;
+}
+
+.conclusion-lead {
+  padding: 20px 4px 24px;
+  border-bottom: 1px solid var(--k-color-border);
+}
+
+.conclusion-grid {
+  grid-template-columns: minmax(150px, 0.8fr) minmax(0, 1.1fr) minmax(0, 1.4fr);
+  gap: 0;
+  border-bottom: 1px solid var(--k-color-border);
+}
+
+.conclusion-card,
+.conclusion-card.is-focus {
+  padding: 18px;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+}
+
+.conclusion-card + .conclusion-card {
+  border-left: 1px solid var(--k-color-border);
+}
+
+.conclusion-evidence {
+  padding: 22px 4px;
+  border-bottom: 1px solid var(--k-color-border);
+}
+
+.conclusion-stat-grid {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 0;
+}
+
+.conclusion-stat-grid > div {
+  padding: 12px 16px;
+  border-radius: 0;
+  background: transparent;
+}
+
+.conclusion-stat-grid > div + div {
+  border-left: 1px solid var(--k-color-border);
+}
+
+.control-bar,
+.metric-highlight,
+.feedback-header,
+.node-hero,
+.context-card,
+.explore-card,
+.chat-box,
+.secondary-section,
+.evidence-drawer {
+  padding: 18px 4px;
+  border-bottom: 1px solid var(--k-color-border);
+}
+
+.feedback-chain-template {
+  padding: 12px 0;
+  border-radius: 0;
+  background: transparent;
+}
+
+.narrative-list {
+  gap: 0;
+}
+
+.narrative-card {
+  padding: 20px 4px;
+  border-bottom: 1px solid var(--k-color-border);
+}
+
+.narrative-columns {
+  gap: 0;
+}
+
+.narrative-block {
+  padding: 10px 14px;
+  border-radius: 0;
+  background: transparent;
+}
+
+.narrative-block + .narrative-block {
+  border-left: 1px solid var(--k-color-border);
+}
+
+@container analysis (max-width: 34rem) {
+  .conclusion-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .conclusion-card + .conclusion-card {
+    border-top: 1px solid var(--k-color-border);
+    border-left: 0;
+  }
+
+  .conclusion-stat-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .conclusion-stat-grid > div:nth-child(3) {
+    border-left: 0;
+  }
+
+  .conclusion-stat-grid > div:nth-child(n + 3) {
+    border-top: 1px solid var(--k-color-border);
+  }
+
+  .narrative-block + .narrative-block {
+    border-top: 1px solid var(--k-color-border);
+    border-left: 0;
+  }
+}
+
+/*
+ * Step 4 typography contract. The analysis workspace previously mixed
+ * browser-default 16px copy with 11–34px local declarations. These semantic
+ * roles keep every tab on the same scale while preserving data hierarchy.
+ */
+.analysis-panel {
+  font-family: var(--k-font-sans);
+  font-size: var(--k-text-body);
+  line-height: var(--k-leading-body);
+}
+
+.hero-title,
+.conclusion-lead h2,
+.mechanism-overview-copy h2,
+.node-hero h2,
+.report-tab-shell h2 {
+  font-size: var(--k-text-title);
+  line-height: var(--k-leading-tight);
+  letter-spacing: 0;
+}
+
+.conclusion-lead h2 {
+  max-width: 62ch;
+  font-size: var(--k-text-display);
+}
+
+.section-header h3,
+.narrative-head h3,
+.mechanism-section-head h3,
+.metric-highlight-title,
+.explore-card h3,
+.chat-box h3 {
+  font-size: var(--k-text-section);
+  line-height: var(--k-leading-ui);
+}
+
+.analysis-primary-tabs :deep(.k-workflow-tabs__tab),
+.evolution-view-tabs :deep(.k-workflow-tabs__tab),
+.mini-btn,
+.conclusion-next-actions button {
+  font-size: var(--k-text-ui);
+  line-height: var(--k-leading-ui);
+}
+
+.hero-kicker,
+.metric-label,
+.conclusion-label,
+.conclusion-round span,
+.conclusion-card > span,
+.conclusion-stat-grid span,
+.section-header span,
+.block-label,
+.narrative-head p,
+.context-item > span,
+.subgraph-item > span,
+.evidence-item span,
+.explore-item-head span,
+.source-chip,
+.data-chip,
+.warning-chip,
+.delta-chip,
+.metric-pill {
+  font-size: var(--k-text-meta);
+  line-height: var(--k-leading-ui);
+}
+
+.hero-summary,
+.conclusion-lead p,
+.conclusion-card p,
+.conclusion-evidence .section-header p,
+.mechanism-overview-copy p,
+.mechanism-state-row p,
+.mechanism-relation-copy p,
+.mechanism-note-row p,
+.narrative-block p,
+.explore-item p,
+.grounding-reason,
+.analysis-state p {
+  font-size: var(--k-text-body);
+  line-height: var(--k-leading-body);
+}
+
+.conclusion-card strong,
+.context-item strong,
+.subgraph-item strong,
+.explore-item-head strong,
+.evidence-item strong,
+.mechanism-state-row strong,
+.mechanism-relation-copy strong,
+.mechanism-note-row strong {
+  font-size: var(--k-text-ui);
+  line-height: var(--k-leading-ui);
+}
+
+.hero-metric strong,
+.conclusion-round strong,
+.conclusion-stat-grid strong,
+.mechanism-inline-stats dd,
+.role-node-count {
+  font-size: var(--k-text-title);
+  line-height: var(--k-leading-tight);
 }
 </style>

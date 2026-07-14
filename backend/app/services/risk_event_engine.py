@@ -7,10 +7,28 @@ class RiskEventEngine:
         previous_primary = (previous_bundle or {}).get("primary_active_risk_id")
         next_primary = (next_bundle or {}).get("primary_active_risk_id")
         if previous_primary and next_primary and previous_primary != next_primary:
-            return [self.build_reframed_event(next_primary, int(next_bundle.get("round") or 0), "runtime:transition", "主风险链路发生切换。")]
+            round_num = int(next_bundle.get("round") or 0)
+            return [{
+                "event_id": f"risk_event_{next_primary}_{round_num}_primary_switch",
+                "risk_id": next_primary,
+                "from_risk_id": previous_primary,
+                "to_risk_id": next_primary,
+                "round": round_num,
+                "event_type": "primary_risk_switched",
+                "source_ref": "runtime:transition",
+                "summary": "主风险对象已根据运行张力切换。",
+                "timestamp": datetime.now().isoformat(),
+            }]
         return []
 
-    _STATUS_RANK = {"watch": 0, "elevated": 1, "critical": 2}
+    _STATUS_RANK = {"resolved": -1, "dormant": -1, "watch": 0, "elevated": 1, "critical": 2}
+    _STATUS_LABEL = {
+        "resolved": "已解除",
+        "dormant": "休眠",
+        "watch": "观察",
+        "elevated": "升高",
+        "critical": "危急",
+    }
 
     def build_runtime_events(self, previous_bundle: Dict[str, Any], next_bundle: Dict[str, Any]) -> List[Dict[str, Any]]:
         """Emit events when a risk's runtime status escalates/de-escalates or a
@@ -34,6 +52,8 @@ class RiskEventEngine:
             new_rank = self._STATUS_RANK.get(new_status, 0)
             prev_rank = self._STATUS_RANK.get(prev_status, 0)
             if new_rank > prev_rank:
+                previous_label = self._STATUS_LABEL.get(prev_status, "观察")
+                next_label = self._STATUS_LABEL.get(new_status, "观察")
                 events.append(
                     {
                         "event_id": f"risk_event_{risk_id}_{round_num}_escalation",
@@ -43,11 +63,13 @@ class RiskEventEngine:
                         "from_status": prev_status,
                         "to_status": new_status,
                         "runtime_tension": tension,
-                        "summary": f"风险张力升级：{prev_status}→{new_status}（张力 {tension}）。",
+                        "summary": f"风险张力升级：{previous_label}至{next_label}（张力 {tension}）。",
                         "timestamp": datetime.now().isoformat(),
                     }
                 )
             elif new_rank < prev_rank:
+                previous_label = self._STATUS_LABEL.get(prev_status, "观察")
+                next_label = self._STATUS_LABEL.get(new_status, "观察")
                 events.append(
                     {
                         "event_id": f"risk_event_{risk_id}_{round_num}_deescalation",
@@ -57,7 +79,7 @@ class RiskEventEngine:
                         "from_status": prev_status,
                         "to_status": new_status,
                         "runtime_tension": tension,
-                        "summary": f"风险张力回落：{prev_status}→{new_status}（张力 {tension}）。",
+                        "summary": f"风险张力回落：{previous_label}至{next_label}（张力 {tension}）。",
                         "timestamp": datetime.now().isoformat(),
                     }
                 )

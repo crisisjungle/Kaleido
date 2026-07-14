@@ -252,33 +252,33 @@ class MechanismSimulationPlanner:
         if not self.llm_client:
             return None, "llm_unavailable"
         prompt = {
-            "task": "Design a scenario-specific ecological simulation mechanism model for EnvFish.",
+            "task": "Design a scenario-specific ecological simulation mechanism model for EnvFish. All user-facing display text must be Simplified Chinese.",
             "context": context,
             "output_schema": {
                 "scenario_model": {
-                    "scenario_title": "string",
-                    "scenario_summary": "string",
-                    "core_processes": ["ecological/physical/social/governance process"],
+                    "scenario_title": "中文标题",
+                    "scenario_summary": "中文摘要",
+                    "core_processes": ["中文过程描述"],
                     "state_variables": [
                         {
                             "key": "snake_case_key",
-                            "label": "display label",
-                            "description": "what this variable means",
+                            "label": "中文显示名",
+                            "description": "中文变量说明",
                             "polarity": "higher_is_worse|higher_is_better|neutral",
                             "legacy_metric": "optional existing metric projection",
                         }
                     ],
-                    "key_uncertainties": ["uncertainty"],
-                    "assumptions": ["assumption"],
+                    "key_uncertainties": ["中文不确定性说明"],
+                    "assumptions": ["中文假设说明"],
                 },
                 "mechanism_graph": {
                     "nodes": [
                         {
                             "id": "mech_1",
-                            "name": "string",
+                            "name": "中文机制节点名",
                             "node_type": "place|agent_role|species|infrastructure|source|process|governance|receptor|data_signal",
-                            "description": "string",
-                            "evidence": ["source hints"],
+                            "description": "中文机制说明",
+                            "evidence": ["中文或原文证据线索"],
                             "confidence": 0.0,
                         }
                     ],
@@ -287,13 +287,13 @@ class MechanismSimulationPlanner:
                             "id": "mech_edge_1",
                             "source": "mechanism node id",
                             "target": "mechanism node id",
-                            "relation_label": "open label",
-                            "mechanism": "why this causal/functional relation exists",
-                            "trigger_conditions": ["condition"],
+                            "relation_label": "中文关系显示名",
+                            "mechanism": "中文机制解释",
+                            "trigger_conditions": ["中文触发条件"],
                             "latency": "immediate|hours|days|weeks|months|unknown",
                             "direction": "positive|negative|bidirectional|conditional",
                             "scope": "local|cross_region|cross_scale|systemic",
-                            "evidence": ["source hints"],
+                            "evidence": ["中文或原文证据线索"],
                             "confidence": 0.0,
                         }
                     ],
@@ -301,26 +301,26 @@ class MechanismSimulationPlanner:
                 "agent_blueprints": [
                     {
                         "blueprint_id": "role key",
-                        "name": "agent/process role",
+                        "name": "中文角色名",
                         "agent_kind": "human|institution|infrastructure|ecological|physical_process|data_signal",
                         "derived_from_mechanisms": ["mechanism node id"],
-                        "observables": ["what it observes"],
-                        "capabilities": ["what it can change"],
-                        "relationship_instructions": ["how to propose relationships"],
+                        "observables": ["中文观测项"],
+                        "capabilities": ["中文能力项"],
+                        "relationship_instructions": ["中文关系生成指引"],
                     }
                 ],
                 "relation_candidates": [
                     {
                         "source_agent_id": 1,
                         "target_agent_id": 2,
-                        "relation_label": "open label",
-                        "interaction_channel": "open channel",
-                        "mechanism": "why these agents/processes are related",
-                        "trigger_conditions": ["condition"],
+                        "relation_label": "中文关系显示名",
+                        "interaction_channel": "中文互动渠道",
+                        "mechanism": "中文关系解释",
+                        "trigger_conditions": ["中文触发条件"],
                         "latency": "immediate|hours|days|weeks|months|unknown",
                         "direction": "positive|negative|bidirectional|conditional",
                         "scope": "local|cross_region|cross_scale|systemic",
-                        "evidence": ["source hints"],
+                        "evidence": ["中文或原文证据线索"],
                         "confidence": 0.0,
                         "mechanism_edge_ids": ["mech_edge_1"],
                     }
@@ -332,6 +332,7 @@ class MechanismSimulationPlanner:
                 "Avoid repeating the same local motif for every subregion.",
                 "Every relation candidate must cite a mechanism, and evidence that quotes the source document or names a real region/entity from the context. Do NOT invent generic evidence; leave evidence empty if you are only inferring.",
                 "Use only provided agent_id values for relation_candidates.",
+                "All display fields, including title, summary, label, name, description, relation_label, mechanism, trigger_conditions, observables, capabilities, assumptions, uncertainties, and evidence summaries, must be Simplified Chinese. Keep only machine identifiers such as id/key/status/type enums in English.",
                 "Return valid JSON only.",
             ],
         }
@@ -340,7 +341,7 @@ class MechanismSimulationPlanner:
                 messages=[
                     {
                         "role": "system",
-                        "content": "You are an ecological simulation architect. Return compact JSON only.",
+                        "content": "You are an ecological simulation architect. Return compact JSON only. All user-facing display text must be Simplified Chinese.",
                     },
                     {"role": "user", "content": json.dumps(prompt, ensure_ascii=False)},
                 ],
@@ -404,14 +405,14 @@ class MechanismSimulationPlanner:
     def _fallback_payload(self, *, context: Dict[str, Any], fallback_reason: str) -> Dict[str, Any]:
         raw = {
             "scenario_model": {
-                "scenario_title": "EnvFish explicit fallback mechanism model",
-                "scenario_summary": context.get("simulation_requirement") or "Fallback mechanism model generated without LLM.",
+                "scenario_title": "EnvFish 显式兜底机制模型",
+                "scenario_summary": context.get("simulation_requirement") or "未调用大模型时生成的兜底机制模型。",
                 "core_processes": [
-                    "source pressure accumulation",
-                    "environmental or mobility-mediated transport",
-                    "exposed receptor response",
-                    "livelihood and service stress",
-                    "governance or institutional response",
+                    "源头压力积累",
+                    "环境路径或流动路径传输",
+                    "暴露受体响应",
+                    "生计与服务压力",
+                    "治理或机构响应",
                 ],
                 "state_variables": [
                     {
@@ -436,8 +437,8 @@ class MechanismSimulationPlanner:
                         "legacy_metric": "vulnerability_score",
                     },
                 ],
-                "key_uncertainties": ["LLM unavailable, scenario-specific mechanisms require live regeneration."],
-                "assumptions": ["Fallback is for contract continuity only, not simulation quality evaluation."],
+                "key_uncertainties": ["大模型不可用，场景专属机制需要在模型恢复后重新生成。"],
+                "assumptions": ["该兜底结果仅用于维持数据契约连续性，不代表推演质量评估。"],
             },
             "mechanism_graph": {
                 "nodes": self._fallback_mechanism_nodes(context),
@@ -596,7 +597,7 @@ class MechanismSimulationPlanner:
                 target_region_id=target.home_region_id or target.primary_region,
                 relation_label=label,
                 mechanism=mechanism,
-                trigger_conditions=["fallback_explicit_low_confidence"],
+                trigger_conditions=["低置信显式兜底"],
                 latency="unknown",
                 direction="conditional",
                 scope=scope,
@@ -612,7 +613,7 @@ class MechanismSimulationPlanner:
             ledger.append(
                 {
                     "status": "accepted",
-                    "reason": "fallback_explicit_low_confidence",
+                    "reason": "低置信显式兜底",
                     "origin": "fallback_explicit",
                     "edge_id": edge.edge_id,
                     "source_agent_id": source.agent_id,
@@ -1184,9 +1185,9 @@ class MechanismSimulationPlanner:
                 "id": "mech_source_to_transport",
                 "source": "source_pressure",
                 "target": "transport_pathway",
-                "relation_label": "pressure_enters_transport_pathway",
+                "relation_label": "压力进入传输路径",
                 "mechanism": "源头压力通过场景中的传输路径向外扩散。",
-                "trigger_conditions": ["source pressure exceeds local buffering"],
+                "trigger_conditions": ["源头压力超过本地缓冲能力"],
                 "latency": "unknown",
                 "direction": "positive",
                 "scope": "cross_region",
@@ -1197,9 +1198,9 @@ class MechanismSimulationPlanner:
                 "id": "mech_transport_to_receptor",
                 "source": "transport_pathway",
                 "target": "receptor_response",
-                "relation_label": "pathway_exposes_receptors",
+                "relation_label": "传输路径暴露受体",
                 "mechanism": "传输路径改变受体暴露水平并引发反馈。",
-                "trigger_conditions": ["pathway active", "receptor present"],
+                "trigger_conditions": ["传输路径处于活跃状态", "存在暴露受体"],
                 "latency": "unknown",
                 "direction": "positive",
                 "scope": "cross_scale",
@@ -1215,9 +1216,9 @@ class MechanismSimulationPlanner:
                     "id": f"mech_transport_to_{node_id}",
                     "source": "transport_pathway",
                     "target": node_id,
-                    "relation_label": "pathway_reaches_place",
+                    "relation_label": "传输路径抵达区域",
                     "mechanism": "传输路径与区域锚点存在低置信连接。",
-                    "trigger_conditions": ["fallback region adjacency"],
+                    "trigger_conditions": ["兜底区域邻接"],
                     "latency": "unknown",
                     "direction": "conditional",
                     "scope": "cross_region",
@@ -1237,12 +1238,12 @@ class MechanismSimulationPlanner:
         return [
             {
                 "blueprint_id": self._slug(f"blueprint_{kind}"),
-                "name": f"{kind} mechanism role",
+                "name": f"{kind} 机制角色",
                 "agent_kind": kind,
                 "derived_from_mechanisms": ["source_pressure", "transport_pathway", "receptor_response"],
-                "observables": ["local state change", "relationship activation"],
-                "capabilities": ["propagate signal", "buffer or amplify risk"],
-                "relationship_instructions": ["propose relations only when a mechanism and evidence are available"],
+                "observables": ["本地状态变化", "关系激活迹象"],
+                "capabilities": ["传导信号", "缓冲或放大风险"],
+                "relationship_instructions": ["仅在存在机制与证据时提出关系"],
             }
             for kind in kinds[:10]
         ]

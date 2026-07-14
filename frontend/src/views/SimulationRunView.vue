@@ -1,28 +1,14 @@
 <template>
-  <div class="main-view">
-    <!-- Header -->
-    <header class="app-header">
-      <div class="header-left">
-        <KaleidoNavBrand to="/" />
-      </div>
-
-      <div class="header-right">
-        <button class="layout-toggle" @click="toggleGraphCollapse">
-          {{ viewMode === 'workbench' ? '◧ 展开图谱' : '▣ 收起图谱' }}
-        </button>
-        <WorkflowStepMenu :current-step="3" current-name="推演播放" />
-        <div class="step-divider"></div>
-        <span class="status-indicator" :class="statusClass">
-          <span class="dot"></span>
-          {{ statusText }}
-        </span>
-      </div>
-    </header>
-
-    <!-- Main Content Area -->
-    <main class="content-area">
-      <!-- Left Panel: Graph -->
-      <div class="panel-wrapper left" :style="leftPanelStyle">
+  <KaleidoWorkflowShell
+    :step="3"
+    step-name="推演运行"
+    :status-text="statusText"
+    :status-tone="shellStatusTone"
+    :view-mode="viewMode"
+    :visual-ratio="48"
+    @toggle-visual="toggleGraphCollapse"
+  >
+    <template #visual>
         <template v-if="graphPanelVisible">
           <GraphPanel
             :graphData="animatedGraphData"
@@ -39,45 +25,49 @@
             @toggle-maximize="toggleMaximize('graph')"
           />
         </template>
-      </div>
+    </template>
 
-      <!-- Right Panel: Step3 开始模拟 -->
-      <div class="panel-wrapper right" :style="rightPanelStyle">
-        <Step3Simulation
-          :simulationId="currentSimulationId"
-          :maxRounds="maxRounds"
-          :minutesPerRound="minutesPerRound"
-          :projectData="projectData"
-          :graphData="graphData"
-          :systemLogs="systemLogs"
-          :initialScenarioMode="route.query.scenario_mode"
-          :initialDiffusionTemplate="route.query.diffusion_template"
-          :initialSearchMode="route.query.search_mode"
-          :initialSimulationArchitecture="route.query.simulation_architecture"
-          :animationData="animationData"
-          :isReplayOnly="isReplayOnly"
-          @go-back="handleGoBack"
-          @next-step="handleNextStep"
-          @add-log="addLog"
-          @update-status="updateStatus"
-          @risk-object-focus="updateGraphHighlight"
-          @animation-frame-change="handleAnimationFrameChange"
-        />
-      </div>
-    </main>
-  </div>
+    <Step3Simulation
+      :simulationId="currentSimulationId"
+      :maxRounds="maxRounds"
+      :minutesPerRound="minutesPerRound"
+      :projectData="projectData"
+      :graphData="graphData"
+      :systemLogs="systemLogs"
+      :initialScenarioMode="route.query.scenario_mode"
+      :initialDiffusionTemplate="route.query.diffusion_template"
+      :initialSearchMode="route.query.search_mode"
+      :initialSimulationArchitecture="route.query.simulation_architecture"
+      :animationData="animationData"
+      :isReplayOnly="isReplayOnly"
+      @go-back="handleGoBack"
+      @next-step="handleNextStep"
+      @add-log="addLog"
+      @update-status="updateStatus"
+      @risk-object-focus="updateGraphHighlight"
+      @animation-frame-change="handleAnimationFrameChange"
+    />
+  </KaleidoWorkflowShell>
 </template>
 
 <script setup>
 import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import KaleidoNavBrand from '../components/KaleidoNavBrand.vue'
-import WorkflowStepMenu from '../components/WorkflowStepMenu.vue'
+import KaleidoWorkflowShell from '../components/KaleidoWorkflowShell.vue'
 import GraphPanel from '../components/GraphPanel.vue'
 import Step3Simulation from '../components/Step3Simulation.vue'
 import { getProject, getGraphData } from '../api/graph'
-import { getSimulation, getSimulationAnimation, getSimulationConfig, getSimulationGraphRealtime, stopSimulation, closeSimulationEnv, getEnvStatus } from '../api/simulation'
+import { getSimulation, getSimulationAnimation, getSimulationConfig, getSimulationGraphRealtime } from '../api/simulation'
 import { markWorkflowStep } from '../store/workflowNavigation'
+import { sanitizeDisplayCopy } from '../utils/displayText'
+import {
+  buildPropagationState,
+  buildTimelineBaseState,
+  mergeTimelinePulseState,
+  mergeAnimationPayload,
+  selectPairFallbackEdgeIds,
+} from '../utils/simulationPlayback'
+import { readAnimationMapProjectionMetadata } from '../utils/mapProjection'
 
 const route = useRoute()
 const router = useRouter()
@@ -88,7 +78,7 @@ const props = defineProps({
 })
 
 // Layout State
-const viewMode = ref('workbench') // Step3 推演：默认内容全宽（早期图谱稀疏、50/50 会空半屏）；一键「展开图谱」看演化
+const viewMode = ref('split') // Step3 的核心是运行演化图谱；默认保持左图可见，用户仍可主动收起
 
 // Data State
 const currentSimulationId = ref(route.params.simulationId)
@@ -111,13 +101,13 @@ const isReplayOnly = ref(route.query.replay === '1')
 const leftPanelStyle = computed(() => {
   if (viewMode.value === 'graph' || viewMode.value === 'map') return { width: '100%', opacity: 1, transform: 'translateX(0)' }
   if (viewMode.value === 'workbench') return { width: '0%', opacity: 0, transform: 'translateX(-20px)' }
-  return { width: '50%', opacity: 1, transform: 'translateX(0)' }
+  return { width: '52%', opacity: 1, transform: 'translateX(0)' }
 })
 
 const rightPanelStyle = computed(() => {
   if (viewMode.value === 'workbench') return { width: '100%', opacity: 1, transform: 'translateX(0)' }
   if (viewMode.value === 'graph' || viewMode.value === 'map') return { width: '0%', opacity: 0, transform: 'translateX(20px)' }
-  return { width: '50%', opacity: 1, transform: 'translateX(0)' }
+  return { width: '48%', opacity: 1, transform: 'translateX(0)' }
 })
 
 // --- Status Computed ---
@@ -125,19 +115,37 @@ const statusClass = computed(() => {
   return currentStatus.value
 })
 
+const shellStatusTone = computed(() => {
+  if (statusClass.value === 'error') return 'error'
+  if (statusClass.value === 'processing') return 'processing'
+  return 'ready'
+})
+
 const statusText = computed(() => {
-  if (currentStatus.value === 'error') return 'Error'
-  if (currentStatus.value === 'completed') return 'Completed'
-  return 'Running'
+  if (currentStatus.value === 'processing') return '推演运行中'
+  return '推演结果'
 })
 
 const isSimulating = computed(() => currentStatus.value === 'processing')
 const graphPanelVisible = computed(() => viewMode.value !== 'workbench')
-const shouldRefreshGraph = computed(() => isSimulating.value && graphPanelVisible.value && !isReplayOnly.value)
+const hasAnimationPlayback = computed(() => Array.isArray(animationData.value?.frames) && animationData.value.frames.length > 0)
+const shouldRefreshGraph = computed(() => (
+  isSimulating.value
+  && graphPanelVisible.value
+  && !isReplayOnly.value
+  && !hasAnimationPlayback.value
+))
+const shouldRefreshAnimation = computed(() => (
+  isSimulating.value
+  && graphPanelVisible.value
+  && !isReplayOnly.value
+  && hasAnimationPlayback.value
+))
 const animatedGraphData = computed(() => applyAnimationToGraph(displayGraphData.value, animationFrame.value))
 const animatedMapProjection = computed(() => applyAnimationToMapProjection(mapProjection.value, animationFrame.value))
 
 const GRAPH_REFRESH_INTERVAL_MS = 7000
+const ANIMATION_REFRESH_INTERVAL_MS = 3000
 const GRAPH_COMPACT_NODE_THRESHOLD = 220
 const GRAPH_COMPACT_EDGE_THRESHOLD = 260
 
@@ -152,6 +160,9 @@ const addLog = (msg) => {
 
 const updateStatus = (status) => {
   currentStatus.value = status
+  if (status === 'completed' && animationData.value) {
+    Promise.resolve().then(() => loadAnimationData({ incremental: true, silent: true }))
+  }
 }
 
 const updateGraphHighlight = (payload = {}) => {
@@ -171,7 +182,7 @@ const handleAnimationFrameChange = (frame = null) => {
     nodeIds: Array.isArray(frame.focus_ids?.node_ids) ? frame.focus_ids.node_ids : [],
     nodeNames: [],
     edgeIds: Array.isArray(frame.focus_ids?.edge_ids) ? frame.focus_ids.edge_ids : [],
-    label: frame.narrative?.title || '',
+    label: sanitizeDisplayCopy(frame.narrative?.title, '当前轮次'),
     mode: 'animation'
   }
 }
@@ -245,6 +256,96 @@ const maxStateDelay = (items = []) => {
   )
 }
 
+const withAnimationAttributes = (attributes = {}, state = {}) => ({
+  ...attributes,
+  animation_status: state.status || 'steady',
+  raw_animation_status: state.raw_animation_status,
+  first_seen_round: state.first_seen_round,
+  last_active_round: state.last_active_round,
+  delay_ms: state.delay_ms,
+  timeline_delay_ms: state.timeline_delay_ms,
+  animation_elapsed_ms: state.animation_elapsed_ms,
+  animation_progress: state.animation_progress,
+  animation_due: state.animation_due,
+  value: state.value,
+  delta: state.delta,
+  state_status: state.state_status,
+  propagation_event_id: state.propagation_event_id,
+  propagation_kind: state.propagation_kind,
+  propagation_phase: state.propagation_phase,
+  propagation_role: state.propagation_role,
+  propagation_intensity: state.propagation_intensity,
+  propagation_confidence: state.propagation_confidence,
+  propagation_grounding: state.propagation_grounding,
+  propagation_current: state.propagation_current,
+  propagation_path_index: state.propagation_path_index,
+  propagation_path_count: state.propagation_path_count,
+})
+
+const pulseStatusRank = status => ({ hidden: 0, steady: 1, faded: 2, new: 3, active: 4 }[status] || 0)
+
+const mergeNodePulseState = (map, id, next) => {
+  if (!id || !next) return
+  const current = map.get(id)
+  if (
+    !current
+    || pulseStatusRank(next.status) > pulseStatusRank(current.status)
+    || (
+      pulseStatusRank(next.status) === pulseStatusRank(current.status)
+      && Number(next.animation_progress || 0) > Number(current.animation_progress || 0)
+    )
+  ) {
+    map.set(id, next)
+  }
+}
+
+const buildResolvedPropagationState = (
+  edges,
+  propagationState,
+  { allowEndpointPulse = () => true } = {},
+) => {
+  const sourceEdges = Array.isArray(edges) ? edges : []
+  const fallbackEdgeIds = selectPairFallbackEdgeIds(sourceEdges, propagationState.pairStates)
+  const pulseByEdge = new Map()
+  const nodeStates = new Map(propagationState.nodeStates)
+
+  sourceEdges.forEach((edge) => {
+    const edgeId = readEdgeId(edge)
+    const sourceId = readEdgeSourceId(edge)
+    const targetId = readEdgeTargetId(edge)
+    const pairKey = `${sourceId}->${targetId}`
+    const pulse = propagationState.edgeStates.get(edgeId)
+      || (fallbackEdgeIds.has(edgeId) ? propagationState.pairStates.get(pairKey) : null)
+    if (!pulse) return
+    pulseByEdge.set(edge, pulse)
+    if (!allowEndpointPulse(edge)) return
+
+    const edgeProgress = Math.max(0, Math.min(1, Number(pulse.animation_progress || 0)))
+    const sourceProgress = Math.max(0, Math.min(1, edgeProgress / 0.24))
+    if (sourceProgress > 0) {
+      mergeNodePulseState(nodeStates, sourceId, {
+        ...pulse,
+        id: sourceId,
+        animation_progress: sourceProgress,
+        animation_due: true,
+        propagation_role: 'path_source',
+      })
+    }
+    const targetProgress = Math.max(0, Math.min(1, (edgeProgress - 0.7) / 0.3))
+    if (targetProgress > 0) {
+      mergeNodePulseState(nodeStates, targetId, {
+        ...pulse,
+        id: targetId,
+        animation_progress: targetProgress,
+        animation_due: true,
+        propagation_role: 'path_target',
+      })
+    }
+  })
+
+  return { nodeStates, pulseByEdge, fallbackEdgeIds }
+}
+
 const normalizeAnimationNode = (node = {}, index = 0) => {
   const attrs = node.attributes || {}
   const lat = toNumber(node.lat ?? attrs.lat)
@@ -253,7 +354,7 @@ const normalizeAnimationNode = (node = {}, index = 0) => {
     ...node,
     uuid: readNodeId(node) || `animation_node_${index}`,
     id: readNodeId(node) || `animation_node_${index}`,
-    name: node.name || `Node ${index + 1}`,
+    name: sanitizeDisplayCopy(node.name, '') || `节点 ${index + 1}`,
     labels: Array.isArray(node.labels) ? node.labels : ['Entity'],
     kind: node.kind || attrs.kind || nodeKindFromNode(node),
     attributes: {
@@ -303,6 +404,7 @@ const buildGraphFromAnimationLayout = (layout = {}) => {
 const buildMapProjectionFromAnimationLayout = (layout = {}) => {
   const graph = buildGraphFromAnimationLayout(layout)
   if (!graph) return null
+  const spatialMetadata = readAnimationMapProjectionMetadata(layout, mapProjection.value || {})
   const nodes = graph.nodes
     .filter((node) => Number.isFinite(toNumber(node.attributes?.lat)) && Number.isFinite(toNumber(node.attributes?.lon)))
     .map((node) => ({
@@ -329,8 +431,11 @@ const buildMapProjectionFromAnimationLayout = (layout = {}) => {
     })
   return {
     simulation_id: currentSimulationId.value,
-    source_mode: 'animation_layout',
-    map_seed_id: '',
+    source_mode: spatialMetadata.source_mode,
+    map_seed_id: spatialMetadata.map_seed_id,
+    geographic_grounding: spatialMetadata.geographic_grounding,
+    data_quality: spatialMetadata.data_quality,
+    selection_summary: spatialMetadata.selection_summary,
     center: layout.center || mapProjection.value?.center || { lat: 20, lon: 0 },
     radius_m: Number(layout.radius_m || 0),
     zoom_hint: Number(layout.zoom_hint || 0) || mapProjection.value?.zoom_hint || 9,
@@ -339,6 +444,7 @@ const buildMapProjectionFromAnimationLayout = (layout = {}) => {
     nodes,
     edges,
     meta: {
+      ...spatialMetadata.meta,
       source: 'animation_layout',
       node_count: nodes.length,
       edge_count: edges.length
@@ -354,32 +460,27 @@ const applyAnimationToGraph = (graph, frame) => {
   const focusEdgeIds = new Set((frame.focus_ids?.edge_ids || []).map((item) => String(item || '')).filter(Boolean))
   const nodeStates = buildStateMap((frame.node_states || []).map((state) => buildTimelineState(state, frame, nodeMaxDelay, focusNodeIds)))
   const edgeStates = buildStateMap((frame.edge_states || []).map((state) => buildTimelineState(state, frame, edgeMaxDelay, focusEdgeIds)))
-  if (!nodeStates.size) return graph
+  const propagationState = buildPropagationState(frame)
+  if (!nodeStates.size && !propagationState.hasTimeline) return graph
+  const graphEdges = Array.isArray(graph.edges) ? graph.edges : []
+  const resolvedPropagation = buildResolvedPropagationState(graphEdges, propagationState)
   const nodes = (Array.isArray(graph.nodes) ? graph.nodes : [])
     .map((node) => {
       const nodeId = readNodeId(node)
-      const state = nodeStates.get(nodeId) || { status: 'hidden', raw_animation_status: 'hidden', animation_progress: 0 }
+      const state = mergeTimelinePulseState(
+        buildTimelineBaseState(nodeStates.get(nodeId), {
+          hasTimeline: propagationState.hasTimeline,
+          currentRound: frame.round,
+        }),
+        resolvedPropagation.nodeStates.get(nodeId),
+      )
       return {
         ...node,
-        attributes: {
-          ...(node?.attributes || {}),
-          animation_status: state.status || 'steady',
-          raw_animation_status: state.raw_animation_status,
-          first_seen_round: state.first_seen_round,
-          last_active_round: state.last_active_round,
-          delay_ms: state.delay_ms,
-          timeline_delay_ms: state.timeline_delay_ms,
-          animation_elapsed_ms: state.animation_elapsed_ms,
-          animation_progress: state.animation_progress,
-          animation_due: state.animation_due,
-          value: state.value,
-          delta: state.delta,
-          state_status: state.state_status
-        }
+        attributes: withAnimationAttributes(node?.attributes || {}, state)
       }
     })
   const visibleNodeIds = new Set(nodes.map((node) => readNodeId(node)))
-  const edges = (Array.isArray(graph.edges) ? graph.edges : [])
+  const edges = graphEdges
     .filter((edge) => {
       const sourceId = readEdgeSourceId(edge)
       const targetId = readEdgeTargetId(edge)
@@ -387,24 +488,17 @@ const applyAnimationToGraph = (graph, frame) => {
     })
     .map((edge) => {
       const edgeId = readEdgeId(edge)
-      const state = edgeStates.get(edgeId) || { status: 'hidden', raw_animation_status: 'hidden', animation_progress: 0 }
+      const pulseState = resolvedPropagation.pulseByEdge.get(edge)
+      const state = mergeTimelinePulseState(
+        buildTimelineBaseState(edgeStates.get(edgeId), {
+          hasTimeline: propagationState.hasTimeline,
+          currentRound: frame.round,
+        }),
+        pulseState,
+      )
       return {
         ...edge,
-        attributes: {
-          ...(edge?.attributes || {}),
-          animation_status: state.status || 'steady',
-          raw_animation_status: state.raw_animation_status,
-          first_seen_round: state.first_seen_round,
-          last_active_round: state.last_active_round,
-          delay_ms: state.delay_ms,
-          timeline_delay_ms: state.timeline_delay_ms,
-          animation_elapsed_ms: state.animation_elapsed_ms,
-          animation_progress: state.animation_progress,
-          animation_due: state.animation_due,
-          value: state.value,
-          delta: state.delta,
-          state_status: state.state_status
-        }
+        attributes: withAnimationAttributes(edge?.attributes || {}, state)
       }
     })
   return {
@@ -428,47 +522,67 @@ const applyAnimationToMapProjection = (projection, frame) => {
   const focusEdgeIds = new Set((frame.focus_ids?.edge_ids || []).map((item) => String(item || '')).filter(Boolean))
   const nodeStates = buildStateMap((frame.node_states || []).map((state) => buildTimelineState(state, frame, nodeMaxDelay, focusNodeIds)))
   const edgeStates = buildStateMap((frame.edge_states || []).map((state) => buildTimelineState(state, frame, edgeMaxDelay, focusEdgeIds)))
-  if (!nodeStates.size) return projection
-  const nodes = (Array.isArray(projection.nodes) ? projection.nodes : []).map((node) => {
-    const state = nodeStates.get(readNodeId(node)) || { status: 'hidden', raw_animation_status: 'hidden', animation_progress: 0 }
+  const propagationState = buildPropagationState(frame)
+  if (!nodeStates.size && !propagationState.hasTimeline) return projection
+  const projectionNodes = Array.isArray(projection.nodes) ? projection.nodes : []
+  const projectionEdges = Array.isArray(projection.edges) ? projection.edges : []
+  const projectionNodeById = new Map(projectionNodes.map(node => [readNodeId(node), node]))
+  const projectionGrounding = String(
+    projection?.geographic_grounding || projection?.meta?.geographic_grounding || '',
+  ).trim().toLowerCase()
+  const isGeographicProjectionNode = (node) => {
+    if (node?.is_geographic === true || node?.attributes?.is_geographic === true) return true
+    if (node?.is_geographic === false || node?.attributes?.is_geographic === false) return false
+    const placement = String(node?.attributes?.placement || node?.placement || '').trim().toLowerCase()
+    if (['geographic', 'map_seed', 'anchored', 'real'].includes(placement)) return true
+    if (['synthetic', 'non_geographic', 'radial', 'hash'].includes(placement)) return false
+    return projectionGrounding === 'map_seed'
+  }
+  const mapPropagationState = {
+    ...propagationState,
+    nodeStates: new Map(
+      [...propagationState.nodeStates.entries()]
+        .filter(([nodeId]) => isGeographicProjectionNode(projectionNodeById.get(nodeId))),
+    ),
+  }
+  const resolvedPropagation = buildResolvedPropagationState(projectionEdges, mapPropagationState, {
+    allowEndpointPulse: edge => (
+      isGeographicProjectionNode(projectionNodeById.get(readEdgeSourceId(edge)))
+      && isGeographicProjectionNode(projectionNodeById.get(readEdgeTargetId(edge)))
+    ),
+  })
+  const nodes = projectionNodes.map((node) => {
+    const nodeId = readNodeId(node)
+    const state = mergeTimelinePulseState(
+      buildTimelineBaseState(nodeStates.get(nodeId), {
+        hasTimeline: propagationState.hasTimeline,
+        currentRound: frame.round,
+      }),
+      resolvedPropagation.nodeStates.get(nodeId),
+    )
     return {
       ...node,
-      attributes: {
-        ...(node?.attributes || {}),
-        animation_status: state.status || 'steady',
-        raw_animation_status: state.raw_animation_status,
-        first_seen_round: state.first_seen_round,
-        last_active_round: state.last_active_round,
-        delay_ms: state.delay_ms,
-        timeline_delay_ms: state.timeline_delay_ms,
-        animation_elapsed_ms: state.animation_elapsed_ms,
-        animation_progress: state.animation_progress,
-        animation_due: state.animation_due
-      }
+      attributes: withAnimationAttributes(node?.attributes || {}, state)
     }
   })
   const visibleNodeIds = new Set(nodes.map((node) => readNodeId(node)))
-  const edges = (Array.isArray(projection.edges) ? projection.edges : []).filter((edge) => {
+  const edges = projectionEdges.filter((edge) => {
     const sourceId = readEdgeSourceId(edge)
     const targetId = readEdgeTargetId(edge)
     return visibleNodeIds.has(sourceId) && visibleNodeIds.has(targetId)
   }).map((edge) => {
     const edgeId = readEdgeId(edge)
-    const state = edgeStates.get(edgeId) || { status: 'hidden', raw_animation_status: 'hidden', animation_progress: 0 }
+    const pulseState = resolvedPropagation.pulseByEdge.get(edge)
+    const state = mergeTimelinePulseState(
+      buildTimelineBaseState(edgeStates.get(edgeId), {
+        hasTimeline: propagationState.hasTimeline,
+        currentRound: frame.round,
+      }),
+      pulseState,
+    )
     return {
       ...edge,
-      attributes: {
-        ...(edge?.attributes || {}),
-        animation_status: state.status || 'steady',
-        raw_animation_status: state.raw_animation_status,
-        first_seen_round: state.first_seen_round,
-        last_active_round: state.last_active_round,
-        delay_ms: state.delay_ms,
-        timeline_delay_ms: state.timeline_delay_ms,
-        animation_elapsed_ms: state.animation_elapsed_ms,
-        animation_progress: state.animation_progress,
-        animation_due: state.animation_due
-      }
+      attributes: withAnimationAttributes(edge?.attributes || {}, state)
     }
   })
   return {
@@ -514,7 +628,16 @@ const buildMapProjectionSignature = (projection) => {
   const nodes = Array.isArray(projection?.nodes) ? projection.nodes : []
   const edges = Array.isArray(projection?.edges) ? projection.edges : []
   const center = projection?.center || {}
+  const dataQuality = projection?.data_quality || {}
+  const meta = projection?.meta || {}
   return [
+    projection?.source_mode || '',
+    projection?.map_seed_id ?? 'null',
+    projection?.geographic_grounding || meta?.geographic_grounding || '',
+    dataQuality?.status || '',
+    String(dataQuality?.formal_ready ?? ''),
+    dataQuality?.spatial_fixture_id || '',
+    meta?.projection_version || meta?.layout_version || meta?.spatial_fixture_id || '',
     Number(center.lat || 0).toFixed(5),
     Number(center.lon || 0).toFixed(5),
     nodes.map((node) => `${node?.uuid || ''}:${node?.attributes?.lat || ''}:${node?.attributes?.lon || ''}`).join('|'),
@@ -678,7 +801,7 @@ const buildMapProjectionFallback = ({ graph, layersPayload = null, sourceMode = 
     if (!Number.isFinite(lat) || !Number.isFinite(lon)) return
     const normalized = {
       uuid: node?.uuid || node?.id || `node_${index}`,
-      name: node?.name || `Node ${index + 1}`,
+      name: sanitizeDisplayCopy(node?.name, '') || `节点 ${index + 1}`,
       labels: Array.isArray(node?.labels) ? node.labels : [],
       summary: node?.summary || '',
       kind: node?.kind || nodeKindFromNode(node),
@@ -766,50 +889,10 @@ const toggleGraphCollapse = () => {
   viewMode.value = viewMode.value === 'workbench' ? 'split' : 'workbench'
 }
 
-const handleGoBack = async () => {
-  // 在返回 Step 2 之前，先关闭正在运行的模拟
-  addLog('准备返回 Step 2，正在关闭模拟...')
-  
-  // 停止轮询
+const handleGoBack = () => {
+  // 页面导航只停止本地轮询；推演进程仅响应用户明确的停止操作。
   stopGraphRefresh()
-  
-  try {
-    // 先尝试优雅关闭模拟环境
-    const envStatusRes = await getEnvStatus({ simulation_id: currentSimulationId.value })
-    
-    if (envStatusRes.success && envStatusRes.data?.env_alive) {
-      addLog('正在关闭模拟环境...')
-      try {
-        await closeSimulationEnv({ 
-          simulation_id: currentSimulationId.value,
-          timeout: 10
-        })
-        addLog('✓ 模拟环境已关闭')
-      } catch (closeErr) {
-        addLog(`关闭模拟环境失败，尝试强制停止...`)
-        try {
-          await stopSimulation({ simulation_id: currentSimulationId.value })
-          addLog('✓ 模拟已强制停止')
-        } catch (stopErr) {
-          addLog(`强制停止失败: ${stopErr.message}`)
-        }
-      }
-    } else {
-      // 环境未运行，检查是否需要停止进程
-      if (isSimulating.value) {
-        addLog('正在停止模拟进程...')
-        try {
-          await stopSimulation({ simulation_id: currentSimulationId.value })
-          addLog('✓ 模拟已停止')
-        } catch (err) {
-          addLog(`停止模拟失败: ${err.message}`)
-        }
-      }
-    }
-  } catch (err) {
-    addLog(`检查模拟状态失败: ${err.message}`)
-  }
-  
+
   // 返回到 Step 2 (环境搭建)
   const query = {}
   if (route.query.scenario_mode) query.scenario_mode = route.query.scenario_mode
@@ -909,29 +992,62 @@ const loadSimulationData = async () => {
   }
 }
 
-const loadAnimationData = async () => {
-  if (!currentSimulationId.value) return
+let animationLoadInFlight = false
+
+const animationPayloadSignature = (payload) => {
+  const frames = Array.isArray(payload?.frames) ? payload.frames : []
+  const layout = payload?.layout || {}
+  const timeline = payload?.timeline || {}
+  return [
+    timeline.contract_version || '',
+    Number(timeline.cursor || 0),
+    frames.length,
+    Number(frames[frames.length - 1]?.round || 0),
+    Array.isArray(layout.nodes) ? layout.nodes.length : 0,
+    Array.isArray(layout.edges) ? layout.edges.length : 0
+  ].join(':')
+}
+
+const loadAnimationData = async ({ incremental = false, silent = false } = {}) => {
+  if (!currentSimulationId.value || animationLoadInFlight) return false
+  animationLoadInFlight = true
   try {
-    const res = await getSimulationAnimation(currentSimulationId.value)
+    const cursor = Number(animationData.value?.timeline?.cursor || 0)
+    const frameRound = (Array.isArray(animationData.value?.frames) ? animationData.value.frames : [])
+      .reduce((maximum, frame) => Math.max(maximum, Number(frame?.round ?? frame?.round_num) || 0), 0)
+    const params = incremental && animationData.value
+      ? { after_cursor: cursor, after_round: frameRound }
+      : {}
+    const res = await getSimulationAnimation(currentSimulationId.value, params)
     if (res.success && res.data) {
-      animationData.value = res.data
-      const animationGraph = buildGraphFromAnimationLayout(res.data.layout || {})
+      const nextPayload = incremental && animationData.value
+        ? mergeAnimationPayload(animationData.value, res.data)
+        : res.data
+      const changed = animationPayloadSignature(nextPayload) !== animationPayloadSignature(animationData.value)
+      if (changed || !animationData.value) {
+        animationData.value = nextPayload
+      }
+      const animationGraph = buildGraphFromAnimationLayout(nextPayload.layout || {})
       if (animationGraph) {
         applyGraphData(animationGraph, { compact: false })
-        const animationProjection = buildMapProjectionFromAnimationLayout(res.data.layout || {})
+        const animationProjection = buildMapProjectionFromAnimationLayout(nextPayload.layout || {})
         if (animationProjection) {
           applyMapProjection(animationProjection)
         }
       }
-      const firstFrame = Array.isArray(res.data.frames) ? res.data.frames[0] : null
-      handleAnimationFrameChange(firstFrame)
-      addLog(`动画数据加载成功：${res.data.frames?.length || 0} 帧`)
+      if (!silent && !incremental) {
+        addLog(`动画数据加载成功：${nextPayload.frames?.length || 0} 帧`)
+      }
+      return true
     }
   } catch (err) {
-    if (isReplayOnly.value) {
+    if (isReplayOnly.value && !silent) {
       addLog(`动画数据加载失败: ${err.message}`)
     }
+  } finally {
+    animationLoadInFlight = false
   }
+  return false
 }
 
 const applyMapSeedGraph = (simData) => {
@@ -1032,11 +1148,17 @@ const refreshGraph = async () => {
   } finally {
     graphLoading.value = false
     graphRefreshInFlight = false
+    if (hasAnimationPlayback.value) {
+      loadAnimationData({ incremental: true, silent: true })
+    } else if (isSimulating.value) {
+      loadAnimationData({ silent: true })
+    }
   }
 }
 
 // --- Auto Refresh Logic ---
 let graphRefreshTimer = null
+let animationRefreshTimer = null
 let graphRefreshInFlight = false
 
 const startGraphRefresh = () => {
@@ -1054,6 +1176,20 @@ const stopGraphRefresh = () => {
   }
 }
 
+const startAnimationRefresh = () => {
+  if (animationRefreshTimer) return
+  loadAnimationData({ incremental: true, silent: true })
+  animationRefreshTimer = setInterval(() => {
+    loadAnimationData({ incremental: true, silent: true })
+  }, ANIMATION_REFRESH_INTERVAL_MS)
+}
+
+const stopAnimationRefresh = () => {
+  if (!animationRefreshTimer) return
+  clearInterval(animationRefreshTimer)
+  animationRefreshTimer = null
+}
+
 watch(shouldRefreshGraph, (newValue) => {
   if (newValue) {
     startGraphRefresh()
@@ -1062,12 +1198,20 @@ watch(shouldRefreshGraph, (newValue) => {
   }
 }, { immediate: true })
 
+watch(shouldRefreshAnimation, (newValue) => {
+  if (newValue) {
+    startAnimationRefresh()
+  } else {
+    stopAnimationRefresh()
+  }
+}, { immediate: true })
+
 onMounted(() => {
   addLog('SimulationRunView 初始化')
   markWorkflowStep(2, {
     visited: true,
     status: 'done',
-    summary: '场景配置已完成',
+    summary: '场景配置',
     route: { name: 'Simulation', params: { simulationId: currentSimulationId.value }, query: { ...route.query } }
   })
   markWorkflowStep(3, {
@@ -1109,6 +1253,7 @@ onMounted(() => {
 
 onUnmounted(() => {
   stopGraphRefresh()
+  stopAnimationRefresh()
 })
 </script>
 
@@ -1266,7 +1411,7 @@ onUnmounted(() => {
 
 .panel-wrapper.right {
   height: 100%;
-  overflow-y: auto;
+  overflow-y: hidden;
   overflow-x: hidden;
 }
 </style>

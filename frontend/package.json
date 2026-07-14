@@ -7,6 +7,9 @@
     "dev": "vite --host",
     "build": "vite build",
     "preview": "vite preview",
+    "test:display-text": "node scripts/display-text-regression.mjs",
+    "test:simulation-playback": "node scripts/simulation-playback-regression.mjs",
+    "test:map-relation-geometry": "node scripts/map-relation-geometry-regression.mjs",
     "test:space-forecast": "node scripts/space-forecast-regression.mjs"
   },
   "dependencies": {

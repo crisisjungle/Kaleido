@@ -1,6 +1,14 @@
 <template>
   <div class="leaflet-map-shell">
-    <div ref="mapEl" class="leaflet-map-picker"></div>
+    <div
+      ref="mapEl"
+      class="leaflet-map-picker"
+      :data-map-zoom="currentMapZoom"
+      :data-map-wheel-events="mapWheelEventCount"
+      :data-map-wheel-delta="lastMapWheelDelta"
+      :data-map-zoom-target="mapZoomTargetDisplay"
+      :data-map-zoom-steps="mapZoomStepCount"
+    ></div>
     <transition name="map-overlay-fade">
       <div v-if="showMapOverlay" class="map-loading-overlay" :class="`is-${mapVisualState}`">
         <div class="map-loading-card">
@@ -21,6 +29,7 @@
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import L from 'leaflet'
 import 'leaflet/dist/leaflet.css'
+import { safeDisplayText, safeDisplayToken } from '../utils/displayText'
 
 const props = defineProps({
   center: {
@@ -43,6 +52,10 @@ const props = defineProps({
     type: Array,
     default: () => []
   },
+  fitKey: {
+    type: String,
+    default: ''
+  },
   readOnly: {
     type: Boolean,
     default: false
@@ -53,6 +66,11 @@ const emit = defineEmits(['pick', 'ready'])
 
 const mapEl = ref(null)
 const mapVisualState = ref('loading')
+const currentMapZoom = ref(Number(props.zoom) || 2)
+const mapWheelEventCount = ref(0)
+const lastMapWheelDelta = ref(0)
+const mapZoomTargetDisplay = ref('')
+const mapZoomStepCount = ref(0)
 let map = null
 let baseTileLayer = null
 let overlayGroup = null
@@ -65,8 +83,71 @@ let resizeFrame = null
 let fitFrame = null
 let readyTimer = null
 let fallbackTimer = null
-let lastLayersSignature = ''
+let smoothWheelHandler = null
+let smoothZoomFrame = null
+let smoothZoomTarget = null
+let smoothZoomAnchor = null
+let lastLayersReference = null
+let lastFittedKey = ''
+let hasFittedInitialContent = false
 let loadedTileCount = 0
+const renderedLayerStates = new Map()
+
+const clampMapZoom = (value, min, max) => Math.min(Math.max(Number(value) || 0, min), max)
+
+const cancelSmoothWheelZoom = () => {
+  if (smoothZoomFrame !== null) {
+    cancelAnimationFrame(smoothZoomFrame)
+    smoothZoomFrame = null
+  }
+  smoothZoomTarget = null
+  smoothZoomAnchor = null
+  mapZoomTargetDisplay.value = ''
+}
+
+const stepSmoothWheelZoom = () => {
+  smoothZoomFrame = null
+  if (!map || smoothZoomTarget === null || !smoothZoomAnchor) return
+  mapZoomStepCount.value += 1
+  const current = map.getZoom()
+  const difference = smoothZoomTarget - current
+  if (Math.abs(difference) < 0.001) {
+    map.setZoomAround(smoothZoomAnchor, smoothZoomTarget, { animate: false })
+    smoothZoomTarget = null
+    smoothZoomAnchor = null
+    mapZoomTargetDisplay.value = ''
+    return
+  }
+  const step = clampMapZoom(difference * 0.24, -0.18, 0.18)
+  map.setZoomAround(smoothZoomAnchor, current + step, { animate: false })
+  smoothZoomFrame = requestAnimationFrame(stepSmoothWheelZoom)
+}
+
+const bindSmoothWheelZoom = () => {
+  if (!map || !mapEl.value || smoothWheelHandler) return
+  smoothWheelHandler = (event) => {
+    if (!map) return
+    event.preventDefault()
+    event.stopPropagation()
+    const modeScale = event.deltaMode === 1
+      ? 16
+      : event.deltaMode === 2
+        ? Math.max(320, mapEl.value?.clientHeight || 0)
+        : 1
+    const pixelDelta = Number(event.deltaY || 0) * modeScale
+    if (!Number.isFinite(pixelDelta) || pixelDelta === 0) return
+    mapWheelEventCount.value += 1
+    lastMapWheelDelta.value = Number(pixelDelta.toFixed(3))
+    const minZoom = Number.isFinite(map.getMinZoom()) ? map.getMinZoom() : 0
+    const maxZoom = Number.isFinite(map.getMaxZoom()) ? map.getMaxZoom() : 19
+    const base = smoothZoomTarget === null ? map.getZoom() : smoothZoomTarget
+    smoothZoomTarget = clampMapZoom(base - (pixelDelta / 440), minZoom, maxZoom)
+    mapZoomTargetDisplay.value = smoothZoomTarget.toFixed(4)
+    smoothZoomAnchor = map.mouseEventToContainerPoint(event)
+    if (smoothZoomFrame === null) smoothZoomFrame = requestAnimationFrame(stepSmoothWheelZoom)
+  }
+  mapEl.value.addEventListener('wheel', smoothWheelHandler, { passive: false })
+}
 
 const CATEGORY_LABELS = {
   ecology: '生态对象',
@@ -217,7 +298,7 @@ const toDisplayLabel = (value) => {
   if (key === 'coastal edge') return '海岸线'
   if (key === 'river segment') return '河流河段'
 
-  return text
+  return safeDisplayToken(text, '')
 }
 
 const formatConfidence = (value) => {
@@ -248,10 +329,19 @@ const isPointWithinSelectedRadius = (lat, lon) => {
 }
 
 const buildPopupHtml = ({ title = '', subtitle = '', summary = '', fields = [] } = {}) => {
+  const safeTitle = safeDisplayText(title, '')
+  const safeSubtitle = safeDisplayText(subtitle, '')
+  const safeSummary = safeDisplayText(summary, '')
   const safeFields = Array.isArray(fields)
-    ? fields.filter((item) => item && item.value !== undefined && item.value !== null && String(item.value).trim())
+    ? fields
+        .filter((item) => item && item.value !== undefined && item.value !== null && String(item.value).trim())
+        .map((item) => ({
+          label: safeDisplayText(item.label, '属性'),
+          value: safeDisplayText(item.value, '')
+        }))
+        .filter((item) => item.value)
     : []
-  if (!title && !subtitle && !summary && safeFields.length === 0) return ''
+  if (!safeTitle && !safeSubtitle && !safeSummary && safeFields.length === 0) return ''
 
   const fieldsHtml = safeFields.length
     ? `<div class="map-popup-fields">${safeFields
@@ -261,9 +351,9 @@ const buildPopupHtml = ({ title = '', subtitle = '', summary = '', fields = [] }
 
   return `
     <div class="map-popup">
-      ${title ? `<div class="map-popup-title">${escapeHtml(title)}</div>` : ''}
-      ${subtitle ? `<div class="map-popup-subtitle">${escapeHtml(subtitle)}</div>` : ''}
-      ${summary ? `<div class="map-popup-summary">${escapeHtml(summary)}</div>` : ''}
+      ${safeTitle ? `<div class="map-popup-title">${escapeHtml(safeTitle)}</div>` : ''}
+      ${safeSubtitle ? `<div class="map-popup-subtitle">${escapeHtml(safeSubtitle)}</div>` : ''}
+      ${safeSummary ? `<div class="map-popup-summary">${escapeHtml(safeSummary)}</div>` : ''}
       ${fieldsHtml}
     </div>
   `
@@ -277,7 +367,7 @@ const buildPointPopup = (point, layer) => {
   const confidence = formatConfidence(meta.nodeConfidence)
   const isRemoteSensingPoint = meta.featureSourceKind === 'detected'
 
-  let summary = point?.popupSummary || ''
+  let summary = safeDisplayText(point?.popupSummary, '')
   if (!summary) {
     if (isRemoteSensingPoint && subtype) {
       summary = `这是地图分析中识别出的“${subtype}”节点。`
@@ -286,7 +376,7 @@ const buildPointPopup = (point, layer) => {
     } else if (subtype) {
       summary = `这是一个“${subtype}”相关点位。`
     } else if (layer?.note) {
-      summary = layer.note
+      summary = safeDisplayText(layer.note, '')
     }
   }
 
@@ -305,14 +395,14 @@ const buildPointPopup = (point, layer) => {
 
 const buildFeaturePopup = (feature, layer) => {
   const properties = feature?.properties || {}
-  const coverType = toDisplayLabel(properties?.class_name || properties?.class_name_zh)
+  const coverType = toDisplayLabel(properties?.class_name_zh || properties?.class_name)
   const share = properties?.pixel_share_pct !== undefined && properties?.pixel_share_pct !== null
     ? `${properties.pixel_share_pct}%`
     : ''
   const isRemoteSensingLayer = Boolean(coverType) || String(layer?.id || '').startsWith('worldcover_')
   const summary = isRemoteSensingLayer
     ? (coverType ? `这块区域以“${coverType}”为主。` : '这是地图分析中识别出的一个覆盖斑块。')
-    : (properties?.summary || layer?.note || '')
+    : safeDisplayText(properties?.summary || layer?.note, '')
 
   return buildPopupHtml({
     title: toDisplayLabel(properties?.name || layer?.name || '区域'),
@@ -416,6 +506,7 @@ const scheduleFitToContent = () => {
     const bounds = L.featureGroup(layers).getBounds()
     if (!bounds.isValid()) return
 
+    cancelSmoothWheelZoom()
     map.fitBounds(bounds.pad(0.08), {
       animate: false,
       padding: [28, 28],
@@ -438,8 +529,23 @@ const createMap = () => {
 
   map = L.map(mapEl.value, {
     zoomControl: true,
-    preferCanvas: true
+    preferCanvas: true,
+    // Leaflet defaults to integer zoom levels and a 40ms wheel batch, which
+    // reads as repeated pulses on a dense map. Keep fractional zoom so mouse
+    // wheels and trackpads move the camera continuously around the cursor.
+    zoomSnap: 0,
+    zoomDelta: 0.25,
+    wheelDebounceTime: 16,
+    wheelPxPerZoomLevel: 180,
+    scrollWheelZoom: false,
+    touchZoom: true,
+    zoomAnimation: true
   }).setView(props.center, props.zoom)
+  currentMapZoom.value = Number(map.getZoom().toFixed(4))
+  map.on('zoom', () => {
+    currentMapZoom.value = Number(map.getZoom().toFixed(4))
+  })
+  bindSmoothWheelZoom()
 
   baseTileLayer = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
     attribution: '&copy; OpenStreetMap contributors',
@@ -541,91 +647,285 @@ const toGeoJson = (data) => {
   return null
 }
 
+const stableItemKey = (value, fallback) => {
+  const token = String(value ?? '').trim()
+  return token || fallback
+}
+
+const pointItemKey = (point, index) => stableItemKey(
+  point?.renderKey || point?.id || point?.uuid || point?.nodeId || point?.node_id,
+  `point:${index}:${Number(point?.lat ?? point?.latitude ?? point?.y).toFixed(6)}:${Number(point?.lon ?? point?.lng ?? point?.longitude ?? point?.x).toFixed(6)}`
+)
+
+const featureItemKey = (feature, index) => stableItemKey(
+  feature?.id
+    || feature?.properties?.renderKey
+    || feature?.properties?.id
+    || feature?.properties?.uuid
+    || feature?.properties?.edge_id,
+  `feature:${index}:${feature?.geometry?.type || 'geometry'}`
+)
+
+const pointStyle = (point, layer) => {
+  const color = layer?.color || '#1f5d45'
+  const weight = layer?.weight || 2
+  const opacity = layer?.opacity ?? 0.75
+  return {
+    radius: point?.radius || 6,
+    color: point?.color || color,
+    weight: point?.weight ?? weight,
+    opacity: point?.opacity ?? opacity,
+    fillColor: point?.fillColor || color,
+    fillOpacity: point?.fillOpacity ?? 0.8
+  }
+}
+
+const featureStyle = (feature, layer) => {
+  const properties = feature?.properties || {}
+  const color = layer?.color || '#1f5d45'
+  const opacity = layer?.opacity ?? 0.75
+  const featureColor = properties.color || color
+  const geometryType = String(feature?.geometry?.type || '')
+  const isPolygon = geometryType.includes('Polygon')
+  return {
+    color: featureColor,
+    weight: properties.weight ?? layer?.weight ?? 2,
+    opacity: properties.opacity ?? opacity,
+    dashArray: properties.dashArray ?? layer?.dashArray,
+    fillColor: properties.fillColor || layer?.fillColor || featureColor,
+    fillOpacity: isPolygon
+      ? (properties.fillOpacity ?? layer?.fillOpacity ?? 0.25)
+      : 0,
+    radius: properties.radius || 5
+  }
+}
+
+const coordinatesToLatLngs = (coordinates, depth = 0) => {
+  if (!Array.isArray(coordinates)) return coordinates
+  if (depth <= 0) {
+    const lon = Number(coordinates[0])
+    const lat = Number(coordinates[1])
+    return Number.isFinite(lat) && Number.isFinite(lon) ? [lat, lon] : null
+  }
+  return coordinates
+    .map((item) => coordinatesToLatLngs(item, depth - 1))
+    .filter(Boolean)
+}
+
+const geometryLatLngs = (geometry) => {
+  const type = String(geometry?.type || '')
+  if (type === 'Point') return coordinatesToLatLngs(geometry?.coordinates, 0)
+  if (type === 'LineString' || type === 'MultiPoint') return coordinatesToLatLngs(geometry?.coordinates, 1)
+  if (type === 'MultiLineString' || type === 'Polygon') return coordinatesToLatLngs(geometry?.coordinates, 2)
+  if (type === 'MultiPolygon') return coordinatesToLatLngs(geometry?.coordinates, 3)
+  return null
+}
+
+const syncInteractiveContent = (leafletLayer, { tooltip = '', popup = '', tooltipOptions = {} } = {}) => {
+  if (!leafletLayer) return
+  if (tooltip) {
+    if (leafletLayer.getTooltip?.()) leafletLayer.setTooltipContent(tooltip)
+    else leafletLayer.bindTooltip(tooltip, tooltipOptions)
+  } else if (leafletLayer.getTooltip?.()) {
+    leafletLayer.unbindTooltip()
+  }
+
+  if (popup) {
+    if (leafletLayer.getPopup?.()) leafletLayer.setPopupContent(popup)
+    else leafletLayer.bindPopup(popup, { maxWidth: 320 })
+  } else if (leafletLayer.getPopup?.()) {
+    leafletLayer.unbindPopup()
+  }
+}
+
+const createPointMarker = (point, layer) => {
+  const lat = Number(point?.lat ?? point?.latitude ?? point?.y)
+  const lon = Number(point?.lon ?? point?.lng ?? point?.longitude ?? point?.x)
+  if (!Number.isFinite(lat) || !Number.isFinite(lon)) return null
+  const marker = L.circleMarker([lat, lon], pointStyle(point, layer))
+  syncInteractiveContent(marker, {
+    tooltip: toDisplayLabel(point?.tooltip || point?.label || layer?.name) || '节点',
+    popup: buildPointPopup(point, layer),
+    tooltipOptions: { direction: 'top' }
+  })
+  return marker
+}
+
+const updatePointMarker = (marker, point, layer) => {
+  const lat = Number(point?.lat ?? point?.latitude ?? point?.y)
+  const lon = Number(point?.lon ?? point?.lng ?? point?.longitude ?? point?.x)
+  marker.setLatLng([lat, lon])
+  marker.setRadius(pointStyle(point, layer).radius)
+  marker.setStyle(pointStyle(point, layer))
+  syncInteractiveContent(marker, {
+    tooltip: toDisplayLabel(point?.tooltip || point?.label || layer?.name) || '节点',
+    popup: buildPointPopup(point, layer),
+    tooltipOptions: { direction: 'top' }
+  })
+}
+
+const createGeoJsonFeatureLayer = (feature, layer) => {
+  const geometry = feature?.geometry || {}
+  const type = String(geometry.type || '')
+  const latLngs = geometryLatLngs(geometry)
+  const style = featureStyle(feature, layer)
+  let leafletLayer = null
+
+  if (type === 'Point' && latLngs) {
+    leafletLayer = L.circleMarker(latLngs, style)
+  } else if (['LineString', 'MultiLineString'].includes(type) && latLngs) {
+    leafletLayer = L.polyline(latLngs, style)
+  } else if (['Polygon', 'MultiPolygon'].includes(type) && latLngs) {
+    leafletLayer = L.polygon(latLngs, style)
+  } else {
+    const fallbackGroup = L.geoJSON(feature, {
+      style,
+      pointToLayer: (_item, latlng) => L.circleMarker(latlng, style)
+    })
+    leafletLayer = fallbackGroup.getLayers()[0] || fallbackGroup
+  }
+
+  leafletLayer.__kaleidoGeometryType = type
+  syncInteractiveContent(leafletLayer, {
+    tooltip: toDisplayLabel(feature?.properties?.name || layer?.name),
+    popup: buildFeaturePopup(feature, layer),
+    tooltipOptions: { sticky: true }
+  })
+  return leafletLayer
+}
+
+const updateGeoJsonFeatureLayer = (leafletLayer, feature, layer) => {
+  const geometry = feature?.geometry || {}
+  const type = String(geometry.type || '')
+  if (leafletLayer?.__kaleidoGeometryType !== type) return false
+  const latLngs = geometryLatLngs(geometry)
+  if (type === 'Point' && leafletLayer.setLatLng && latLngs) {
+    leafletLayer.setLatLng(latLngs)
+    if (leafletLayer.setRadius) leafletLayer.setRadius(featureStyle(feature, layer).radius)
+  } else if (['LineString', 'MultiLineString', 'Polygon', 'MultiPolygon'].includes(type) && leafletLayer.setLatLngs && latLngs) {
+    leafletLayer.setLatLngs(latLngs)
+  } else {
+    return false
+  }
+
+  if (leafletLayer.setStyle) leafletLayer.setStyle(featureStyle(feature, layer))
+  syncInteractiveContent(leafletLayer, {
+    tooltip: toDisplayLabel(feature?.properties?.name || layer?.name),
+    popup: buildFeaturePopup(feature, layer),
+    tooltipOptions: { sticky: true }
+  })
+  return true
+}
+
+const removeRenderedItem = (state, key) => {
+  const item = state?.items?.get(key)
+  if (!item) return
+  state.group.removeLayer(item.leafletLayer)
+  state.items.delete(key)
+}
+
+const reconcilePointLayer = (state, layer) => {
+  const nextKeys = new Set()
+  ;(Array.isArray(layer?.data) ? layer.data : []).forEach((point, index) => {
+    if (point == null) return
+    const lat = Number(point.lat ?? point.latitude ?? point.y)
+    const lon = Number(point.lon ?? point.lng ?? point.longitude ?? point.x)
+    if (!Number.isFinite(lat) || !Number.isFinite(lon)) return
+    if (!isPointWithinSelectedRadius(lat, lon)) return
+    const key = pointItemKey(point, index)
+    const signature = buildLayersSignature({ point, layer: { ...layer, data: undefined } })
+    nextKeys.add(key)
+    const current = state.items.get(key)
+    if (current?.signature === signature) return
+    if (current) {
+      updatePointMarker(current.leafletLayer, point, layer)
+      current.signature = signature
+      return
+    }
+    const marker = createPointMarker(point, layer)
+    if (!marker) return
+    marker.addTo(state.group)
+    state.items.set(key, { leafletLayer: marker, signature })
+  })
+  for (const key of [...state.items.keys()]) {
+    if (!nextKeys.has(key)) removeRenderedItem(state, key)
+  }
+}
+
+const geoJsonFeatures = (data) => {
+  const geoJson = toGeoJson(data)
+  if (!geoJson) return []
+  if (geoJson.type === 'FeatureCollection') return Array.isArray(geoJson.features) ? geoJson.features : []
+  return geoJson.type === 'Feature' ? [geoJson] : []
+}
+
+const reconcileGeoJsonLayer = (state, layer) => {
+  const nextKeys = new Set()
+  geoJsonFeatures(layer?.data).forEach((feature, index) => {
+    const key = featureItemKey(feature, index)
+    const signature = buildLayersSignature({ feature, layer: { ...layer, data: undefined } })
+    nextKeys.add(key)
+    const current = state.items.get(key)
+    if (current?.signature === signature) return
+    if (current && updateGeoJsonFeatureLayer(current.leafletLayer, feature, layer)) {
+      current.signature = signature
+      return
+    }
+    if (current) removeRenderedItem(state, key)
+    const leafletLayer = createGeoJsonFeatureLayer(feature, layer)
+    if (!leafletLayer) return
+    leafletLayer.addTo(state.group)
+    state.items.set(key, { leafletLayer, signature })
+  })
+  for (const key of [...state.items.keys()]) {
+    if (!nextKeys.has(key)) removeRenderedItem(state, key)
+  }
+}
+
+const removeRenderedLayer = (key) => {
+  const state = renderedLayerStates.get(key)
+  if (!state) return
+  overlayGroup?.removeLayer(state.group)
+  state.group.clearLayers()
+  renderedLayerStates.delete(key)
+}
+
 const renderLayers = (force = false) => {
   if (!overlayGroup || !map) return
 
   const layers = Array.isArray(props.layers) ? props.layers : []
-  const signature = buildLayersSignature(layers)
-  if (!force && signature === lastLayersSignature) return
-  lastLayersSignature = signature
+  const fitKey = String(props.fitKey || '').trim()
+  const fitKeyChanged = Boolean(fitKey) && fitKey !== lastFittedKey
+  if (!force && layers === lastLayersReference && !fitKeyChanged) return
+  lastLayersReference = layers
 
-  clearLayerGroup(overlayGroup)
-
-  layers.forEach((layer) => {
+  const nextLayerKeys = new Set()
+  layers.forEach((layer, index) => {
     if (layer?.visible === false) return
-
-    const color = layer?.color || '#1f5d45'
-    const weight = layer?.weight || 2
-    const opacity = layer?.opacity ?? 0.75
-
-    if (layer?.type === 'points' && Array.isArray(layer.data)) {
-      layer.data.forEach((point) => {
-        if (point == null) return
-        const lat = Number(point.lat ?? point.latitude ?? point.y)
-        const lon = Number(point.lon ?? point.lng ?? point.longitude ?? point.x)
-        if (!Number.isFinite(lat) || !Number.isFinite(lon)) return
-        if (!isPointWithinSelectedRadius(lat, lon)) return
-
-        L.circleMarker([lat, lon], {
-          radius: point.radius || 6,
-          color: point.color || color,
-          weight: point.weight ?? weight,
-          opacity: point.opacity ?? opacity,
-          fillColor: point.fillColor || color,
-          fillOpacity: point.fillOpacity ?? 0.8
-        })
-          .bindTooltip(toDisplayLabel(point.tooltip || point.label || layer.name || '节点'), { direction: 'top' })
-          .bindPopup(buildPointPopup(point, layer), { maxWidth: 320 })
-          .addTo(overlayGroup)
-      })
-      return
+    const key = stableItemKey(layer?.id, `map-layer-${index}`)
+    nextLayerKeys.add(key)
+    const type = layer?.type === 'points' ? 'points' : 'geojson'
+    let state = renderedLayerStates.get(key)
+    if (state && state.type !== type) {
+      removeRenderedLayer(key)
+      state = null
     }
-
-    const geoJson = toGeoJson(layer?.data)
-    if (!geoJson) return
-
-    L.geoJSON(geoJson, {
-      style: (feature) => {
-        const featureColor = feature?.properties?.color || color
-        const geometryType = String(feature?.geometry?.type || '')
-        const isPolygon = geometryType.includes('Polygon')
-        return {
-          color: featureColor,
-          weight: feature?.properties?.weight ?? weight,
-          opacity: feature?.properties?.opacity ?? opacity,
-          dashArray: feature?.properties?.dashArray ?? layer?.dashArray,
-          fillColor: feature?.properties?.fillColor || layer?.fillColor || featureColor,
-          fillOpacity: isPolygon
-            ? (feature?.properties?.fillOpacity ?? layer?.fillOpacity ?? 0.25)
-            : 0
-        }
-      },
-      pointToLayer: (feature, latlng) => {
-        const featureColor = feature?.properties?.color || color
-        return L.circleMarker(latlng, {
-          radius: feature?.properties?.radius || 5,
-          color: featureColor,
-          weight: feature?.properties?.weight ?? 2,
-          opacity: feature?.properties?.opacity ?? opacity,
-          fillColor: featureColor,
-          fillOpacity: feature?.properties?.fillOpacity ?? 0.85
-        })
-      },
-      onEachFeature: (feature, leafletLayer) => {
-        const title = feature?.properties?.name || layer.name
-        if (title) {
-          leafletLayer.bindTooltip(title, { sticky: true })
-        }
-        const popupHtml = buildFeaturePopup(feature, layer)
-        if (popupHtml) {
-          leafletLayer.bindPopup(popupHtml, { maxWidth: 320 })
-        }
-      }
-    }).addTo(overlayGroup)
+    if (!state) {
+      state = { type, group: L.featureGroup().addTo(overlayGroup), items: new Map() }
+      renderedLayerStates.set(key, state)
+    }
+    if (type === 'points') reconcilePointLayer(state, layer)
+    else reconcileGeoJsonLayer(state, layer)
   })
+  for (const key of [...renderedLayerStates.keys()]) {
+    if (!nextLayerKeys.has(key)) removeRenderedLayer(key)
+  }
 
   scheduleInvalidateSize()
-  if (layers.length > 0) {
+  const hasRenderableContent = [...renderedLayerStates.values()].some((state) => state.items.size > 0)
+  if (hasRenderableContent && (!hasFittedInitialContent || fitKeyChanged)) {
+    hasFittedInitialContent = true
+    lastFittedKey = fitKey
     scheduleFitToContent()
   }
 }
@@ -665,6 +965,7 @@ const renderSelection = (centerMap = false) => {
   if (centerMap && overlayGroup?.getLayers?.().length) {
     scheduleFitToContent()
   } else if (centerMap) {
+    cancelSmoothWheelZoom()
     map.setView([lat, lon], Math.max(map.getZoom(), 11))
   }
 
@@ -677,6 +978,11 @@ watch(
 )
 
 watch(
+  () => props.fitKey,
+  () => renderLayers()
+)
+
+watch(
   () => props.selectedPoint,
   () => {
     renderSelection(true)
@@ -685,13 +991,20 @@ watch(
 )
 
 watch(
-  () => [props.center?.[0], props.center?.[1], props.zoom],
-  ([rawLat, rawLon, rawZoom]) => {
+  // MapRelationPanel rebuilds its projection object on every playback RAF.
+  // Watching an array/object reference made those ordinary layer updates look
+  // like external viewport commands and repeatedly snapped a user-controlled
+  // fractional zoom back to zoom_hint.  A primitive value signature only
+  // changes when the requested center/zoom values actually change.
+  () => [props.center?.[0], props.center?.[1], props.zoom]
+    .map(value => Number(value))
+    .join(':'),
+  () => {
     if (!map) return
-    const lat = Number(rawLat)
-    const lon = Number(rawLon)
+    const lat = Number(props.center?.[0])
+    const lon = Number(props.center?.[1])
     if (!Number.isFinite(lat) || !Number.isFinite(lon)) return
-    const zoom = Number(rawZoom)
+    const zoom = Number(props.zoom)
     const nextZoom = Number.isFinite(zoom) && zoom > 0 ? zoom : map.getZoom()
     const currentCenter = map.getCenter()
     const centerUnchanged =
@@ -699,6 +1012,7 @@ watch(
       Math.abs(currentCenter.lng - lon) < 0.00001 &&
       map.getZoom() === nextZoom
     if (centerUnchanged) return
+    cancelSmoothWheelZoom()
     map.setView([lat, lon], nextZoom, { animate: false })
   }
 )
@@ -720,6 +1034,10 @@ watch(
     syncMapClickMode()
   }
 )
+
+defineExpose({
+  fitToContent: scheduleFitToContent
+})
 
 onMounted(() => {
   createMap()
@@ -743,6 +1061,11 @@ onBeforeUnmount(() => {
     cancelAnimationFrame(fitFrame)
     fitFrame = null
   }
+  cancelSmoothWheelZoom()
+  if (smoothWheelHandler && mapEl.value) {
+    mapEl.value.removeEventListener('wheel', smoothWheelHandler)
+    smoothWheelHandler = null
+  }
   if (resizeHandler) {
     window.removeEventListener('resize', resizeHandler)
   }
@@ -759,6 +1082,7 @@ onBeforeUnmount(() => {
     map.remove()
     map = null
   }
+  renderedLayerStates.clear()
 })
 </script>
 

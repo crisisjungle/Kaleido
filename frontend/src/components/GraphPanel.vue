@@ -1,9 +1,14 @@
 <template>
-  <div class="graph-panel">
+  <div
+    class="graph-panel"
+    :data-animation-active-edge-count="activeAnimationEdgeCount"
+    :data-animation-renderable-edge-count="renderableAnimationEdgeCount"
+    :data-animation-focus-edge-count="highlightEdgeIds.length"
+  >
     <div class="panel-header">
       <div class="panel-title-wrap">
         <span v-if="graphMode !== 'map'" class="panel-title">图谱关系可视化</span>
-        <span v-if="highlightLabel && graphMode !== 'map'" class="focus-badge">{{ highlightLabel }}</span>
+        <span v-if="safeDisplayText(highlightLabel, '') && graphMode !== 'map'" class="focus-badge">{{ safeDisplayText(highlightLabel, '当前焦点') }}</span>
       </div>
       <!-- 顶部工具栏 (Internal Top Right) -->
       <div class="header-tools">
@@ -33,12 +38,15 @@
             3D
           </button>
         </div>
-        <!-- 治毛球：图谱密度 — 强关系只显最关键的连线，默认聚焦因果网络 -->
-        <div v-if="graphMode !== 'map'" class="mode-switch density-switch" title="图谱密度：过滤掉空间骨架/弱关系，让强关系浮现">
-          <button class="mode-btn" :class="{ active: edgeDensity === 'strong' }" @click="edgeDensity = 'strong'" title="只显强关系（去掉骨架与推测连线）">强关系</button>
-          <button class="mode-btn" :class="{ active: edgeDensity === 'standard' }" @click="edgeDensity = 'standard'" title="标准：聚焦因果网络">标准</button>
-          <button class="mode-btn" :class="{ active: edgeDensity === 'all' }" @click="edgeDensity = 'all'" title="显示全部关系（含空间骨架）">全部</button>
-        </div>
+        <!-- 治毛球：图谱密度 — 默认只显最关键的连线，聚焦因果网络 -->
+        <label v-if="graphMode !== 'map'" class="density-select" title="只影响当前视图，不改变推演数据">
+          <span>关系密度</span>
+          <select v-model="edgeDensity">
+            <option value="strong">重点关系</option>
+            <option value="standard">标准视图</option>
+            <option value="all">全量关系</option>
+          </select>
+        </label>
         <button class="tool-btn" @click="$emit('refresh')" :disabled="loading" title="刷新图谱">
           <span class="icon-refresh" :class="{ 'spinning': loading }">↻</span>
           <span class="btn-text">刷新</span>
@@ -91,7 +99,7 @@
               <path d="M14.5 2A2.5 2.5 0 0 0 12 4.5v15a2.5 2.5 0 0 0 4.96.44 2.5 2.5 0 0 0 2.96-3.08 3 3 0 0 0 .34-5.58 2.5 2.5 0 0 0-1.32-4.24 2.5 2.5 0 0 0-4.44-4.04z" />
             </svg>
           </div>
-          {{ isSimulating ? 'GraphRAG长短期记忆实时更新中' : '实时更新中...' }}
+          {{ isSimulating ? '图谱记忆实时更新中' : '图谱实时更新中...' }}
         </div>
         
         <!-- 模拟结束后的提示 -->
@@ -116,7 +124,7 @@
         <div v-if="selectedItem" class="detail-panel">
           <div class="detail-panel-header">
             <span class="detail-title">{{ selectedItem.type === 'node' ? '节点详情' : '关系详情' }}</span>
-            <span v-if="selectedItem.type === 'node'" class="detail-type-badge" :style="{ background: selectedItem.color, color: '#fff' }">
+            <span v-if="selectedItem.type === 'node'" class="detail-type-badge">
               {{ displayToken(selectedItem.entityType) }}
             </span>
             <button class="detail-close" @click="closeDetailPanel">×</button>
@@ -126,7 +134,7 @@
           <div v-if="selectedItem.type === 'node'" class="detail-content">
             <div class="detail-row">
               <span class="detail-label">名称：</span>
-              <span class="detail-value">{{ selectedItem.data.name }}</span>
+              <span class="detail-value">{{ safeDisplayText(selectedItem.data.name, '未命名节点') }}</span>
             </div>
             <div class="detail-row" v-if="selectedItem.data.created_at">
               <span class="detail-label">创建时间：</span>
@@ -147,15 +155,15 @@
             <!-- Summary -->
             <div class="detail-section" v-if="selectedItem.data.summary">
               <div class="section-title">摘要</div>
-              <div class="summary-text">{{ selectedItem.data.summary }}</div>
+              <div class="summary-text">{{ safeDisplayText(selectedItem.data.summary, '暂无摘要') }}</div>
             </div>
             
             <!-- Labels -->
             <div class="detail-section" v-if="selectedItem.data.labels && selectedItem.data.labels.length > 0">
               <div class="section-title">标签</div>
               <div class="labels-list">
-                <span v-for="label in selectedItem.data.labels" :key="label" class="label-tag">
-                  {{ displayToken(label) }}
+                <span v-for="label in visibleLabels(selectedItem.data.labels)" :key="label" class="label-tag">
+                  {{ label }}
                 </span>
               </div>
             </div>
@@ -175,7 +183,7 @@
             <!-- 自环组详情 -->
             <template v-if="selectedItem.data.isSelfLoopGroup">
               <div class="edge-relation-header self-loop-header">
-                {{ selectedItem.data.source_name }} - 自关联
+                {{ safeDisplayText(selectedItem.data.source_name, '当前节点') }} - 自关联
                 <span class="self-loop-count">{{ selectedItem.data.selfLoopCount }} 条</span>
               </div>
               
@@ -191,14 +199,14 @@
                     @click="toggleSelfLoop(loop.uuid || idx)"
                   >
                     <span class="self-loop-index">#{{ idx + 1 }}</span>
-                    <span class="self-loop-name">{{ loop.name || loop.fact_type || 'RELATED' }}</span>
+                    <span class="self-loop-name">{{ safeToken(loop.name || loop.fact_type, '关联') }}</span>
                     <span class="self-loop-toggle">{{ expandedSelfLoops.has(loop.uuid || idx) ? '−' : '+' }}</span>
                   </div>
                   
                   <div class="self-loop-item-content" v-show="expandedSelfLoops.has(loop.uuid || idx)">
                     <div class="detail-row" v-if="loop.fact">
                       <span class="detail-label">事实：</span>
-                      <span class="detail-value fact-text">{{ loop.fact }}</span>
+                      <span class="detail-value fact-text">{{ safeDisplayText(loop.fact, '已记录关联事实') }}</span>
                     </div>
                     <div class="detail-row" v-if="loop.fact_type">
                       <span class="detail-label">类型：</span>
@@ -211,7 +219,7 @@
                     <div v-if="loop.episodes && loop.episodes.length > 0" class="self-loop-episodes">
                       <span class="detail-label">片段：</span>
                       <div class="episodes-list compact">
-                        <span v-for="ep in loop.episodes" :key="ep" class="episode-tag small">{{ ep }}</span>
+                        <span v-for="(ep, epIndex) in loop.episodes.slice(0, 3)" :key="ep" class="episode-tag small">片段 {{ epIndex + 1 }}</span>
                       </div>
                     </div>
                   </div>
@@ -222,16 +230,16 @@
             <!-- 普通边详情 -->
             <template v-else>
               <div class="edge-relation-header">
-                {{ selectedItem.data.source_name }} → {{ displayToken(selectedItem.data.name || 'RELATED_TO') }} → {{ selectedItem.data.target_name }}
+                {{ safeDisplayText(selectedItem.data.source_name, '来源节点') }} → {{ safeToken(selectedItem.data.name, '关联') }} → {{ safeDisplayText(selectedItem.data.target_name, '目标节点') }}
               </div>
               
               <div class="detail-row">
                 <span class="detail-label">标签：</span>
-                <span class="detail-value">{{ displayToken(selectedItem.data.name || 'RELATED_TO') }}</span>
+                <span class="detail-value">{{ displayToken(selectedItem.data.name || '关联') }}</span>
               </div>
               <div class="detail-row">
                 <span class="detail-label">类型：</span>
-                <span class="detail-value">{{ displayToken(selectedItem.data.fact_type || 'Unknown') }}</span>
+                <span class="detail-value">{{ displayToken(selectedItem.data.fact_type || '其他') }}</span>
               </div>
               <!-- M10 honesty badges: edge layer / epistemic / channel -->
               <div class="detail-row" v-if="edgeHonesty(selectedItem.data)">
@@ -254,15 +262,15 @@
               </div>
               <div class="detail-row" v-if="selectedItem.data.fact">
                 <span class="detail-label">事实：</span>
-                <span class="detail-value fact-text">{{ selectedItem.data.fact }}</span>
+                <span class="detail-value fact-text">{{ safeDisplayText(selectedItem.data.fact, '已记录关联事实') }}</span>
               </div>
               
               <!-- Episodes -->
               <div class="detail-section" v-if="selectedItem.data.episodes && selectedItem.data.episodes.length > 0">
                 <div class="section-title">片段</div>
                 <div class="episodes-list">
-                  <span v-for="ep in selectedItem.data.episodes" :key="ep" class="episode-tag">
-                    {{ ep }}
+                  <span v-for="(ep, epIndex) in selectedItem.data.episodes.slice(0, 3)" :key="ep" class="episode-tag">
+                    片段 {{ epIndex + 1 }}
                   </span>
                 </div>
               </div>
@@ -324,10 +332,11 @@
     <div v-if="hasGraphContent && graphMode !== 'map' && entityTypes.length" class="graph-legend">
       <span class="legend-title">实体类型</span>
       <div class="legend-items">
-        <div class="legend-item" v-for="type in entityTypes" :key="type.name">
+        <div class="legend-item" v-for="type in entityTypes.slice(0, 5)" :key="type.name">
           <span class="legend-dot" :style="{ background: type.color }"></span>
           <span class="legend-label">{{ type.name }}</span>
         </div>
+        <span v-if="entityTypes.length > 5" class="legend-more">+{{ entityTypes.length - 5 }}</span>
       </div>
       <!-- M10 edge-layer legend: spatial skeleton vs causal coupling -->
       <div v-if="edgeLayerSummary" class="legend-edge-layers">
@@ -346,7 +355,7 @@
     </div>
     
     <!-- 显示边标签开关 -->
-    <div v-if="hasGraphContent && graphMode === '2d'" class="edge-labels-toggle">
+    <div v-if="hasGraphContent && graphMode === '2d' && !selectedItem" class="edge-labels-toggle">
       <label class="toggle-switch">
         <input type="checkbox" v-model="showEdgeLabels" />
         <span class="slider"></span>
@@ -360,7 +369,8 @@
 import { ref, onMounted, onUnmounted, watch, nextTick, computed } from 'vue'
 import * as d3 from 'd3'
 import MapRelationPanel from './MapRelationPanel.vue'
-import { formatTokenLabelZh, translateDisplayToken, formatFieldLabelZh, isInternalAttributeKey } from '../utils/displayText'
+import { formatTokenLabelZh, translateDisplayToken, formatFieldLabelZh, isInternalAttributeKey, normalizeDisplayLabels, safeDisplayText as safeDisplayCopyText, safeDisplayToken } from '../utils/displayText'
+import { reconcileVisibleGraphSelection } from '../utils/simulationPlayback'
 
 const props = defineProps({
   graphData: Object,
@@ -396,6 +406,39 @@ const props = defineProps({
     default: false
   }
 })
+
+const activeAnimationEdgeCount = computed(() => (
+  Array.isArray(props.graphData?.edges)
+    ? props.graphData.edges.filter(edge => ['new', 'active'].includes(
+      String(edge?.attributes?.animation_status || '').trim().toLowerCase(),
+    )).length
+    : 0
+))
+
+const renderableAnimationEdgeCount = computed(() => {
+  const nodeIds = new Set((Array.isArray(props.graphData?.nodes) ? props.graphData.nodes : [])
+    .map(node => String(node?.uuid || node?.id || ''))
+    .filter(Boolean))
+  return (Array.isArray(props.graphData?.edges) ? props.graphData.edges : []).filter((edge) => {
+    const status = String(edge?.attributes?.animation_status || '').trim().toLowerCase()
+    const sourceId = String(edge?.source_node_uuid || edge?.source || '')
+    const targetId = String(edge?.target_node_uuid || edge?.target || '')
+    return ['new', 'active'].includes(status) && nodeIds.has(sourceId) && nodeIds.has(targetId)
+  }).length
+})
+
+const propagationEdgeSignature = computed(() => (
+  (Array.isArray(props.graphData?.edges) ? props.graphData.edges : [])
+    .filter(edge => ['new', 'active'].includes(
+      String(edge?.attributes?.animation_status || '').trim().toLowerCase(),
+    ))
+    .map((edge, index) => [
+      edge?.uuid || edge?.id || edge?.edge_id || index,
+      edge?.attributes?.animation_status || '',
+      Number(edge?.attributes?.animation_progress || 0).toFixed(3),
+    ].join(':'))
+    .join('|')
+))
 
 const emit = defineEmits(['refresh', 'toggle-maximize', 'node-select', 'node-action'])
 
@@ -450,6 +493,10 @@ const buildEdgeHighlightKeys = (edge, fallbackSource = '', fallbackTarget = '', 
     edge?.transportEdgeId,
     edge?.dynamic_edge_id,
     edge?.dynamicEdgeId,
+    edge?.attributes?.mechanism_edge_id,
+    edge?.attributes?.mechanismEdgeId,
+    ...(Array.isArray(edge?.attributes?.mechanism_edge_ids) ? edge.attributes.mechanism_edge_ids : []),
+    ...(Array.isArray(edge?.attributes?.mechanismEdgeIds) ? edge.attributes.mechanismEdgeIds : []),
     edge?.source_target_id,
     edge?.sourceTargetId,
     pairKey,
@@ -467,24 +514,32 @@ const dismissFinishedHint = () => {
   showSimulationFinishedHint.value = false
 }
 
-const displayToken = (value, fallback = '') => {
-  return translateDisplayToken(value, fallback || String(value || ''))
+const INVALID_GRAPH_COPY = new Set(['内部标识', '未命名项', '内容待本地化'])
+const safeDisplayText = (value, fallback = '') => {
+  const text = safeDisplayCopyText(value, '').trim()
+  return !text || INVALID_GRAPH_COPY.has(text) ? fallback : text
 }
+const safeToken = (value, fallback = '') => safeDisplayToken(value, fallback)
+const displayToken = (value, fallback = '其他') => safeToken(value, fallback)
+const visibleLabels = (labels) => normalizeDisplayLabels(labels, 3)
 
-const formatPropertyKey = (key) => formatFieldLabelZh(key, key)
+const formatPropertyKey = (key) => safeDisplayText(formatFieldLabelZh(key, ''), '属性')
 
 // 只展示有意义的字段，过滤动画/内部/调试 key（*_round、animation_*、uuid、id…）
 const visibleAttributeEntries = (attributes) => {
   if (!attributes || typeof attributes !== 'object') return []
-  return Object.entries(attributes).filter(([key]) => !isInternalAttributeKey(key))
+  return Object.entries(attributes)
+    .filter(([key, value]) => !isInternalAttributeKey(key) && value !== null && value !== undefined && typeof value !== 'object')
+    .filter(([, value]) => Boolean(formatPropertyValue(value)))
+    .slice(0, 8)
 }
 
 const formatPropertyValue = (value) => {
   if (value === null || value === undefined || value === '') return '无'
-  if (Array.isArray(value)) return value.map((item) => displayToken(item)).join('、')
-  if (typeof value === 'object') return JSON.stringify(value)
   if (typeof value === 'number') return Number.isInteger(value) ? String(value) : value.toFixed(1)
-  return displayToken(value)
+  if (typeof value === 'boolean') return value ? '是' : '否'
+  if (typeof value === 'object') return ''
+  return safeDisplayText(value, '')
 }
 
 // 监听 isSimulating 变化，检测模拟结束
@@ -519,8 +574,8 @@ const entityTypes = computed(() => {
   const colors = ['#FF6B35', '#004E89', '#7B2D8E', '#1A936F', '#C5283D', '#E9724C', '#3498db', '#9b59b6', '#27ae60', '#f39c12']
   
   props.graphData.nodes.forEach(node => {
-    const type = node.labels?.find(l => l !== 'Entity') || 'Entity'
-    const displayName = displayToken(type)
+    const type = node.labels?.find(l => l !== 'Entity') || '其他类型'
+    const displayName = displayToken(type, '其他类型')
     if (!typeMap[type]) {
       typeMap[type] = { rawType: type, name: displayName, count: 0, color: colors[Object.keys(typeMap).length % colors.length] }
     }
@@ -579,6 +634,7 @@ const formatDateTime = (dateStr) => {
   if (!dateStr) return ''
   try {
     const date = new Date(dateStr)
+    if (Number.isNaN(date.getTime())) return '时间不可用'
     return date.toLocaleString('zh-CN', {
       month: 'short',
       day: 'numeric', 
@@ -588,7 +644,7 @@ const formatDateTime = (dateStr) => {
       hour12: false
     })
   } catch {
-    return dateStr
+    return '时间不可用'
   }
 }
 
@@ -608,6 +664,7 @@ const buildNodePayload = (item) => {
 const closeDetailPanel = () => {
   selectedItem.value = null
   expandedSelfLoops.value = new Set() // 重置展开状态
+  graph2DState?.refreshNodeLabelVisibility?.({ interrupt: true })
 }
 
 const triggerNodeAction = (action) => {
@@ -633,11 +690,20 @@ let containerResizeObserver = null
 let graph2DState = null
 let last2DStructureSignature = ''
 let currentZoomTransform = d3.zoomIdentity
+let graph2DDataFrame = null
+
+// 2D uses semantic zoom: positions move, while glyphs and text stay readable.
+// Going below this floor only collapses the layout beneath fixed-size glyphs,
+// so it can never produce a useful overview.
+const MIN_2D_ZOOM = 0.5
+const MAX_2D_ZOOM = 5
+const NODE_LABEL_LOD_ZOOM = 0.7
 
 const scheduleGraphRender = () => {
-  if (renderFrame !== null) {
-    cancelAnimationFrame(renderFrame)
-  }
+  // Coalesce invalidations. Cancelling and rescheduling on every playback RAF
+  // can starve the first render completely when animation data starts flowing
+  // before the SVG has mounted.
+  if (renderFrame !== null) return
   renderFrame = requestAnimationFrame(() => {
     renderFrame = null
     void renderActiveGraph()
@@ -698,10 +764,77 @@ const getNodeColorByType = (type) => {
 const nodeLayerKey = (node) => {
   const type = String(node.type || '').toLowerCase()
   const labels = (node.rawData?.labels || []).map(item => String(item || '').toLowerCase())
-  if (type.includes('region') && !labels.includes('subregion')) return 'macro'
-  if (type.includes('subregion') || labels.includes('subregion')) return 'subregion'
-  if (type.includes('actor') || type.includes('receptor') || type.includes('carrier') || type.includes('infrastructure')) return 'agent'
+  const nodeFamily = String(
+    node.rawData?.attributes?.node_family
+    || node.rawData?.node_family
+    || '',
+  ).toLowerCase()
+  const isSubregion = type.includes('subregion')
+    || type.includes('细分区域')
+    || labels.some(label => label.includes('subregion') || label.includes('细分区域'))
+    || nodeFamily.includes('subregion')
+  if (isSubregion) return 'subregion'
+  const isRegion = type.includes('region')
+    || type.includes('区域')
+    || labels.some(label => label === 'region' || label.endsWith('region') || label === '区域')
+    || nodeFamily === 'region'
+  if (isRegion) return 'macro'
+  if (
+    type.includes('actor')
+    || type.includes('receptor')
+    || type.includes('carrier')
+    || type.includes('infrastructure')
+    || nodeFamily.includes('actor')
+    || nodeFamily.includes('receptor')
+    || nodeFamily.includes('carrier')
+    || nodeFamily.includes('infrastructure')
+  ) return 'agent'
   return 'agent'
+}
+
+const nodeRegionKey = (node) => {
+  const raw = node?.rawData || node || {}
+  const attributes = raw.attributes || {}
+  const id = String(node?.id || raw.uuid || raw.id || '')
+  if (id.startsWith('region::')) return id.slice('region::'.length)
+  const explicit = [
+    attributes.primary_region,
+    attributes.primary_region_id,
+    attributes.region_id,
+    attributes.parent_region_id,
+    attributes.home_region_id,
+    raw.primary_region,
+    raw.region_id,
+  ].map(value => String(value || '').trim()).find(Boolean)
+  if (explicit) return explicit.replace(/^region::/, '')
+  const subregion = String(
+    attributes.home_subregion_id
+    || attributes.subregion_id
+    || raw.home_subregion_id
+    || '',
+  ).trim()
+  if (subregion) return subregion.replace(/^region::/, '').split('::')[0]
+  return ''
+}
+
+const buildRegionClusterTargets = (nodes, width, height) => {
+  const keys = [...new Set((Array.isArray(nodes) ? nodes : [])
+    .map(nodeRegionKey)
+    .filter(Boolean))].sort()
+  if (!keys.length) return new Map()
+  const columns = Math.max(1, Math.ceil(Math.sqrt(keys.length * Math.max(width, 1) / Math.max(height, 1))))
+  const rows = Math.max(1, Math.ceil(keys.length / columns))
+  const marginX = Math.min(88, Math.max(42, width * 0.11))
+  const marginY = Math.min(88, Math.max(48, height * 0.12))
+  const spanX = Math.max(1, width - marginX * 2)
+  const spanY = Math.max(1, height - marginY * 2)
+  return new Map(keys.map((key, index) => {
+    const column = index % columns
+    const row = Math.floor(index / columns)
+    const x = columns === 1 ? width / 2 : marginX + (column / (columns - 1)) * spanX
+    const y = rows === 1 ? height / 2 : marginY + (row / (rows - 1)) * spanY
+    return [key, { x, y }]
+  }))
 }
 
 const fibonacciSpherePoint = (index, total, radius) => {
@@ -797,12 +930,34 @@ const compute3DCameraPose = (nodes, highlightedNodeIds = new Set()) => {
 }
 
 const formatSurfaceLabel = (name) => {
-  const text = String(name || '').trim()
+  const text = safeDisplayText(name, '')
   if (!text) return ''
   return text.length > 8 ? `${text.slice(0, 8)}…` : text
 }
 
 const clamp = (value, min, max) => Math.min(Math.max(value, min), max)
+
+const clamp2DZoomTransform = (transform, width = 0, height = 0) => {
+  const source = transform
+    && Number.isFinite(transform.k)
+    && Number.isFinite(transform.x)
+    && Number.isFinite(transform.y)
+    && transform.k > 0
+    ? transform
+    : d3.zoomIdentity
+  const nextScale = clamp(source.k, MIN_2D_ZOOM, MAX_2D_ZOOM)
+  if (nextScale === source.k) return source
+
+  // Keep the graph point currently under the viewport centre anchored while
+  // repairing a transform restored from the old 0.1 zoom range.
+  const centreX = Number.isFinite(width) ? width / 2 : 0
+  const centreY = Number.isFinite(height) ? height / 2 : 0
+  const graphX = (centreX - source.x) / source.k
+  const graphY = (centreY - source.y) / source.k
+  return d3.zoomIdentity
+    .translate(centreX - graphX * nextScale, centreY - graphY * nextScale)
+    .scale(nextScale)
+}
 
 const normalizeAnimationStatus = (value) => {
   const status = String(value || '').trim().toLowerCase()
@@ -818,7 +973,7 @@ const animationStatusRank = (status) => {
 }
 
 const getDominantAnimationStatus = (items = []) => {
-  let best = 'steady'
+  let best = 'hidden'
   ;(Array.isArray(items) ? items : []).forEach((item) => {
     const status = normalizeAnimationStatus(item?.attributes?.animation_status)
     if (animationStatusRank(status) > animationStatusRank(best)) {
@@ -839,12 +994,37 @@ const mergeAnimationAttributes = (items = []) => {
   const delayValues = source
     .map(item => Number(item?.attributes?.delay_ms))
     .filter(Number.isFinite)
+  const dominant = source.reduce((best, item) => {
+    if (!best) return item
+    const bestStatus = normalizeAnimationStatus(best?.attributes?.animation_status)
+    const itemStatus = normalizeAnimationStatus(item?.attributes?.animation_status)
+    const rankDelta = animationStatusRank(itemStatus) - animationStatusRank(bestStatus)
+    if (rankDelta > 0) return item
+    if (rankDelta < 0) return best
+    const bestProgress = Number(best?.attributes?.animation_progress ?? 0)
+    const itemProgress = Number(item?.attributes?.animation_progress ?? 0)
+    return itemProgress > bestProgress ? item : best
+  }, null)
+  const dominantAttrs = dominant?.attributes || {}
 
   return {
     animation_status: getDominantAnimationStatus(source),
+    raw_animation_status: dominantAttrs.raw_animation_status,
     first_seen_round: firstSeenValues.length ? Math.min(...firstSeenValues) : undefined,
     last_active_round: lastActiveValues.length ? Math.max(...lastActiveValues) : undefined,
     delay_ms: delayValues.length ? Math.min(...delayValues) : undefined,
+    timeline_delay_ms: dominantAttrs.timeline_delay_ms,
+    animation_elapsed_ms: dominantAttrs.animation_elapsed_ms,
+    animation_progress: dominantAttrs.animation_progress,
+    animation_due: dominantAttrs.animation_due,
+    propagation_event_id: dominantAttrs.propagation_event_id,
+    propagation_kind: dominantAttrs.propagation_kind,
+    propagation_phase: dominantAttrs.propagation_phase,
+    propagation_role: dominantAttrs.propagation_role,
+    propagation_intensity: dominantAttrs.propagation_intensity,
+    propagation_confidence: dominantAttrs.propagation_confidence,
+    propagation_grounding: dominantAttrs.propagation_grounding,
+    propagation_current: dominantAttrs.propagation_current,
   }
 }
 
@@ -937,8 +1117,8 @@ const updateRenderedGraphData = () => {
   graph2DState.nodes.forEach((node) => {
     const latest = latestNodes.get(node.id)
     if (!latest) return
-    node.name = latest.name || node.name
-    node.type = latest.labels?.find(label => label !== 'Entity') || node.type
+    node.name = safeDisplayText(latest.name, node.name || '未命名节点')
+    node.type = safeToken(latest.labels?.find(label => label !== 'Entity'), node.type || '其他类型')
     node.rawData = latest
     node.layer = nodeLayerKey(node)
   })
@@ -956,6 +1136,33 @@ const updateRenderedGraphData = () => {
       }
       return
     }
+    if (edge.rawData?.isParallelGroup) {
+      const updatedParallelEdges = (edge.rawData.parallelEdges || []).map((memberEdge, index) => {
+        const latest = latestEdges.get(getEdgeStableId(memberEdge, index))
+        return latest ? { ...memberEdge, ...latest } : memberEdge
+      })
+      const first = updatedParallelEdges[0] || edge.rawData
+      edge.type = first.fact_type || first.name || edge.type
+      edge.name = `${first.name || first.fact_type || edge.name}（${updatedParallelEdges.length}）`
+      edge.rawData = {
+        ...edge.rawData,
+        ...first,
+        uuid: edge.rawData.uuid,
+        id: edge.rawData.id,
+        name: edge.name,
+        isParallelGroup: true,
+        parallelEdges: updatedParallelEdges,
+        source_name: graph2DState.nodeMap.get(first.source_node_uuid || first.source)?.name,
+        target_name: graph2DState.nodeMap.get(first.target_node_uuid || first.target)?.name,
+        attributes: {
+          ...(first.attributes || {}),
+          ...mergeAnimationAttributes(updatedParallelEdges),
+          aggregate_count: updatedParallelEdges.length,
+          is_parallel_group: true,
+        }
+      }
+      return
+    }
     const latest = latestEdges.get(getEdgeStableId(edge.rawData))
     if (!latest) return
     edge.type = latest.fact_type || latest.name || edge.type
@@ -967,13 +1174,41 @@ const updateRenderedGraphData = () => {
     }
   })
 
+  // Density filtering intentionally keeps only a stable, readable baseline.
+  // The current propagation wave is a separate overlay so an active ledger
+  // edge can never disappear merely because it was not in the initial top-N.
+  graph2DState.updatePulseLinks?.(
+    Array.isArray(props.graphData.edges) ? props.graphData.edges : [],
+  )
+
   graph2DState.nodeLabels?.text(d => {
     const label = displayToken(d.name)
     return label.length > 8 ? `${label.substring(0, 8)}…` : label
   })
   graph2DState.linkLabels?.text(d => displayToken(d.name))
-  graph2DState.applyBaseGraphState?.()
+  // The parent advances animation_progress on every playback frame. Apply
+  // those state/style deltas in place instead of restarting 380-420ms D3
+  // transitions (or, worse, rebuilding the force layout) on every RAF.
+  graph2DState.applyBaseGraphState?.({ animate: false })
   return true
+}
+
+const scheduleRenderedGraphDataUpdate = () => {
+  if (graph2DDataFrame !== null) return
+  graph2DDataFrame = requestAnimationFrame(() => {
+    graph2DDataFrame = null
+    const nextSignature = buildGraphStructureSignature(props.graphData)
+    if (
+      graphMode.value === '2d'
+      && graph2DState
+      && nextSignature
+      && nextSignature === last2DStructureSignature
+    ) {
+      updateRenderedGraphData()
+      return
+    }
+    scheduleGraphRender()
+  })
 }
 
 const getLinkBaseColorByType = (type) => {
@@ -1083,7 +1318,27 @@ const edgeEpistemicScore = (edge) => {
   return 2
 }
 
-const DENSITY_CAP = { strong: 160, standard: 600 }
+const DENSITY_CAP = { strong: 84, standard: 220 }
+const DENSITY_NODE_EDGE_CAP = { strong: 6, standard: 10 }
+
+const normalizedEdgeMetric = (value) => {
+  const number = Number(value)
+  if (!Number.isFinite(number)) return 0
+  return clamp(number > 1 ? number / 100 : number, 0, 1)
+}
+
+const densityEdgeScore = (edge, degree) => {
+  const raw = readEdgeRaw(edge)
+  const attrs = raw.attributes || {}
+  const strength = normalizedEdgeMetric(attrs.strength ?? raw.strength)
+  const confidence = normalizedEdgeMetric(attrs.confidence ?? raw.confidence)
+  const keyBonus = attrs.is_key_interaction || raw.is_key_interaction ? 360 : 0
+  const hubPenalty = Math.max(
+    degree.get(raw.source_node_uuid) || 0,
+    degree.get(raw.target_node_uuid) || 0,
+  ) * 4
+  return edgeEpistemicScore(edge) * 1000 + keyBonus + strength * 240 + confidence * 180 - hubPenalty
+}
 
 const computeDensityPlan = (edgesData, nodeIds) => {
   const connected = (edgesData || []).filter(
@@ -1124,22 +1379,91 @@ const computeDensityPlan = (edgesData, nodeIds) => {
     causalPool.push(e)
   }
 
-  // 只对因果边封顶——毛球的根源在因果连线
-  const cap = DENSITY_CAP[mode] || 600
-  let causalKept = causalPool
-  if (causalPool.length > cap) {
-    causalKept = causalPool
-      .map(e => ({
-        e,
-        score: edgeEpistemicScore(e) * 1000
-          + Math.min(degree.get(e.source_node_uuid) || 0, degree.get(e.target_node_uuid) || 0)
-      }))
-      .sort((a, b) => b.score - a.score)
-      .slice(0, cap)
-      .map(x => x.e)
+  // 只对因果边封顶。上限随节点数变化，并对单个枢纽设扇出限制；
+  // 这样重点关系仍覆盖网络，但不会因为“节点度数高”反而优先制造毛球。
+  const absoluteCap = DENSITY_CAP[mode] || 220
+  const scaledCap = mode === 'strong'
+    ? Math.max(36, Math.round(nodeIds.size * 1.15))
+    : Math.max(90, Math.round(nodeIds.size * 2.4))
+  const cap = Math.min(absoluteCap, scaledCap)
+  const perNodeCap = DENSITY_NODE_EDGE_CAP[mode] || 10
+  const ranked = causalPool
+    .map(e => ({ e, score: densityEdgeScore(e, degree) }))
+    .sort((a, b) => b.score - a.score)
+  const causalKept = []
+  const selectedDegree = new Map()
+  const selectedSet = new Set()
+  const addEdge = (edge) => {
+    if (!edge || selectedSet.has(edge) || causalKept.length >= cap) return false
+    selectedSet.add(edge)
+    causalKept.push(edge)
+    selectedDegree.set(edge.source_node_uuid, (selectedDegree.get(edge.source_node_uuid) || 0) + 1)
+    selectedDegree.set(edge.target_node_uuid, (selectedDegree.get(edge.target_node_uuid) || 0) + 1)
+    return true
   }
+
+  // First preserve broad node coverage, then fill by evidence/strength while
+  // respecting the hub cap.
+  ranked.forEach(({ e }) => {
+    if (causalKept.length >= cap) return
+    const sourceSeen = (selectedDegree.get(e.source_node_uuid) || 0) > 0
+    const targetSeen = (selectedDegree.get(e.target_node_uuid) || 0) > 0
+    const sourceCount = selectedDegree.get(e.source_node_uuid) || 0
+    const targetCount = selectedDegree.get(e.target_node_uuid) || 0
+    if (sourceCount >= perNodeCap || targetCount >= perNodeCap) return
+    if (!sourceSeen || !targetSeen) addEdge(e)
+  })
+  ranked.forEach(({ e }) => {
+    if (causalKept.length >= cap || selectedSet.has(e)) return
+    const sourceCount = selectedDegree.get(e.source_node_uuid) || 0
+    const targetCount = selectedDegree.get(e.target_node_uuid) || 0
+    if (sourceCount >= perNodeCap || targetCount >= perNodeCap) return
+    addEdge(e)
+  })
   const allowSet = new Set([...alwaysKeep, ...causalKept])
   return { allow: (e) => allowSet.has(e), shown: allowSet.size, total }
+}
+
+const aggregateParallelEdges2D = (edges = []) => {
+  const groups = new Map()
+  const order = []
+  edges.forEach((edge, index) => {
+    if (edge.source_node_uuid === edge.target_node_uuid) {
+      order.push({ key: `self:${getEdgeStableId(edge, index)}`, edges: [edge] })
+      return
+    }
+    const channel = getEdgeChannel(edge)
+    const layer = getEdgeLayer(edge) || 'relation'
+    const type = String(edge.fact_type || edge.name || 'related').toLowerCase()
+    const semanticKey = channel || type
+    const key = `${edge.source_node_uuid}->${edge.target_node_uuid}:${layer}:${semanticKey}`
+    if (!groups.has(key)) {
+      const group = { key, edges: [] }
+      groups.set(key, group)
+      order.push(group)
+    }
+    groups.get(key).edges.push(edge)
+  })
+
+  return order.map((group) => {
+    if (group.edges.length === 1) return group.edges[0]
+    const first = group.edges[0]
+    const label = first.name || first.fact_type || 'RELATED'
+    return {
+      ...first,
+      uuid: `parallel::${group.key}`,
+      id: `parallel::${group.key}`,
+      name: `${label}（${group.edges.length}）`,
+      attributes: {
+        ...(first.attributes || {}),
+        ...mergeAnimationAttributes(group.edges),
+        aggregate_count: group.edges.length,
+        is_parallel_group: true,
+      },
+      isParallelGroup: true,
+      parallelEdges: group.edges,
+    }
+  })
 }
 
 // --- M10 node playback: bind radius/color to the frame's real value/delta ----
@@ -1291,7 +1615,7 @@ const getNodeAnimationStyle = (node, { highlightActive = false, highlighted = fa
   }
 
   if (highlightActive) {
-    if (highlighted) {
+    if (highlighted && status !== 'hidden') {
       radius += is3D ? 1.1 : 1.8
       opacity = 1
       strokeColor = '#7c2d12'
@@ -1335,18 +1659,56 @@ const getNodeAnimationStyle = (node, { highlightActive = false, highlighted = fa
   }
 }
 
-const shouldShowNodeLabel = (node, { highlightActive = false, highlighted = false } = {}) => {
-  if (highlighted) return true
+const isTruthyGraphFlag = (value) => value === true
+  || value === 1
+  || ['true', 'yes', 'key', 'critical'].includes(String(value || '').trim().toLowerCase())
+
+const isOverviewPriorityNode = (node) => {
+  const raw = node?.rawData || node || {}
+  const attributes = raw.attributes || {}
+  if (
+    isTruthyGraphFlag(raw.is_key)
+    || isTruthyGraphFlag(raw.is_key_node)
+    || isTruthyGraphFlag(raw.isKey)
+    || isTruthyGraphFlag(attributes.is_key)
+    || isTruthyGraphFlag(attributes.is_key_node)
+    || isTruthyGraphFlag(attributes.isKey)
+    || isTruthyGraphFlag(attributes.focus_node)
+  ) return true
+
+  const priority = String(attributes.priority || attributes.importance || raw.priority || '').trim().toLowerCase()
+  if (priority === 'critical' || priority === 'high') return true
+  const priorityScore = Number(attributes.priority_score ?? raw.priority_score)
+  return Number.isFinite(priorityScore) && priorityScore >= 70
+}
+
+const isSelectedGraphNode = (node) => {
+  if (selectedItem.value?.type !== 'node') return false
+  return getNodeStableId(selectedItem.value.data) === String(node?.id || '')
+}
+
+const shouldShowNodeLabel = (
+  node,
+  {
+    highlightActive = false,
+    highlighted = false,
+    zoomScale = 1,
+  } = {},
+) => {
   const rawStatus = getEntityAnimationStatus(node)
   // 回放/动画中不再把"非脉冲"元素整体藏掉——否则整张关系网消失（"显示不出来"）。
   // 直接采用每个节点/边自身的状态：steady 背景常显、new/active 高亮跳动、hidden 才隐藏。
   const status = rawStatus
   if (status === 'hidden') return false
-  if (status === 'new' || status === 'active') return true
+  if (highlighted || isSelectedGraphNode(node)) return true
+  if (status === 'active') return true
+  if (status === 'new' && zoomScale >= NODE_LABEL_LOD_ZOOM) return true
   const layer = node.layer || nodeLayerKey(node)
   if (layer === 'macro' || layer === 'subregion') return true
   const type = String(node.type || '').toLowerCase()
-  if (type.includes('risk')) return true
+  if (type.includes('risk') || type.includes('风险')) return true
+  if (isOverviewPriorityNode(node)) return true
+  if (zoomScale < NODE_LABEL_LOD_ZOOM && layer === 'agent') return false
   return !highlightActive && layer !== 'agent'
 }
 
@@ -1427,7 +1789,7 @@ const getLinkAnimationStyle = (
   }
 
   if (highlightActive) {
-    if (highlighted) {
+    if (highlighted && status !== 'hidden') {
       color = highlightColor
       width = is3D ? 2.05 : 3.2
       opacity = 1
@@ -1436,7 +1798,7 @@ const getLinkAnimationStyle = (
       labelColor = highlightColor
       particles = Math.max(particles, 2.5)
       particleWidth = Math.max(particleWidth, 2.6)
-    } else if (focused) {
+    } else if (focused && status !== 'hidden') {
       color = status === 'active' ? color : neighborColor
       width = Math.max(width, is3D ? 1.15 : 2.1)
       opacity = Math.max(opacity, is3D ? 0.62 : 0.9)
@@ -1506,8 +1868,8 @@ const renderGraph3D = async () => {
 
   const nodes = nodesData.map(node => ({
     id: node.uuid,
-    name: node.name || 'Unnamed',
-    type: node.labels?.find(label => label !== 'Entity') || 'Entity',
+    name: safeDisplayText(node.name, '未命名节点'),
+    type: safeToken(node.labels?.find(label => label !== 'Entity'), '其他类型'),
     rawData: node,
   }))
   nodes.forEach(node => {
@@ -1709,7 +2071,7 @@ const renderGraph3D = async () => {
       .nodeId('id')
       .nodeThreeObject(createNodeObject)
       .nodeThreeObjectExtend(false)
-      .nodeLabel(node => `${node.name}\n${node.type}`)
+      .nodeLabel(node => `${safeDisplayText(node.name, '未命名节点')}\n${safeToken(node.type, '其他类型')}`)
       .nodeVal(node => getNodeAnimationStyle(node, {
         highlightActive,
         highlighted: Boolean(node.externallyHighlighted),
@@ -1868,10 +2230,10 @@ const renderGraph = () => {
   
   const nodes = nodesData.map(n => {
     const oldNode = oldNodeMap.get(n.uuid)
-    return {
+    const graphNode = {
       id: n.uuid,
-      name: n.name || 'Unnamed',
-      type: n.labels?.find(l => l !== 'Entity') || 'Entity',
+      name: safeDisplayText(n.name, '未命名节点'),
+      type: safeToken(n.labels?.find(l => l !== 'Entity'), '其他类型'),
       rawData: n,
       x: oldNode ? oldNode.x : undefined,
       y: oldNode ? oldNode.y : undefined,
@@ -1881,6 +2243,8 @@ const renderGraph = () => {
       vy: oldNode ? oldNode.vy : undefined,
       _isDragging: oldNode ? oldNode._isDragging : false
     }
+    graphNode.layer = nodeLayerKey(graphNode)
+    return graphNode
   })
 
   const nodeIds = new Set(nodes.map(n => n.id))
@@ -1892,8 +2256,10 @@ const renderGraph = () => {
   // 处理边数据，计算同一对节点间的边数量和索引
   const edgePairCount = {}
   const selfLoopEdges = {} // 按节点分组的自环边
-  const tempEdges = edgesData
+  const filteredEdges = edgesData
     .filter(e => nodeIds.has(e.source_node_uuid) && nodeIds.has(e.target_node_uuid) && densityPlan.allow(e))
+  const tempEdges = aggregateParallelEdges2D(filteredEdges)
+  renderedEdgeStats.value = { shown: tempEdges.length, total: densityPlan.total }
   
   // 统计每对节点之间的边数量，收集自环边
   tempEdges.forEach(e => {
@@ -1979,7 +2345,16 @@ const renderGraph = () => {
         curvature = -curvature
       }
     }
-    const highlightKeys = buildEdgeHighlightKeys(e, e.source_node_uuid, e.target_node_uuid, e.fact_type || e.name || 'RELATED', currentIndex)
+    const parallelMembers = Array.isArray(e.parallelEdges) && e.parallelEdges.length ? e.parallelEdges : [e]
+    const highlightKeys = uniqueTokens(parallelMembers.flatMap((member, memberIndex) => (
+      buildEdgeHighlightKeys(
+        member,
+        member.source_node_uuid,
+        member.target_node_uuid,
+        member.fact_type || member.name || 'RELATED',
+        memberIndex,
+      )
+    )))
     
     edges.push({
       source: e.source_node_uuid,
@@ -2059,44 +2434,71 @@ const renderGraph = () => {
   }
   const shouldAnimateFrameTransition = props.highlightMode === 'animation'
 
-  // Simulation - 根据边数量动态调整节点间距
+  const labelLayoutActive = showEdgeLabels.value
+  const clusterTargets = buildRegionClusterTargets(nodes, width, height)
+  const clusterTargetFor = (node) => clusterTargets.get(nodeRegionKey(node)) || { x: width / 2, y: height / 2 }
+
+  // Simulation: keep each Agent around its real owning region. Once the
+  // density view removes most baseline edges, a plain global force would let
+  // same-region Agents drift to opposite sides and turn local propagation into
+  // full-screen spaghetti.
   const simulation = d3.forceSimulation(nodes)
-    .alpha(oldNodeMap.size > 0 ? 0.3 : 1) // 降低热度避免图谱位置突变跳动
-    .alphaDecay(oldNodeMap.size > 0 ? 0.09 : 0.06)
-    .velocityDecay(0.55)
+    .alpha(labelLayoutActive ? 0.9 : (oldNodeMap.size > 0 ? 0.3 : 1)) // 标签模式需要重新展开；普通刷新降低热度避免位置突变
+    .alphaDecay(labelLayoutActive ? 0.045 : (oldNodeMap.size > 0 ? 0.09 : 0.06))
+    .velocityDecay(labelLayoutActive ? 0.5 : 0.55)
     .force('link', d3.forceLink(edges).id(d => d.id).distance(d => {
-      // 根据这对节点之间的边数量动态调整距离
-      // 基础距离 150，每多一条边增加 40
-      const baseDistance = 150
+      const sourceLayer = d.source?.layer || nodeLayerKey(d.source)
+      const targetLayer = d.target?.layer || nodeLayerKey(d.target)
+      const localAgentLink = sourceLayer === 'agent' && targetLayer === 'agent'
+      const macroLink = sourceLayer === 'macro' && targetLayer === 'macro'
+      const baseDistance = labelLayoutActive
+        ? (localAgentLink ? 118 : macroLink ? 220 : 168)
+        : (localAgentLink ? 58 : macroLink ? 150 : 92)
       const edgeCount = d.pairTotal || 1
-      return baseDistance + (edgeCount - 1) * 50
+      return baseDistance + (edgeCount - 1) * (labelLayoutActive ? 30 : 12)
     }))
-    .force('charge', d3.forceManyBody().strength(-400))
+    .force('charge', d3.forceManyBody().strength(d => {
+      if (labelLayoutActive) return d.layer === 'agent' ? -170 : -320
+      if (d.layer === 'macro') return -190
+      if (d.layer === 'subregion') return -125
+      return -58
+    }))
     .force('center', d3.forceCenter(width / 2, height / 2))
-    .force('collide', d3.forceCollide(50))
-    // 添加向中心的引力，让独立的节点群聚集到中心区域
-    .force('x', d3.forceX(width / 2).strength(0.04))
-    .force('y', d3.forceY(height / 2).strength(0.04))
+    .force('collide', d3.forceCollide(d => {
+      if (labelLayoutActive) return d.layer === 'agent' ? 46 : 62
+      if (d.layer === 'macro') return 34
+      if (d.layer === 'subregion') return 29
+      return 22
+    }))
+    .force('x', d3.forceX(d => clusterTargetFor(d).x).strength(d => d.layer === 'macro' ? 0.3 : 0.16))
+    .force('y', d3.forceY(d => clusterTargetFor(d).y).strength(d => d.layer === 'macro' ? 0.3 : 0.16))
   
   currentSimulation = simulation
 
   const g = svg.append('g')
-  
-  // Zoom
-  const zoomBehavior = d3.zoom().extent([[0, 0], [width, height]]).scaleExtent([0.1, 4]).on('zoom', (event) => {
-    currentZoomTransform = event.transform
-    g.attr('transform', event.transform)
+
+  // 语义缩放：缩放只改变节点之间的投影距离，不把节点、文字和线宽当图片一起放大。
+  const projectPoint = (x = 0, y = 0) => ({
+    x: currentZoomTransform.applyX(Number.isFinite(x) ? x : 0),
+    y: currentZoomTransform.applyY(Number.isFinite(y) ? y : 0),
   })
-  svg.call(zoomBehavior)
-  svg.call(zoomBehavior.transform, currentZoomTransform)
+  const invertPoint = (x = 0, y = 0) => {
+    const [gx, gy] = currentZoomTransform.invert([x, y])
+    return { x: gx, y: gy }
+  }
 
   // Links - 使用 path 支持曲线
   const linkGroup = g.append('g').attr('class', 'links')
+  const pulseLinkGroup = g.append('g').attr('class', 'propagation-links')
+  let pulseLink = pulseLinkGroup.selectAll('path')
+  const renderedNodeMap = new Map(nodes.map(node => [node.id, node]))
   
   // 计算曲线路径
   const getLinkPath = (d) => {
-    const sx = d.source.x, sy = d.source.y
-    const tx = d.target.x, ty = d.target.y
+    const source = projectPoint(d.source.x, d.source.y)
+    const target = projectPoint(d.target.x, d.target.y)
+    const sx = source.x, sy = source.y
+    const tx = target.x, ty = target.y
     
     // 检测自环
     if (d.isSelfLoop) {
@@ -2134,8 +2536,10 @@ const renderGraph = () => {
   
   // 计算曲线中点（用于标签定位）
   const getLinkMidpoint = (d) => {
-    const sx = d.source.x, sy = d.source.y
-    const tx = d.target.x, ty = d.target.y
+    const source = projectPoint(d.source.x, d.source.y)
+    const target = projectPoint(d.target.x, d.target.y)
+    const sx = source.x, sy = source.y
+    const tx = target.x, ty = target.y
     
     // 检测自环
     if (d.isSelfLoop) {
@@ -2171,6 +2575,7 @@ const renderGraph = () => {
     .attr('stroke', '#C0C0C0')
     .attr('stroke-width', 1.5)
     .attr('fill', 'none')
+    .attr('stroke-linecap', 'round')
     .style('cursor', 'pointer')
     .on('click', (event, d) => {
       event.stopPropagation()
@@ -2182,7 +2587,123 @@ const renderGraph = () => {
         type: 'edge',
         data: d.rawData
       }
+      refreshNodeLabelVisibility({ interrupt: true })
     })
+
+  const getRenderedLinkStyle = (edge, highlightState) => getLinkAnimationStyle(edge, {
+    highlightActive: highlightState.highlightActive,
+    highlighted: highlightState.isEdgeHighlighted(edge),
+    focused: highlightState.isLinkFocused(edge),
+    is3D: false,
+    highlightColor: highlightState.edgeHighlightColor,
+    neighborColor: edgeNeighborColor,
+  })
+
+  const buildPulseEdges = (sourceEdges = []) => aggregateParallelEdges2D(
+    (Array.isArray(sourceEdges) ? sourceEdges : []).filter((edge) => {
+      const status = normalizeAnimationStatus(edge?.attributes?.animation_status)
+      return ['new', 'active'].includes(status)
+        && renderedNodeMap.has(String(edge?.source_node_uuid || edge?.source || ''))
+        && renderedNodeMap.has(String(edge?.target_node_uuid || edge?.target || ''))
+    }),
+  ).map((edge, index) => {
+    const sourceId = String(edge?.source_node_uuid || edge?.source || '')
+    const targetId = String(edge?.target_node_uuid || edge?.target || '')
+    return {
+      id: getEdgeStableId(edge, index),
+      source: renderedNodeMap.get(sourceId),
+      target: renderedNodeMap.get(targetId),
+      type: edge.fact_type || edge.name || 'RELATED',
+      name: edge.name || edge.fact_type || 'RELATED',
+      curvature: 0,
+      isSelfLoop: sourceId === targetId,
+      pairTotal: 1,
+      rawData: edge,
+    }
+  })
+
+  const applyPulseLinkProgress = () => {
+    pulseLink.each(function(d) {
+      const path = d3.select(this)
+      const style = getLinkAnimationStyle(d, { is3D: false })
+      path
+        .attr('stroke', style.color)
+        .attr('stroke-width', Math.max(style.width, style.status === 'active' ? 3.4 : 2.6))
+        .attr('opacity', Math.max(style.opacity, style.status === 'active' ? 0.92 : 0.72))
+
+      const progress = getEntityAnimationProgress(d)
+      if (progress >= 0.999) {
+        path.attr('stroke-dasharray', style.dashArray || null).attr('stroke-dashoffset', null)
+        return
+      }
+      let pathLength = 0
+      try {
+        pathLength = this.getTotalLength()
+      } catch {
+        pathLength = 0
+      }
+      if (!Number.isFinite(pathLength) || pathLength <= 0) return
+      const visibleLength = Math.max(0.01, pathLength * progress)
+      path
+        .attr('stroke-dasharray', `${visibleLength} ${pathLength + 1}`)
+        .attr('stroke-dashoffset', 0)
+    })
+  }
+
+  const updatePulseLinks = (sourceEdges = []) => {
+    pulseLink = pulseLinkGroup
+      .selectAll('path')
+      .data(buildPulseEdges(sourceEdges), d => d.id)
+      .join(
+        enter => enter.append('path')
+          .attr('class', 'propagation-link')
+          .attr('fill', 'none')
+          .attr('stroke-linecap', 'round')
+          .attr('pointer-events', 'none'),
+        update => update,
+        exit => exit.remove(),
+      )
+      .attr('d', d => getLinkPath(d))
+    applyPulseLinkProgress()
+  }
+
+  // Draw current propagation from source to target. The progress mask is
+  // applied after all highlight styling, so selecting/highlighting an edge
+  // cannot accidentally reveal the unfinished remainder of its path.
+  const applyLinkPathProgress = ({ currentOnly = false } = {}) => {
+    const highlightState = getCurrentHighlightState()
+    link.each(function(d) {
+      const status = getEntityAnimationStatus(d)
+      const isCurrentPropagation = status === 'new' || status === 'active'
+      if (currentOnly && !isCurrentPropagation) return
+
+      const path = d3.select(this)
+      if (isCurrentPropagation) {
+        const progress = getEntityAnimationProgress(d)
+        if (progress >= 0.999) {
+          path.attr('stroke-dasharray', null).attr('stroke-dashoffset', null)
+          return
+        }
+        let pathLength = 0
+        try {
+          pathLength = this.getTotalLength()
+        } catch {
+          pathLength = 0
+        }
+        if (!Number.isFinite(pathLength) || pathLength <= 0) return
+        const visibleLength = Math.max(0.01, pathLength * progress)
+        path
+          .attr('stroke-dasharray', `${visibleLength} ${pathLength + 1}`)
+          .attr('stroke-dashoffset', 0)
+        return
+      }
+
+      const style = getRenderedLinkStyle(d, highlightState)
+      path
+        .attr('stroke-dasharray', style.dashArray || null)
+        .attr('stroke-dashoffset', null)
+    })
+  }
 
   // Link labels background (白色背景使文字更清晰)
   const linkLabelBg = linkGroup.selectAll('rect')
@@ -2205,6 +2726,7 @@ const renderGraph = () => {
         type: 'edge',
         data: d.rawData
       }
+      refreshNodeLabelVisibility({ interrupt: true })
     })
 
   // Link labels
@@ -2231,6 +2753,7 @@ const renderGraph = () => {
         type: 'edge',
         data: d.rawData
       }
+      refreshNodeLabelVisibility({ interrupt: true })
     })
   
   // 保存引用供外部控制显隐
@@ -2252,16 +2775,18 @@ const renderGraph = () => {
     .call(d3.drag()
       .on('start', (event, d) => {
         // 只记录位置，不重启仿真（区分点击和拖拽）
+        const point = invertPoint(event.x, event.y)
         d.fx = d.x
         d.fy = d.y
-        d._dragStartX = event.x
-        d._dragStartY = event.y
+        d._dragStartX = point.x
+        d._dragStartY = point.y
         d._isDragging = false
       })
       .on('drag', (event, d) => {
+        const point = invertPoint(event.x, event.y)
         // 检测是否真正开始拖拽（移动超过阈值）
-        const dx = event.x - d._dragStartX
-        const dy = event.y - d._dragStartY
+        const dx = point.x - d._dragStartX
+        const dy = point.y - d._dragStartY
         const distance = Math.sqrt(dx * dx + dy * dy)
         
         if (!d._isDragging && distance > 3) {
@@ -2271,8 +2796,8 @@ const renderGraph = () => {
         }
         
         if (d._isDragging) {
-          d.fx = event.x
-          d.fy = event.y
+          d.fx = point.x
+          d.fy = point.y
         }
       })
       .on('end', (event, d) => {
@@ -2302,6 +2827,7 @@ const renderGraph = () => {
         entityType: d.type,
         color: getColor(d.type)
       }
+      refreshNodeLabelVisibility({ interrupt: true })
       emit('node-select', buildNodePayload(selectedItem.value))
     })
     .on('mouseenter', (event, d) => {
@@ -2338,6 +2864,86 @@ const renderGraph = () => {
     .attr('dy', 4)
     .style('pointer-events', 'none')
     .style('font-family', 'system-ui, sans-serif')
+
+  const getRenderedNodeLabelOpacity = (graphNode, highlightState) => {
+    const highlighted = Boolean(graphNode.externallyHighlighted)
+    const visible = shouldShowNodeLabel(graphNode, {
+      highlightActive: highlightState.highlightActive,
+      highlighted,
+      zoomScale: currentZoomTransform.k,
+    })
+    if (!visible) return 0
+
+    const style = getNodeAnimationStyle(graphNode, {
+      highlightActive: highlightState.highlightActive,
+      highlighted,
+      is3D: false,
+    })
+    if (isSelectedGraphNode(graphNode)) return Math.max(style.labelOpacity, 0.96)
+    if (
+      currentZoomTransform.k < NODE_LABEL_LOD_ZOOM
+      && isOverviewPriorityNode(graphNode)
+    ) return Math.max(style.labelOpacity, 0.58)
+    return style.labelOpacity
+  }
+
+  const refreshNodeLabelVisibility = ({ interrupt = false } = {}) => {
+    const highlightState = getCurrentHighlightState()
+    if (interrupt) nodeLabels.interrupt()
+    nodeLabels.attr('opacity', d => getRenderedNodeLabelOpacity(d, highlightState))
+  }
+
+  const drawGraphFrame = () => {
+    link.attr('d', d => getLinkPath(d))
+    applyLinkPathProgress({ currentOnly: true })
+    pulseLink.attr('d', d => getLinkPath(d))
+    applyPulseLinkProgress()
+
+    linkLabels.each(function(d) {
+      const mid = getLinkMidpoint(d)
+      d3.select(this)
+        .attr('x', mid.x)
+        .attr('y', mid.y)
+        .attr('transform', '') // 移除旋转，保持水平
+    })
+
+    // 使用预估尺寸，避免在每个 tick 中触发 getBBox() 同步布局。
+    linkLabelBg.each(function(d) {
+      const mid = getLinkMidpoint(d)
+      const width = d.labelWidth || 36
+      const height = d.labelHeight || 14
+      d3.select(this)
+        .attr('x', mid.x - width / 2 - 4)
+        .attr('y', mid.y - height / 2 - 2)
+        .attr('width', width + 8)
+        .attr('height', height + 4)
+        .attr('transform', '') // 移除旋转
+    })
+
+    node
+      .attr('cx', d => projectPoint(d.x, d.y).x)
+      .attr('cy', d => projectPoint(d.x, d.y).y)
+
+    nodeLabels
+      .attr('x', d => projectPoint(d.x, d.y).x)
+      .attr('y', d => projectPoint(d.x, d.y).y)
+  }
+
+  // Zoom: 不再 transform 整个 g，避免节点和文字被当成图片一起放大。
+  // Clamp both interactive zoom and transforms restored from an older render.
+  currentZoomTransform = clamp2DZoomTransform(currentZoomTransform, width, height)
+  svg.attr('data-graph-zoom', currentZoomTransform.k.toFixed(4))
+  const zoomBehavior = d3.zoom()
+    .extent([[0, 0], [width, height]])
+    .scaleExtent([MIN_2D_ZOOM, MAX_2D_ZOOM])
+    .on('zoom', (event) => {
+      currentZoomTransform = clamp2DZoomTransform(event.transform, width, height)
+      svg.attr('data-graph-zoom', currentZoomTransform.k.toFixed(4))
+      drawGraphFrame()
+      refreshNodeLabelVisibility({ interrupt: true })
+    })
+  svg.call(zoomBehavior)
+  svg.call(zoomBehavior.transform, currentZoomTransform)
 
   if (shouldAnimateFrameTransition) {
     const highlightState = getCurrentHighlightState()
@@ -2377,21 +2983,21 @@ const renderGraph = () => {
     linkLabels.attr('opacity', 0)
   }
 
-  const applyBaseGraphState = () => {
+  const applyBaseGraphState = ({ animate = shouldAnimateFrameTransition } = {}) => {
     const highlightState = getCurrentHighlightState()
-    const animateNode = shouldAnimateFrameTransition
+    const animateNode = animate
       ? node.transition().duration(420).delay(d => getEntityDelayMs(d)).ease(d3.easeCubicOut)
       : node
-    const animateNodeLabels = shouldAnimateFrameTransition
+    const animateNodeLabels = animate
       ? nodeLabels.transition().duration(420).delay(d => getEntityDelayMs(d)).ease(d3.easeCubicOut)
       : nodeLabels
-    const animateLink = shouldAnimateFrameTransition
+    const animateLink = animate
       ? link.transition().duration(380).delay(d => getEntityDelayMs(d, 0.72)).ease(d3.easeCubicOut)
       : link
-    const animateLinkLabelBg = shouldAnimateFrameTransition
+    const animateLinkLabelBg = animate
       ? linkLabelBg.transition().duration(380).delay(d => getEntityDelayMs(d, 0.72)).ease(d3.easeCubicOut)
       : linkLabelBg
-    const animateLinkLabels = shouldAnimateFrameTransition
+    const animateLinkLabels = animate
       ? linkLabels.transition().duration(380).delay(d => getEntityDelayMs(d, 0.72)).ease(d3.easeCubicOut)
       : linkLabels
 
@@ -2423,15 +3029,7 @@ const renderGraph = () => {
       }).strokeWidth)
 
     animateNodeLabels
-      .attr('opacity', d => {
-        const highlighted = Boolean(d.externallyHighlighted)
-        if (!shouldShowNodeLabel(d, { highlightActive: highlightState.highlightActive, highlighted })) return 0
-        return getNodeAnimationStyle(d, {
-          highlightActive: highlightState.highlightActive,
-          highlighted,
-          is3D: false,
-        }).labelOpacity
-      })
+      .attr('opacity', d => getRenderedNodeLabelOpacity(d, highlightState))
       .attr('font-weight', d => getNodeAnimationStyle(d, {
         highlightActive: highlightState.highlightActive,
         highlighted: Boolean(d.externallyHighlighted),
@@ -2455,14 +3053,6 @@ const renderGraph = () => {
         highlightColor: highlightState.edgeHighlightColor,
         neighborColor: edgeNeighborColor,
       }).width)
-      .attr('stroke-dasharray', d => getLinkAnimationStyle(d, {
-        highlightActive: highlightState.highlightActive,
-        highlighted: highlightState.isEdgeHighlighted(d),
-        focused: highlightState.isLinkFocused(d),
-        is3D: false,
-        highlightColor: highlightState.edgeHighlightColor,
-        neighborColor: edgeNeighborColor,
-      }).dashArray || null)
       .attr('opacity', d => getLinkAnimationStyle(d, {
         highlightActive: highlightState.highlightActive,
         highlighted: highlightState.isEdgeHighlighted(d),
@@ -2524,6 +3114,8 @@ const renderGraph = () => {
         highlightColor: highlightState.edgeHighlightColor,
         neighborColor: edgeNeighborColor,
       }).status === 'active' ? 700 : 500)
+
+    applyLinkPathProgress()
   }
 
   graph2DState = {
@@ -2536,49 +3128,20 @@ const renderGraph = () => {
     linkLabelBg,
     linkLabels,
     applyBaseGraphState,
+    refreshNodeLabelVisibility,
+    updatePulseLinks,
   }
   last2DStructureSignature = buildGraphStructureSignature(props.graphData)
+  updatePulseLinks(edgesData)
   applyBaseGraphState()
+  drawGraphFrame()
 
-  const maxTicks = oldNodeMap.size > 0 ? 70 : 140
+  const maxTicks = labelLayoutActive ? 220 : (oldNodeMap.size > 0 ? 70 : 140)
   let tickCount = 0
 
   simulation.on('tick', () => {
     tickCount += 1
-    // 更新曲线路径
-    link.attr('d', d => getLinkPath(d))
-    
-    if (showEdgeLabels.value) {
-      // 更新边标签位置（无旋转，水平显示更清晰）
-      linkLabels.each(function(d) {
-        const mid = getLinkMidpoint(d)
-        d3.select(this)
-          .attr('x', mid.x)
-          .attr('y', mid.y)
-          .attr('transform', '') // 移除旋转，保持水平
-      })
-
-      // 使用预估尺寸，避免在每个 tick 中触发 getBBox() 同步布局。
-      linkLabelBg.each(function(d) {
-        const mid = getLinkMidpoint(d)
-        const width = d.labelWidth || 36
-        const height = d.labelHeight || 14
-        d3.select(this)
-          .attr('x', mid.x - width / 2 - 4)
-          .attr('y', mid.y - height / 2 - 2)
-          .attr('width', width + 8)
-          .attr('height', height + 4)
-          .attr('transform', '') // 移除旋转
-      })
-    }
-
-    node
-      .attr('cx', d => d.x)
-      .attr('cy', d => d.y)
-
-    nodeLabels
-      .attr('x', d => d.x)
-      .attr('y', d => d.y)
+    drawGraphFrame()
 
     if (tickCount >= maxTicks) {
       simulation.stop()
@@ -2593,12 +3156,19 @@ const renderGraph = () => {
 }
 
 watch(() => props.graphData, () => {
+  selectedItem.value = reconcileVisibleGraphSelection(selectedItem.value, props.graphData)
   const nextSignature = buildGraphStructureSignature(props.graphData)
   if (graphMode.value === '2d' && graph2DState && nextSignature && nextSignature === last2DStructureSignature) {
-    nextTick(updateRenderedGraphData)
+    nextTick(scheduleRenderedGraphDataUpdate)
     return
   }
   nextTick(scheduleGraphRender)
+})
+
+watch(propagationEdgeSignature, () => {
+  if (graphMode.value === '2d' && graph2DState) {
+    nextTick(scheduleRenderedGraphDataUpdate)
+  }
 })
 
 watch(
@@ -2612,7 +3182,7 @@ watch(
   ],
   () => {
     if (graphMode.value === '2d' && graph2DState) {
-      nextTick(updateRenderedGraphData)
+      nextTick(scheduleRenderedGraphDataUpdate)
       return
     }
     nextTick(scheduleGraphRender)
@@ -2671,6 +3241,10 @@ onUnmounted(() => {
   if (renderFrame !== null) {
     cancelAnimationFrame(renderFrame)
     renderFrame = null
+  }
+  if (graph2DDataFrame !== null) {
+    cancelAnimationFrame(graph2DDataFrame)
+    graph2DDataFrame = null
   }
   stop2DSimulation()
   destroy3DGraph()
@@ -3335,8 +3909,11 @@ input:checked + .slider:before {
 
 .detail-type-badge {
   padding: 4px 10px;
+  border: 1px solid var(--k-color-border-strong);
   border-radius: 12px;
-  font-size: 11px;
+  background: transparent;
+  color: var(--k-color-text-secondary);
+  font-size: var(--k-text-caption);
   font-weight: 500;
   margin-left: auto;
   margin-right: 12px;
@@ -3773,5 +4350,102 @@ input:checked + .slider:before {
 .episode-tag.small {
   padding: 3px 6px;
   font-size: 9px;
+}
+
+/* Shared workflow chrome: graph categories may keep data colors; controls stay green. */
+.graph-panel {
+  container-type: inline-size;
+}
+
+.mode-btn.active {
+  background: var(--k-color-brand-600);
+  color: #fff;
+}
+
+.density-select {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  height: 32px;
+  padding: 0 8px 0 10px;
+  border: 1px solid var(--k-color-border-strong);
+  border-radius: 999px;
+  background: var(--k-color-surface);
+  color: var(--k-color-text-muted);
+  font-size: 11px;
+  font-weight: 650;
+}
+
+.density-select select {
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: var(--k-color-text);
+  font: inherit;
+}
+
+.focus-badge,
+.label-tag,
+.episode-tag,
+.edge-badge,
+.legend-more {
+  border: 1px solid var(--k-color-border-strong);
+  background: transparent;
+  color: var(--k-color-text-secondary);
+}
+
+.graph-3d-overlay {
+  background:
+    radial-gradient(circle at 25% 18%, rgba(31, 93, 69, 0.09), transparent 28%),
+    linear-gradient(180deg, rgba(247, 249, 247, 0.2) 0%, rgba(247, 249, 247, 0.68) 100%);
+}
+
+.legend-title,
+.legend-edge-shown {
+  color: var(--k-color-brand-600);
+}
+
+.legend-edge-causal {
+  border-top-color: var(--k-color-brand-600);
+}
+
+input:checked + .slider {
+  background-color: var(--k-color-brand-600);
+}
+
+.graph-legend,
+.edge-labels-toggle,
+.detail-panel {
+  border-color: var(--k-color-border);
+  background: color-mix(in srgb, var(--k-color-surface) 96%, transparent);
+  box-shadow: var(--k-shadow-raised);
+}
+
+.legend-more {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 7px;
+  border-radius: 999px;
+  font-size: 11px;
+}
+
+@container (max-width: 760px) {
+  .panel-title-wrap {
+    display: none;
+  }
+
+  .panel-header {
+    justify-content: flex-end;
+    padding-inline: 12px;
+  }
+
+  .header-tools {
+    gap: 6px;
+  }
+
+  .density-select > span,
+  .tool-btn .btn-text {
+    display: none;
+  }
 }
 </style>
