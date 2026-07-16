@@ -59,7 +59,7 @@ import GraphPanel from '../components/GraphPanel.vue'
 import Step2EnvSetup from '../components/Step2EnvSetup.vue'
 import { getProject, getGraphData } from '../api/graph'
 import { getSimulation, getSimulationGraphRealtime } from '../api/simulation'
-import { getSceneSeedContextBySimulation } from '../store/sceneSeedBridge'
+import { attachSceneSeedContextToSimulation, getSceneSeedContextBySimulation, mergeProjectSceneSeedContext } from '../store/sceneSeedBridge'
 import { markWorkflowStep } from '../store/workflowNavigation'
 
 const route = useRoute()
@@ -85,6 +85,22 @@ const currentStatus = ref('idle') // idle | processing | completed | error
 const graphHighlight = ref({ nodeIds: [], nodeNames: [], edgeIds: [], label: '', mode: '' })
 const initialInjectedVariables = ref([])
 const sceneSeedContext = ref(null)
+
+const applySceneSeedInputs = (context) => {
+  sceneSeedContext.value = context
+  const events = context?.normalizedEventInputs || []
+  const policies = context?.normalizedPolicyInputs || []
+  initialInjectedVariables.value = events.length || policies.length
+    ? [
+        ...events.map(item => ({ ...item, type: 'disaster' })),
+        ...policies.map(item => ({ ...item, type: 'policy' }))
+      ]
+    : context?.initialVariables || []
+
+  if (context && currentSimulationId.value) {
+    attachSceneSeedContextToSimulation(currentSimulationId.value, context)
+  }
+}
 
 // --- Computed Layout Styles ---
 const leftPanelStyle = computed(() => {
@@ -440,12 +456,15 @@ const toggleGraphCollapse = () => {
 }
 
 const handleGoBack = () => {
-  // 返回到 process 页面
-  if (projectData.value?.project_id) {
-    router.push({ name: 'Process', params: { projectId: projectData.value.project_id } })
-  } else {
-    router.push({ name: 'SceneComposer', query: { restore: '1' } })
+  // /process 只负责图谱构建和创建模拟入口；正式 Step 2 返回 Step 1。
+  if (
+    String(route.query.golden_case_id || '') === 'wuhan_covid_v1'
+    && String(route.query.demo_mode || '') === 'frozen_replay'
+  ) {
+    router.push({ name: 'WuhanDemo', query: { version: 'v2', step: '1' } })
+    return
   }
+  router.push({ name: 'SceneComposer', query: { ...route.query, step: '1', restore: '1' } })
 }
 
 const handleNextStep = (params = {}) => {
@@ -496,7 +515,7 @@ const handleNextStep = (params = {}) => {
     params: { simulationId: currentSimulationId.value }
   }
   
-  const query = {}
+  const query = { ...route.query, step: '3' }
   if (params.maxRounds) query.maxRounds = params.maxRounds
   if (params.scenarioMode) query.scenario_mode = params.scenarioMode
   if (params.hazardTemplateId) query.hazard_template_id = params.hazardTemplateId
@@ -506,7 +525,7 @@ const handleNextStep = (params = {}) => {
   if (params.temporalPreset) query.temporal_preset = params.temporalPreset
   if (params.referenceTime) query.reference_time = params.referenceTime
   if (params.variableCount !== undefined) query.variable_count = params.variableCount
-  if (Object.keys(query).length > 0) routeParams.query = query
+  routeParams.query = query
   markWorkflowStep(2, {
     visited: true,
     status: 'done',
@@ -531,9 +550,7 @@ const handleNextStep = (params = {}) => {
 const loadSimulationData = async () => {
   try {
     addLog(`加载模拟数据: ${currentSimulationId.value}`)
-    sceneSeedContext.value = getSceneSeedContextBySimulation(currentSimulationId.value)
-    console.log('[DEBUG loadSimulationData] currentSimulationId:', currentSimulationId.value, 'sceneSeedContext:', sceneSeedContext.value)
-    initialInjectedVariables.value = sceneSeedContext.value?.initialVariables || []
+    applySceneSeedInputs(getSceneSeedContextBySimulation(currentSimulationId.value))
     
     // Pre-populate map center to avoid rendering Africa during the loading phase
     const initialCenter = resolveSceneSeedCenter()
@@ -573,6 +590,7 @@ const loadSimulationData = async () => {
         const projRes = await getProject(simData.project_id)
         if (projRes.success && projRes.data) {
           projectData.value = projRes.data
+          applySceneSeedInputs(mergeProjectSceneSeedContext(projRes.data, sceneSeedContext.value))
           if (mapProjection.value) {
             mapProjection.value = normalizeMapProjection(mapProjection.value, graphData.value)
           }

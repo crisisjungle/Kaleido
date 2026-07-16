@@ -1,33 +1,39 @@
 <template>
-  <div class="scene-composer-page">
-    <header class="topbar">
-      <KaleidoNavBrand to="/" />
-
-      <div class="topbar-meta">
-        <WorkflowStepMenu :current-step="1" current-name="背景定义" />
-        <span class="topbar-divider" aria-hidden="true"></span>
-        <span class="scene-status" :class="`is-${stepStatusTone}`">
-          <span class="scene-status-dot" aria-hidden="true"></span>
-          {{ stepStatusText }}
-        </span>
-      </div>
-    </header>
-
-    <main class="workspace-shell" :class="{ 'report-finished-layout': reportStepDone }">
+  <KaleidoWorkflowShell
+    class="scene-composer-page"
+    :step="1"
+    step-name="背景定义"
+    :status-text="stepStatusText"
+    :status-tone="stepStatusTone"
+    :view-mode="viewMode"
+    :visual-ratio="56"
+    collapse-label="收起地图"
+    expand-label="展开地图"
+    @toggle-visual="toggleMapCollapse"
+  >
       <section class="setup-column">
         <div class="setup-scroll" :class="{ 'has-report': showReportStage }">
-          <section v-if="!showReportStage" class="panel setup-panel" :class="{ 'compact-mode': !showReportStage }">
-            <div class="panel-head">
-              <div>
-                <span class="panel-kicker">01 / 参数设置</span>
-                <h2>背景参数</h2>
-              </div>
-              <button class="advanced-toggle" type="button" @click="advancedOpen = !advancedOpen">
-                {{ advancedOpen ? '收起高级设置' : '高级设置' }}
+          <section v-if="isCuratedShowcase && !showReportStage" class="panel curated-foundation-state">
+            <div class="curated-foundation-state-inner">
+              <h2>{{ curatedFoundationLoading ? '正在恢复武汉背景' : '武汉背景暂未加载' }}</h2>
+              <p>{{ curatedFoundationLoading ? '正在读取已锁定的地点、时间、系统基线、事实资料和研究边界。' : curatedFoundationError }}</p>
+              <button
+                v-if="!curatedFoundationLoading"
+                class="primary-btn"
+                type="button"
+                @click="loadCuratedFoundation"
+              >
+                重新加载武汉背景
               </button>
             </div>
+          </section>
 
+          <section v-else-if="!showReportStage" class="panel setup-panel" :class="{ 'compact-mode': !showReportStage }">
             <div class="setup-form">
+              <div class="foundation-section-heading">
+                <span>01</span>
+                <div><strong>空间范围</strong><small>确认研究对象真正发生在哪里</small></div>
+              </div>
               <label class="field">
                 <span>地点 / 区域</span>
                 <input
@@ -39,8 +45,12 @@
                 <small class="field-hint">{{ locationMessage }}</small>
               </label>
 
+              <div class="foundation-section-heading">
+                <span>02</span>
+                <div><strong>系统基线</strong><small>描述事件发生前的常态结构和约束</small></div>
+              </div>
               <label class="field field-grow">
-                <span>稳态描述</span>
+                <span>当前系统基线</span>
                 <textarea
                   v-model="form.eventOrBaseline"
                   rows="4"
@@ -48,17 +58,10 @@
                 ></textarea>
               </label>
 
-              <label class="field">
-                <span>推演变量</span>
-                <textarea
-                  v-model="initialVariablesText"
-                  rows="4"
-                  placeholder="- 台风蓝色预警：增加滨海步道关闭和游客疏散压力&#10;- 周末游客峰值：提高人流和服务设施负荷"
-                ></textarea>
-                <small class="field-hint">支持逐行填写，也支持贴入 JSON 数组。</small>
-              </label>
-
-              <!-- 上传文档上移出"高级"，主流程即可见 -->
+              <div class="foundation-section-heading">
+                <span>03</span>
+                <div><strong>事实与资料</strong><small>补充可验证的来源、主体、设施和环境对象</small></div>
+              </div>
               <div class="field">
                 <span>上传参考文档（选填）</span>
                 <div class="upload-box compact-upload" @click="fileInput?.click()">
@@ -74,10 +77,22 @@
                 </div>
               </div>
 
-              <section v-if="advancedOpen" class="advanced-panel">
-                <!-- 4 个重叠的上下文 textarea 合成 1 个（focus/补充背景/分析边界/报告问题 → additional_context） -->
+              <label class="field">
+                <span>已知主体 / 设施 / 环境对象（选填）</span>
+                <textarea
+                  v-model="form.knownEntities"
+                  rows="4"
+                  placeholder="- 社区居民、游客、环卫部门&#10;- 医院、污水厂、港口、地铁站&#10;- 河流、湿地、海岸带、栖息地"
+                ></textarea>
+              </label>
+
+              <div class="foundation-section-heading">
+                <span>04</span>
+                <div><strong>研究问题与边界</strong><small>说明希望回答什么，以及明确不分析什么</small></div>
+              </div>
+              <section class="advanced-panel research-boundary-panel">
                 <label class="field">
-                  <span>补充背景与关注点（选填）</span>
+                  <span>研究问题、关注对象与排除范围（选填）</span>
                   <textarea
                     v-model="form.additionalContext"
                     rows="6"
@@ -85,17 +100,8 @@
                   ></textarea>
                 </label>
 
-                <label class="field">
-                  <span>已知主体 / 设施 / 环境对象</span>
-                  <textarea
-                    v-model="form.knownEntities"
-                    rows="4"
-                    placeholder="- 社区居民、游客、环卫部门&#10;- 医院、污水厂、港口、地铁站&#10;- 河流、湿地、海岸带、栖息地"
-                  ></textarea>
-                </label>
-
-                <label class="field">
-                  <span>进入推演的默认目标</span>
+                <label v-if="advancedOpen" class="field">
+                  <span>准备在下一步设计的场景目标</span>
                   <textarea
                     v-model="form.simulationRequirement"
                     rows="3"
@@ -110,7 +116,12 @@
               <p v-if="message" class="message">{{ message }}</p>
 
               <div class="button-row setup-action-row">
-                <details ref="effortMenuRef" class="effort-menu" @keydown.esc.stop="closeEffortMenu">
+                <button class="advanced-toggle setup-advanced-toggle" type="button" @click="advancedOpen = !advancedOpen">
+                  {{ advancedOpen ? '收起研究边界' : '补充研究边界' }}
+                </button>
+
+                <div class="setup-primary-actions">
+                  <details ref="effortMenuRef" class="effort-menu" @keydown.esc.stop="closeEffortMenu">
                   <summary
                     class="effort-trigger"
                     :title="`分析强度：${effortLabel}`"
@@ -166,11 +177,12 @@
                       ></span>
                     </div>
                   </div>
-                </details>
+                  </details>
 
-                <button class="primary-btn" type="button" :disabled="composeDisabled" @click="composeBackground">
-                  {{ backgroundActionLabel }}
-                </button>
+                  <button class="primary-btn" type="button" :disabled="composeDisabled" @click="composeBackground">
+                    {{ backgroundActionLabel }}
+                  </button>
+                </div>
               </div>
             </div>
           </section>
@@ -181,7 +193,7 @@
                 <button v-if="composing || hasComposeError" class="icon-back-btn" type="button" @click="returnToSetup" title="返回参数设置">
                   <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="19" y1="12" x2="5" y2="12"></line><polyline points="12 19 5 12 12 5"></polyline></svg>
                 </button>
-                <h2>背景素材报告</h2>
+                <h2>{{ isCuratedShowcase ? '武汉案例基础' : '背景基础审阅' }}</h2>
               </div>
               <div class="panel-head-actions">
                 <span v-if="effortLocked" class="effort-lock-badge">
@@ -192,9 +204,83 @@
                   </svg>
                   分析强度 {{ effortLabel }} · 已锁定
                 </span>
-                <span class="status-pill">{{ reportStageLabel }}</span>
+                <span class="status-pill">{{ isCuratedShowcase ? '只读案例' : reportStageLabel }}</span>
               </div>
             </div>
+
+            <div class="report-content-scroll" :class="{ 'is-curated': isCuratedShowcase }">
+            <div v-if="isCuratedShowcase" class="curated-foundation-summary">
+              <div><strong>108</strong><span>天历史窗口</span></div>
+              <div><strong>6</strong><span>个城市系统</span></div>
+              <div><strong>36</strong><span>个空间锚点</span></div>
+              <p>公开事实约束日期与地点；主体行动、关系和连续状态为明确标注的策划推演。</p>
+            </div>
+
+            <section v-if="isCuratedShowcase" class="curated-locked-inputs" aria-label="武汉案例已锁定背景输入">
+              <div class="curated-input-head">
+                <div>
+                  <span>第 1 步已填充</span>
+                  <h3>已锁定背景输入</h3>
+                </div>
+                <span class="curated-config-badge">已配置 · 只读</span>
+              </div>
+
+              <div class="curated-input-grid">
+                <article class="curated-input-card">
+                  <span class="curated-input-index">01 · 空间范围</span>
+                  <strong>{{ curatedLocationLabel }}</strong>
+                  <p>{{ curatedMacroScenarioCount }}个宏观场景 · {{ curatedAnchorNames.length }}个差异化锚点 · 45公里分析范围</p>
+                </article>
+
+                <article class="curated-input-card">
+                  <span class="curated-input-index">02 · 时间窗口</span>
+                  <strong>{{ curatedTimeScope }}</strong>
+                  <p>2019-12-22 至 2020-04-08，共108天；36轮，每轮3天。</p>
+                </article>
+
+                <article class="curated-input-card is-wide">
+                  <span class="curated-input-index">03 · 系统基线</span>
+                  <strong>六个城市系统与八项业务状态已配置</strong>
+                  <div class="curated-chip-list">
+                    <span v-for="item in curatedCitySystems" :key="`system-${item}`">{{ item }}</span>
+                  </div>
+                  <div class="curated-chip-list is-state-list">
+                    <span v-for="item in curatedStateDimensions" :key="`state-${item}`">{{ item }}</span>
+                  </div>
+                </article>
+
+                <article class="curated-input-card is-wide">
+                  <span class="curated-input-index">04 · 主体、设施与资料</span>
+                  <strong>36个空间锚点 · {{ curatedSourceRefs.length }}项公开来源</strong>
+                  <div class="curated-chip-list">
+                    <span v-for="item in curatedAnchorPreview" :key="`anchor-preview-${item}`">{{ item }}</span>
+                    <span v-if="curatedAnchorNames.length > curatedAnchorPreview.length">+{{ curatedAnchorNames.length - curatedAnchorPreview.length }}</span>
+                  </div>
+                  <details class="curated-input-details">
+                    <summary>查看全部{{ curatedAnchorNames.length }}个空间锚点</summary>
+                    <div class="curated-chip-list is-expanded">
+                      <span v-for="item in curatedAnchorNames" :key="`anchor-${item}`">{{ item }}</span>
+                    </div>
+                  </details>
+                </article>
+
+                <article class="curated-input-card is-wide">
+                  <span class="curated-input-index">05 · 研究问题与边界</span>
+                  <strong>三个研究问题已经写入</strong>
+                  <ol class="curated-question-list">
+                    <li v-for="item in curatedResearchQuestions" :key="item">{{ item }}</li>
+                  </ol>
+                  <p class="curated-boundary-note">{{ curatedSourceBoundary }}</p>
+                  <details class="curated-input-details">
+                    <summary>查看{{ curatedBoundaries.length }}条分析边界与{{ curatedDataGaps.length }}项数据缺口</summary>
+                    <ul class="curated-boundary-list">
+                      <li v-for="item in curatedBoundaries" :key="`boundary-${item}`">{{ item }}</li>
+                      <li v-for="item in curatedDataGaps" :key="`gap-${item}`">数据缺口：{{ item }}</li>
+                    </ul>
+                  </details>
+                </article>
+              </div>
+            </section>
 
             <div v-if="!reportStepDone" class="task-stepper">
               <div class="task-step" :class="getStepClass('map')">
@@ -268,16 +354,35 @@
                 v-html="renderedReportMarkdown"
               ></div>
               <div v-else class="report-preview-empty">
-                背景报告将在这里呈现。
+                结构化背景基础将在这里呈现。
               </div>
             </div>
+
+            <section v-if="isCuratedShowcase && curatedSourceRefs.length" class="curated-source-section">
+              <div class="curated-source-head">
+                <strong>公开来源入口</strong>
+                <span>{{ curatedSourceRefs.length }} 项</span>
+              </div>
+              <div class="curated-source-list">
+                <a
+                  v-for="source in curatedSourceRefs"
+                  :key="source.id"
+                  :href="source.url"
+                  target="_blank"
+                  rel="noreferrer"
+                >
+                  <span>{{ safeDisplayText(source.publisher, '公开机构') }}</span>
+                  <strong>{{ safeDisplayText(source.title, '公开来源') }}</strong>
+                </a>
+              </div>
+            </section>
 
             <div class="typing-status" v-if="composing || reportTyping">
               <span class="typing-dot"></span>
               <span>{{ composing ? '正在生成背景素材报告...' : '正在逐步排版报告...' }}</span>
             </div>
 
-            <label class="field">
+            <label v-if="!isCuratedShowcase" class="field">
               <span>补充修改说明</span>
               <textarea
                 v-model="revisionInstruction"
@@ -285,6 +390,7 @@
                 placeholder="例：把重点改成台风天气下游客疏散和海岸线设施风险。"
               ></textarea>
             </label>
+            </div>
 
             <div class="button-row report-actions">
               <button v-if="hasComposeError" class="secondary-btn" type="button" @click="returnToSetup">
@@ -293,17 +399,21 @@
               <button v-if="hasComposeError" class="primary-btn" type="button" :disabled="composeDisabled" @click="retryComposeBackground">
                 重新生成背景
               </button>
-              <button class="secondary-btn" type="button" :disabled="!sceneId || revising || !revisionInstruction.trim()" @click="reviseReport">
-                {{ revising ? '修改中...' : '按说明修改背景' }}
+              <button v-if="!isCuratedShowcase" class="secondary-btn" type="button" :disabled="!sceneId || revising || !revisionInstruction.trim()" @click="reviseReport">
+                {{ revising ? '修改中...' : '按说明修改背景基础' }}
+              </button>
+              <button v-if="isCuratedShowcase" class="secondary-btn" type="button" @click="copyCuratedAsNew">
+                复制为新推演
               </button>
               <button class="primary-btn" type="button" :disabled="!reportMarkdown.trim()" @click="enterProcess">
-                进入场景配置
+                {{ isCuratedShowcase ? '查看场景设计' : '进入场景生成' }}
               </button>
             </div>
           </section>
         </div>
       </section>
 
+      <template #visual>
       <section class="map-column">
         <div class="map-stage">
           <div class="map-head">
@@ -324,7 +434,7 @@
                 :selected-point="selectedPoint"
                 :radius-meters="radiusMeters"
                 :layers="displayMapLayers"
-                :read-only="showReportStage"
+                :read-only="showReportStage || isCuratedShowcase"
                 @pick="handlePickPoint"
               />
             </div>
@@ -349,7 +459,7 @@
               </div>
             </div>
 
-            <div v-if="!showReportStage" class="map-overlay radius-overlay">
+            <div v-if="!showReportStage && !isCuratedShowcase" class="map-overlay radius-overlay">
               <div class="radius-header">
                 <span>分析半径</span>
                 <strong>{{ radiusMetersDisplay }}</strong>
@@ -360,16 +470,16 @@
           </div>
         </div>
       </section>
-    </main>
-  </div>
+      </template>
+  </KaleidoWorkflowShell>
 </template>
 
 <script setup>
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import KaleidoNavBrand from '../components/KaleidoNavBrand.vue'
-import WorkflowStepMenu from '../components/WorkflowStepMenu.vue'
+import KaleidoWorkflowShell from '../components/KaleidoWorkflowShell.vue'
 import LeafletMapPicker from '../components/LeafletMapPicker.vue'
+import { getGoldenCaseArtifact } from '../api/goldenCases'
 import { composeSceneMaterial, reviseSceneMaterial } from '../api/sceneMaterial'
 import {
   createMapSeed,
@@ -394,6 +504,7 @@ import { safeDisplayError, safeDisplayText, sanitizeDisplayCopy } from '../utils
 
 const router = useRouter()
 const route = useRoute()
+const viewMode = ref('split')
 const DEFAULT_CENTER = [22.5431, 114.0579]
 const EFFORT_OPTIONS = [
   { value: 'light', label: 'Light' },
@@ -463,6 +574,76 @@ const effortLevel = ref('high')
 const effortLocked = ref(false)
 const effortSnapshot = ref(null)
 const effortMenuRef = ref(null)
+const curatedFoundation = ref(null)
+const curatedFoundationLoading = ref(false)
+const curatedFoundationError = ref('')
+const isCuratedShowcase = computed(() => (
+  String(route.query.demo_mode || '') === 'curated_showcase'
+  && Boolean(String(route.query.golden_case_id || '').trim())
+))
+const curatedSourceRefs = computed(() => (
+  Array.isArray(curatedFoundation.value?.source_refs)
+    ? curatedFoundation.value.source_refs.filter((item) => item?.url)
+    : []
+))
+const curatedLocationLabel = computed(() => safeDisplayText(
+  curatedFoundation.value?.area_of_interest?.location,
+  '武汉市'
+))
+const curatedTimeScope = computed(() => safeDisplayText(
+  curatedFoundation.value?.baseline_state?.time_scope || curatedFoundation.value?.time_scope,
+  '2019-12-22 至 2020-04-08（108天）'
+))
+const curatedMacroScenarioCount = computed(() => {
+  const regions = curatedFoundation.value?.area_of_interest?.regions
+  return Array.isArray(regions) && regions.length ? regions.length : 12
+})
+const curatedAnchorNames = computed(() => (
+  Array.isArray(curatedFoundation.value?.spatial_anchors)
+    ? curatedFoundation.value.spatial_anchors
+      .map((item) => safeDisplayText(item?.name, ''))
+      .filter(Boolean)
+    : []
+))
+const curatedAnchorPreview = computed(() => curatedAnchorNames.value.slice(0, 8))
+const curatedCitySystems = computed(() => {
+  const systems = curatedFoundation.value?.city_systems
+    || curatedFoundation.value?.baseline_state?.city_systems
+    || []
+  return (Array.isArray(systems) ? systems : [])
+    .map((item) => safeDisplayText(typeof item === 'object' ? item?.name : item, ''))
+    .filter(Boolean)
+})
+const curatedStateDimensions = computed(() => (
+  Array.isArray(curatedFoundation.value?.baseline_state?.state_dimensions)
+    ? curatedFoundation.value.baseline_state.state_dimensions
+      .map((item) => safeDisplayText(item?.name, ''))
+      .filter(Boolean)
+    : []
+))
+const curatedResearchQuestions = computed(() => (
+  Array.isArray(curatedFoundation.value?.research_questions)
+    ? curatedFoundation.value.research_questions.map((item) => safeDisplayText(item, '')).filter(Boolean)
+    : []
+))
+const curatedBoundaries = computed(() => (
+  Array.isArray(curatedFoundation.value?.analysis_boundaries)
+    ? curatedFoundation.value.analysis_boundaries.map((item) => safeDisplayText(item, '')).filter(Boolean)
+    : []
+))
+const curatedDataGaps = computed(() => (
+  Array.isArray(curatedFoundation.value?.open_data_gaps)
+    ? curatedFoundation.value.open_data_gaps.map((item) => safeDisplayText(item, '')).filter(Boolean)
+    : []
+))
+const curatedSourceBoundary = computed(() => safeDisplayText(
+  curatedFoundation.value?.source_boundary,
+  '公开来源约束历史日期、地点与已发生措施；行动和连续状态为策划推演。'
+))
+
+function toggleMapCollapse() {
+  viewMode.value = viewMode.value === 'workbench' ? 'split' : 'workbench'
+}
 
 const effortIndex = computed(() => {
   const index = EFFORT_OPTIONS.findIndex((option) => option.value === effortLevel.value)
@@ -479,7 +660,9 @@ const effortSnapshotId = computed(() => String(
 
 // --- Task Stepper Logic ---
 const expandedTask = ref('map')
-const mapEvidenceUnavailable = computed(() => isSpatialEvidenceUnavailable(mapSeedDataQuality.value))
+const mapEvidenceUnavailable = computed(() => (
+  !isCuratedShowcase.value && isSpatialEvidenceUnavailable(mapSeedDataQuality.value)
+))
 const spatialProviderRows = computed(() => buildSpatialProviderRows(mapSeedDataQuality.value))
 const toggleTask = (task) => {
   expandedTask.value = expandedTask.value === task ? '' : task
@@ -507,12 +690,17 @@ const reportStepStatusLabel = computed(() => {
 })
 
 const stepStatusTone = computed(() => {
+  if (isCuratedShowcase.value && curatedFoundationError.value) return 'error'
+  if (isCuratedShowcase.value && curatedFoundationLoading.value) return 'processing'
   if (hasComposeError.value) return 'error'
   if (composing.value || reportTyping.value || mapSeedLoading.value || mapSeedStatus.value === 'processing') return 'processing'
   return 'ready'
 })
 
 const stepStatusText = computed(() => {
+  if (isCuratedShowcase.value && curatedFoundationError.value) return '背景待恢复'
+  if (isCuratedShowcase.value && curatedFoundationLoading.value) return '正在恢复背景'
+  if (isCuratedShowcase.value && curatedFoundation.value) return '已配置'
   if (hasComposeError.value) return '输入已保留'
   if (composing.value || reportTyping.value) return '背景生成中'
   if (mapSeedLoading.value || mapSeedStatus.value === 'processing') return '区域分析中'
@@ -793,6 +981,7 @@ const showMapDataFailure = computed(() => (
 ))
 
 const displayMapLayers = computed(() => {
+  if (isCuratedShowcase.value) return mapLayers.value
   if (!mapEvidenceUnavailable.value) return mapLayers.value
   return mapLayers.value.filter((layer) => layer.id === 'analysis-area')
 })
@@ -1064,6 +1253,7 @@ async function resolveAreaNameFromPoint({ updateField = false } = {}) {
 }
 
 async function handlePickPoint(point) {
+  if (isCuratedShowcase.value) return
   selectedPoint.value = point
   mapCenter.value = [point.lat, point.lon]
   resetMapAnalysis('点位已更新，等待背景生成')
@@ -1334,6 +1524,17 @@ function returnToSetup() {
 }
 
 function enterProcess() {
+  const curatedSimulationId = String(route.query.simulation_id || '').trim()
+  if (isCuratedShowcase.value && curatedSimulationId) {
+    saveComposerSnapshot()
+    router.push({
+      name: 'Simulation',
+      params: { simulationId: curatedSimulationId },
+      query: { ...route.query, step: '2', restore: undefined }
+    })
+    return
+  }
+
   const step2 = getWorkflowSteps().find(item => Number(item.step) === 2)
   const cachedRoute = step2?.visited && step2.route?.name ? step2.route : null
   const cachedProjectId = cachedRoute?.params?.projectId
@@ -1345,6 +1546,11 @@ function enterProcess() {
   if (canReuseCachedStep2) {
     saveComposerSnapshot()
     router.push(cachedRoute)
+    return
+  }
+
+  if (isCuratedShowcase.value) {
+    message.value = '案例路由暂不可用，请从武汉案例入口重新进入。'
     return
   }
 
@@ -1362,8 +1568,12 @@ function enterProcess() {
     : []
   setPendingUpload([file], sceneSeed.value?.recommended_simulation_requirement || derivedSimulationRequirement.value, {
     initialVariables: Array.isArray(sceneSeed.value?.initial_variables) ? sceneSeed.value.initial_variables : [],
-    normalizedEventInputs: Array.isArray(sceneSeed.value?.normalized_event_inputs) ? sceneSeed.value.normalized_event_inputs : [],
-    normalizedPolicyInputs: Array.isArray(sceneSeed.value?.normalized_policy_inputs) ? sceneSeed.value.normalized_policy_inputs : [],
+    normalizedEventInputs: Array.isArray(sceneSeed.value?.suggested_event_inputs)
+      ? sceneSeed.value.suggested_event_inputs
+      : (Array.isArray(sceneSeed.value?.normalized_event_inputs) ? sceneSeed.value.normalized_event_inputs : []),
+    normalizedPolicyInputs: Array.isArray(sceneSeed.value?.suggested_policy_inputs)
+      ? sceneSeed.value.suggested_policy_inputs
+      : (Array.isArray(sceneSeed.value?.normalized_policy_inputs) ? sceneSeed.value.normalized_policy_inputs : []),
     selectedPoints,
     mapSeedId: mapSeedId.value || sceneSeed.value?.map_seed_id || '',
     areaLabel: areaNamePreview.value || autoAreaLabel.value || form.value.location || '',
@@ -1378,6 +1588,188 @@ function enterProcess() {
   })
   saveComposerSnapshot()
   router.push({ name: 'Process', params: { projectId: 'new' } })
+}
+
+async function copyCuratedAsNew() {
+  if (!isCuratedShowcase.value || !reportMarkdown.value.trim()) return
+  const editableSnapshot = {
+    ...buildComposerSnapshot(),
+    mapSeedId: '',
+    mapSeedTaskId: '',
+    mapSeedStatus: 'idle',
+    mapSeedMessage: '已复制武汉研究范围；生成背景时会重新核对区域地理数据。',
+    mapSeedDataQuality: null,
+    sceneId: '',
+    sceneSeed: null,
+    reportMarkdown: '',
+    displayedReportMarkdown: '',
+    revisionInstruction: '',
+    message: '',
+    composeErrorMessage: '',
+    showReportStage: false,
+    effortLocked: false,
+    effortSnapshot: null,
+    effortSnapshotId: ''
+  }
+  const copyRoute = {
+    name: 'SceneComposer',
+    query: { restore: '1', copied_from: 'wuhan_covid_v2' }
+  }
+  resetWorkflowNavigation()
+  saveSceneComposerSnapshot(editableSnapshot)
+  markWorkflowStep(1, {
+    visited: true,
+    status: 'active',
+    forceStatus: true,
+    summary: '武汉案例副本 · 可编辑',
+    route: copyRoute
+  })
+  await router.push(copyRoute)
+  curatedFoundation.value = null
+  curatedFoundationError.value = ''
+  restoreComposerSnapshot()
+}
+
+function assertCuratedFoundationContract(foundation) {
+  const baseline = foundation?.baseline_state || {}
+  const systems = foundation?.city_systems || baseline.city_systems || []
+  const location = String(foundation?.area_of_interest?.location || '')
+  const valid = Boolean(String(foundation?.foundation_id || '').trim())
+    && location.includes('武汉')
+    && Array.isArray(foundation?.spatial_anchors)
+    && foundation.spatial_anchors.length === 36
+    && Array.isArray(systems)
+    && systems.length === 6
+    && Array.isArray(baseline.state_dimensions)
+    && baseline.state_dimensions.length === 8
+    && Array.isArray(foundation?.source_refs)
+    && foundation.source_refs.length >= 8
+    && Array.isArray(foundation?.research_questions)
+    && foundation.research_questions.length >= 3
+    && Boolean(String(foundation?.report_markdown || '').trim())
+  if (!valid) {
+    throw new Error('武汉案例基础数据不完整，请重新恢复案例。')
+  }
+}
+
+async function loadCuratedFoundation() {
+  const caseId = String(route.query.golden_case_id || '').trim()
+  if (!caseId) return
+  curatedFoundationLoading.value = true
+  curatedFoundationError.value = ''
+  message.value = ''
+  form.value.location = '武汉市'
+  selectedPoint.value = { lat: 30.5928, lon: 114.3055 }
+  mapCenter.value = [30.5928, 114.3055]
+  radiusMeters.value = 45000
+  locationSyncMode.value = 'auto'
+  autoAreaLabel.value = '武汉市'
+  locationMessage.value = '武汉市 · 108天历史窗口'
+  try {
+    const res = await getGoldenCaseArtifact(caseId, 'foundation')
+    const foundation = res.data || {}
+    assertCuratedFoundationContract(foundation)
+    const anchors = Array.isArray(foundation.spatial_anchors) ? foundation.spatial_anchors : []
+    const baseline = foundation.baseline_state || {}
+    const systemNames = (foundation.city_systems || baseline.city_systems || [])
+      .map((item) => safeDisplayText(typeof item === 'object' ? item?.name : item, ''))
+      .filter(Boolean)
+    const stateDimensions = (baseline.state_dimensions || [])
+      .map((item) => ({
+        name: safeDisplayText(item?.name, ''),
+        direction: {
+          lower_is_better: '压力越低越好',
+          higher_is_better: '能力越高越好',
+          contextual: '随阶段解释'
+        }[String(item?.direction || '')] || '按阶段观察'
+      }))
+      .filter((item) => item.name)
+    const researchQuestions = (foundation.research_questions || [])
+      .map((item) => safeDisplayText(item, ''))
+      .filter(Boolean)
+    const analysisBoundaries = (foundation.analysis_boundaries || [])
+      .map((item) => safeDisplayText(item, ''))
+      .filter(Boolean)
+    const dataGaps = (foundation.open_data_gaps || [])
+      .map((item) => safeDisplayText(item, ''))
+      .filter(Boolean)
+    const sourceBoundary = safeDisplayText(foundation.source_boundary, '')
+    const timeScope = safeDisplayText(
+      baseline.time_scope || foundation.time_scope,
+      '2019-12-22 至 2020-04-08（108天）'
+    )
+
+    curatedFoundation.value = foundation
+    form.value.location = foundation.area_of_interest?.location || '武汉市'
+    form.value.eventOrBaseline = [
+      `时间窗口：${timeScope}`,
+      `城市系统：${systemNames.join('；')}`,
+      `状态口径：${stateDimensions.map((item) => item.name).join('、')}`,
+      `背景说明：${safeDisplayText(foundation.summary, '武汉疫情城市系统背景')}`
+    ].join('\n')
+    form.value.focus = systemNames.map((item) => `- ${item}`).join('\n')
+    form.value.knownEntities = anchors
+      .map((item) => `- ${safeDisplayText(item.name, '空间锚点')}`)
+      .join('\n')
+    form.value.additionalContext = [
+      sourceBoundary ? `事实与推演边界：${sourceBoundary}` : '',
+      ...dataGaps.map((item) => `数据缺口：${item}`)
+    ].filter(Boolean).join('\n')
+    form.value.analysisBoundaries = analysisBoundaries.map((item) => `- ${item}`).join('\n')
+    form.value.reportQuestions = researchQuestions.map((item) => `- ${item}`).join('\n')
+    form.value.simulationRequirement = '复盘六个城市系统在36轮中的行动、关系、风险和资源状态变化。'
+    initialVariablesText.value = stateDimensions
+      .map((item) => `- ${item.name}：${item.direction}`)
+      .join('\n')
+    mapLayers.value = [{
+      id: 'curated-wuhan-anchors',
+      name: '武汉案例空间锚点',
+      type: 'points',
+      color: '#1f6a54',
+      visible: true,
+      note: '真实公开地点、区级聚合空间与功能网络',
+      data: anchors.map((item) => ({
+        id: item.anchor_id || item.region_id,
+        name: safeDisplayText(item.name, '空间锚点'),
+        label: safeDisplayText(item.name, '空间锚点'),
+        lat: Number(item.lat),
+        lon: Number(item.lon),
+        popupTitle: safeDisplayText(item.name, '空间锚点'),
+        popupSummary: safeDisplayText(item.anchor_type || item.boundary_note, '武汉案例空间锚点')
+      })).filter((item) => Number.isFinite(item.lat) && Number.isFinite(item.lon))
+    }]
+    mapSeedStatus.value = 'ready'
+    mapSeedMessage.value = '已加载36个策划型空间锚点。'
+    mapSeedDataQuality.value = { status: 'curated_showcase', formal_ready: false, fixture_ready: true }
+    sceneId.value = foundation.foundation_id || `foundation::${caseId}`
+    sceneSeed.value = {
+      scene_id: sceneId.value,
+      title: foundation.title || '武汉疫情城市系统复盘',
+      report_markdown: foundation.report_markdown || '',
+      recommended_simulation_requirement: form.value.simulationRequirement,
+      effort_snapshot: foundation.effort_snapshot_ref || {}
+    }
+    reportMarkdown.value = sanitizeDisplayCopy(foundation.report_markdown || '', '')
+    displayedReportMarkdown.value = reportMarkdown.value
+    showReportStage.value = true
+    effortLevel.value = 'ultra'
+    effortLocked.value = true
+    effortSnapshot.value = foundation.effort_snapshot_ref || null
+    markWorkflowStep(1, {
+      visited: true,
+      status: 'active',
+      forceStatus: true,
+      summary: '研究范围与事实边界',
+      route: { name: 'SceneComposer', query: { ...route.query } }
+    })
+  } catch (error) {
+    curatedFoundation.value = null
+    showReportStage.value = false
+    curatedFoundationError.value = safeDisplayError(error, '武汉案例基础暂时无法加载，请重新加载。')
+    message.value = curatedFoundationError.value
+  } finally {
+    curatedFoundationLoading.value = false
+  }
 }
 
 function resetComposer() {
@@ -1467,6 +1859,7 @@ function buildComposerSnapshot() {
 }
 
 function saveComposerSnapshot() {
+  if (isCuratedShowcase.value) return
   if (restoringSnapshot) return
   saveSceneComposerSnapshot(buildComposerSnapshot())
 }
@@ -1574,7 +1967,7 @@ watch(
 )
 
 watch(radiusMeters, () => {
-  if (restoringSnapshot) return
+  if (restoringSnapshot || isCuratedShowcase.value) return
   resetMapAnalysis(selectedPoint.value ? '分析半径已变化，需重新生成区域分析' : '等待背景生成时触发区域地理分析')
   if (!selectedPoint.value) return
   if (pointResolveTimer) {
@@ -1621,8 +2014,12 @@ watch(
   { deep: true }
 )
 
-onMounted(() => {
+onMounted(async () => {
   document.addEventListener('click', handleEffortMenuOutsideClick)
+  if (isCuratedShowcase.value) {
+    await loadCuratedFoundation()
+    return
+  }
   if (route.query.restore === '1') {
     restoreComposerSnapshot()
   } else {
@@ -1647,6 +2044,238 @@ onBeforeUnmount(() => {
     radial-gradient(circle at top left, rgba(25, 106, 84, 0.08), transparent 34%),
     linear-gradient(180deg, #f4f6f1 0%, #eef2ee 100%);
   color: #10231d;
+}
+
+.curated-foundation-summary {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  padding: 12px 0 16px;
+}
+
+.curated-foundation-summary > div {
+  display: grid;
+  gap: 3px;
+  padding: 12px;
+  border: 1px solid rgba(23, 49, 38, 0.12);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.54);
+}
+
+.curated-foundation-summary strong {
+  font-size: 24px;
+  line-height: 1;
+  color: #1f6a54;
+}
+
+.curated-foundation-summary span,
+.curated-foundation-summary p {
+  font-size: 12px;
+  color: rgba(23, 49, 38, 0.68);
+}
+
+.curated-source-section {
+  display: grid;
+  gap: 10px;
+  padding: 14px 0 2px;
+  border-top: 1px solid rgba(23, 49, 38, 0.1);
+}
+
+.curated-source-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  color: rgba(23, 49, 38, 0.66);
+  font-size: 12px;
+}
+
+.curated-source-head strong { color: #173126; }
+
+.curated-source-list {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.curated-source-list a {
+  display: grid;
+  gap: 4px;
+  padding: 10px 12px;
+  border: 1px solid rgba(23, 49, 38, 0.1);
+  border-radius: 9px;
+  background: rgba(255, 255, 255, 0.5);
+  color: #173126;
+  text-decoration: none;
+}
+
+.curated-source-list a:hover { border-color: rgba(31, 106, 84, 0.42); }
+.curated-source-list span { color: rgba(23, 49, 38, 0.58); font-size: 11px; }
+.curated-source-list strong { font-size: 12px; line-height: 1.45; }
+
+.curated-foundation-summary p {
+  grid-column: 1 / -1;
+  margin: 2px 0 0;
+  line-height: 1.6;
+}
+
+.curated-foundation-state {
+  min-height: 420px;
+  display: grid;
+  place-items: center;
+}
+
+.curated-foundation-state-inner {
+  width: min(520px, 100%);
+  display: grid;
+  justify-items: start;
+  gap: 12px;
+}
+
+.curated-foundation-state-inner h2,
+.curated-foundation-state-inner p {
+  margin: 0;
+}
+
+.curated-foundation-state-inner p {
+  color: rgba(23, 49, 38, 0.68);
+  line-height: 1.7;
+}
+
+.curated-locked-inputs {
+  display: grid;
+  gap: 12px;
+  padding: 16px 0;
+  border-top: 1px solid rgba(23, 49, 38, 0.1);
+}
+
+.curated-input-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.curated-input-head > div {
+  display: grid;
+  gap: 3px;
+}
+
+.curated-input-head span {
+  color: rgba(23, 49, 38, 0.58);
+  font-size: 11px;
+}
+
+.curated-input-head h3 {
+  margin: 0;
+  font-size: 17px;
+}
+
+.curated-config-badge {
+  min-width: max-content;
+  padding: 6px 10px;
+  border: 1px solid rgba(31, 106, 84, 0.2);
+  border-radius: 999px;
+  background: rgba(31, 106, 84, 0.07);
+  color: #1f6a54 !important;
+  font-weight: 700;
+}
+
+.curated-input-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.curated-input-card {
+  min-width: 0;
+  display: grid;
+  align-content: start;
+  gap: 8px;
+  padding: 14px;
+  border: 1px solid rgba(23, 49, 38, 0.1);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.5);
+}
+
+.curated-input-card.is-wide {
+  grid-column: 1 / -1;
+}
+
+.curated-input-card > strong {
+  color: #173126;
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+.curated-input-card > p {
+  margin: 0;
+  color: rgba(23, 49, 38, 0.68);
+  font-size: 12px;
+  line-height: 1.65;
+}
+
+.curated-input-index {
+  color: #1f6a54;
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.curated-chip-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.curated-chip-list span {
+  display: inline-flex;
+  align-items: center;
+  min-height: 25px;
+  padding: 4px 8px;
+  border: 1px solid rgba(23, 49, 38, 0.1);
+  border-radius: 7px;
+  background: rgba(247, 249, 246, 0.86);
+  color: rgba(23, 49, 38, 0.78);
+  font-size: 11px;
+  line-height: 1.35;
+}
+
+.curated-chip-list.is-state-list span {
+  border-color: rgba(31, 106, 84, 0.16);
+  color: #1f6a54;
+}
+
+.curated-input-details {
+  color: rgba(23, 49, 38, 0.72);
+  font-size: 12px;
+}
+
+.curated-input-details summary {
+  width: max-content;
+  cursor: pointer;
+  color: #1f6a54;
+  font-weight: 700;
+}
+
+.curated-chip-list.is-expanded,
+.curated-boundary-list {
+  margin-top: 10px;
+}
+
+.curated-question-list,
+.curated-boundary-list {
+  display: grid;
+  gap: 6px;
+  margin-bottom: 0;
+  padding-left: 20px;
+  color: rgba(23, 49, 38, 0.78);
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.curated-boundary-note {
+  padding: 10px 12px;
+  border-left: 3px solid rgba(31, 106, 84, 0.42);
+  background: rgba(31, 106, 84, 0.05);
 }
 
 .topbar {
@@ -1769,26 +2398,10 @@ onBeforeUnmount(() => {
   box-shadow: none;
 }
 
-.workspace-shell {
-  display: grid;
-  grid-template-columns: minmax(520px, 1.25fr) minmax(420px, 1fr);
-  gap: 0.75rem;
-  padding: 0.75rem;
-  height: calc(100vh - 60px);
-  overflow: hidden;
-  align-items: stretch;
-  transition: grid-template-columns 0.4s cubic-bezier(0.4, 0, 0.2, 1);
-}
-
-.workspace-shell.report-finished-layout {
-  grid-template-columns: minmax(520px, 1.25fr) minmax(420px, 1fr);
-}
-
 .setup-column {
-  grid-column: 2;
-  grid-row: 1;
   min-width: 0;
   height: 100%;
+  padding: 0.75rem;
   overflow: hidden;
 }
 
@@ -1810,9 +2423,9 @@ onBeforeUnmount(() => {
 }
 
 .map-column {
-  grid-column: 1;
-  grid-row: 1;
   min-width: 0;
+  height: 100%;
+  padding: 0.75rem;
 }
 
 .panel,
@@ -1913,6 +2526,44 @@ onBeforeUnmount(() => {
   scrollbar-gutter: stable;
   scrollbar-width: thin;
   scrollbar-color: rgba(16, 35, 29, 0.2) transparent;
+}
+
+.foundation-section-heading {
+  display: grid;
+  grid-template-columns: 2rem minmax(0, 1fr);
+  align-items: start;
+  gap: 0.75rem;
+  margin-top: 0.25rem;
+  padding-top: 1rem;
+  border-top: 1px solid var(--k-color-border, rgba(22, 53, 42, 0.12));
+}
+
+.foundation-section-heading:first-child {
+  margin-top: 0;
+  padding-top: 0;
+  border-top: 0;
+}
+
+.foundation-section-heading > span {
+  color: var(--k-color-brand-600, #2f6f57);
+  font-size: var(--k-text-meta, 0.75rem);
+  font-weight: 750;
+  font-variant-numeric: tabular-nums;
+}
+
+.foundation-section-heading div {
+  display: grid;
+  gap: 0.2rem;
+}
+
+.foundation-section-heading strong {
+  color: var(--k-color-text, #16352a);
+  font-size: var(--k-text-ui, 0.94rem);
+}
+
+.foundation-section-heading small {
+  color: var(--k-color-text-muted, #64756e);
+  line-height: 1.5;
 }
 
 .setup-form::-webkit-scrollbar,
@@ -2378,6 +3029,31 @@ textarea {
   overflow: hidden;
 }
 
+.report-content-scroll {
+  flex: 1 1 auto;
+  min-height: 0;
+  padding-right: 0.2rem;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+}
+
+.report-content-scroll .report-surface {
+  flex: none;
+  min-height: 12rem;
+  overflow: visible;
+}
+
+.report-actions {
+  position: relative;
+  z-index: 2;
+  flex: none;
+  margin-top: 0.75rem;
+  padding-top: 0.75rem;
+  border-top: 1px solid rgba(16, 35, 29, 0.1);
+  background: rgba(255, 255, 255, 0.96);
+}
+
 .report-title-row {
   display: flex;
   align-items: center;
@@ -2840,56 +3516,30 @@ textarea {
 }
 
 @media (max-width: 1180px) {
-  .workspace-shell {
-    grid-template-columns: 1fr;
-    height: auto;
-    min-height: calc(100dvh - 60px);
-    overflow: visible;
-  }
-
   .setup-column,
-  .map-column {
-    grid-column: auto;
-    grid-row: auto;
-  }
-
-  .setup-column { overflow: visible; }
-
-  .setup-scroll {
-    height: auto;
-    min-height: auto;
-    overflow: visible;
-  }
-
-  .setup-panel.compact-mode {
-    height: auto;
-    min-height: auto;
-    overflow: visible;
-  }
-
-  .setup-form {
-    margin-right: 0;
-    padding-right: 0;
-    overflow: visible;
-  }
-
-  .map-stage {
-    position: static;
-    min-height: 720px;
-  }
+  .map-column { padding: 0.6rem; }
 }
 
 @media (max-width: 720px) {
+  .curated-input-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .curated-input-card.is-wide {
+    grid-column: auto;
+  }
+
+  .curated-input-head {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
   .topbar,
   .topbar-step,
   .panel-head,
   .map-head,
   .button-row {
     flex-direction: column;
-  }
-
-  .workspace-shell {
-    padding: 0.75rem;
   }
 
   .panel,
@@ -2977,4 +3627,49 @@ textarea {
 .prose-markdown :deep(.md-h3) { font-size: var(--k-text-section); }
 .prose-markdown :deep(.md-h4),
 .prose-markdown :deep(.md-h5) { font-size: var(--k-text-ui); }
+
+/* Keep the form header clear; secondary disclosure sits in the bottom action row. */
+.setup-action-row {
+  flex-wrap: nowrap;
+  justify-content: space-between;
+}
+
+.setup-advanced-toggle {
+  flex: 0 0 auto;
+  min-height: var(--k-control-height-sm);
+  margin-right: auto;
+  padding-inline: var(--k-space-2);
+  border-color: transparent;
+  border-radius: var(--k-radius-sm);
+  background: transparent;
+  color: var(--k-color-text-secondary);
+  font-weight: var(--k-weight-semibold);
+  transition: background var(--k-transition-fast), color var(--k-transition-fast);
+}
+
+.setup-advanced-toggle:hover {
+  border-color: transparent;
+  background: var(--k-color-brand-050);
+  color: var(--k-color-brand-700);
+}
+
+.setup-primary-actions {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--k-space-2);
+  margin-left: auto;
+}
+
+@media (max-width: 720px) {
+  .setup-action-row {
+    flex-wrap: wrap;
+    justify-content: space-between;
+  }
+
+  .setup-primary-actions {
+    margin-left: auto;
+  }
+}
 </style>

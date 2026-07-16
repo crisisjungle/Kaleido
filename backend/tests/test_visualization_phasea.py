@@ -88,6 +88,32 @@ def test_realtime_edges_carry_edge_layer_separating_spatial_vs_causal():
         assert edges_by_type["agent_influence"]["epistemic"] == "inferred"
 
 
+def test_realtime_mechanism_nodes_prefer_localized_display_fields():
+    with tempfile.TemporaryDirectory() as sim_dir:
+        _write_json(
+            sim_dir,
+            "mechanism_graph.json",
+            {
+                "nodes": [
+                    {
+                        "node_id": "mechanism::detection",
+                        "label_zh": "异常发现与检测上报",
+                        "description_zh": "临床异常经采样检测进入公共卫生研判。",
+                    }
+                ],
+                "edges": [],
+            },
+        )
+
+        graph = SimulationRealtimeGraphBuilder(sim_dir).build()
+        mechanism_node = next(
+            node for node in graph["nodes"] if node["uuid"] == "mechanism::detection"
+        )
+
+        assert mechanism_node["name"] == "异常发现与检测上报"
+        assert mechanism_node["summary"] == "临床异常经采样检测进入公共卫生研判。"
+
+
 def test_projection_marks_synthetic_placement_non_geographic():
     # No map seed -> no anchor context -> radial/hash placement is synthetic.
     graph_data = {

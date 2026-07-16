@@ -4,17 +4,17 @@
       <section class="control-panel runtime-console runtime-transport" aria-label="推演播放控制">
         <span class="runtime-progress-label">{{ isReplayPlayback ? '回放进度' : '推演进度' }}</span>
         <input
-          v-model.number="roundIndex"
+          :value="playheadMs"
           type="range"
           :min="0"
-          :max="Math.max(playbackFrames.length - 1, 0)"
+          :max="playbackDurationMs"
           :disabled="playbackFrames.length <= 1"
-          step="1"
+          step="10"
           class="range compact-range"
           :style="{ '--range-progress': `${progressPercent}%` }"
           aria-label="选择推演进度"
           :aria-valuetext="`${selectedRoundLabel}，完成 ${progressPercent}%`"
-          @input="stopAnimationPlayback"
+          @input="handlePlaybackScrub"
         />
         <strong class="runtime-progress-value mono">{{ progressPercent }}%</strong>
         <button
@@ -28,6 +28,20 @@
           {{ isPlayingAnimation ? '暂停' : '播放' }}
         </button>
       </section>
+
+      <nav v-if="storyChapters.length" class="story-chapter-nav" aria-label="演化章节">
+        <button
+          v-for="chapter in storyChapters"
+          :key="chapter.id"
+          type="button"
+          :class="{ 'is-active': activeStoryChapter?.id === chapter.id }"
+          :aria-current="activeStoryChapter?.id === chapter.id ? 'step' : undefined"
+          @click="seekToStoryChapter(chapter)"
+        >
+          <span>R{{ chapter.round_start }}–R{{ chapter.round_end }}</span>
+          <strong>{{ safeRuntimeCopy(chapter.name, '演化章节') }}</strong>
+        </button>
+      </nav>
 
       <KWorkflowTabs
         class="step3-workflow-tabs"
@@ -71,12 +85,14 @@
             </p>
           </article>
           <article class="summary-card">
-            <span>领先代理体</span>
+            <span>{{ isCuratedShowcase ? '关键响应主体' : '领先代理体' }}</span>
             <strong>{{ agentRows[0]?.name || '等待代理体状态' }}</strong>
             <p>
               {{
                 agentRows[0]
-                  ? `${agentRows[0].familyLabel} · 脆弱性 ${agentRows[0].vulnerability_score}`
+                  ? isCuratedShowcase
+                    ? `${agentRows[0].familyLabel} · 医疗负荷 ${agentRows[0].healthcare_load}`
+                    : `${agentRows[0].familyLabel} · 脆弱性 ${agentRows[0].vulnerability_score}`
                   : '系统尚未返回可排序的代理体快照。'
               }}
             </p>
@@ -91,7 +107,7 @@
         <div v-if="activeWorkspaceTab === 'pulse'" class="overview-top-grid">
           <section class="panel pulse-panel">
             <div class="panel-title-row">
-              <h3>运行脉冲</h3>
+              <h3>本轮演化</h3>
               <span class="hint">{{ selectedRoundLabel }}</span>
             </div>
 
@@ -118,11 +134,11 @@
                 :class="`is-${relation.status}`"
               >
                 <span>{{ relation.statusLabel }}</span>
-                <strong>{{ relation.sourceName }} → {{ relation.targetName }}</strong>
+                <strong>{{ relation.sourceName }}<template v-if="relation.targetName"> → {{ relation.targetName }}</template></strong>
                 <p>{{ relation.typeLabel }}</p>
               </article>
               <div v-if="playbackPulseRelations.length === 0" class="empty-state compact">
-                当前轮次没有新的显式连接，图谱保持稳定底图，只更新区域状态。
+                尚未出现显式连接，图谱保持稳定底图，等待传播链启动。
               </div>
             </div>
 
@@ -141,7 +157,7 @@
               <article class="spotlight-card">
                 <span>反馈回路</span>
                 <strong>{{ feedbackLoops[0] ? safeRuntimeCopy(feedbackLoops[0], '反馈链') : '等待反馈链' }}</strong>
-                <p>{{ feedbackLoops.length > 1 ? feedbackLoops.slice(1, 3).map(item => safeRuntimeCopy(item, '反馈链')).join(' · ') : '以环境—生态—生计—治理链为主线。' }}</p>
+                <p>{{ feedbackLoops.length > 1 ? feedbackLoops.slice(1, 3).map(item => safeRuntimeCopy(item, '反馈链')).join(' · ') : (isCuratedShowcase ? '以发现—检测—分诊—收治与社区—供应—信任反馈为主线。' : '以环境—生态—生计—治理链为主线。') }}</p>
               </article>
               <article class="spotlight-card">
                 <span>生效变量</span>
@@ -164,24 +180,48 @@
               <h3>区域状态矩阵</h3>
             </div>
 
-            <div class="matrix-head">
+            <div class="matrix-head" :class="{ 'is-curated': isCuratedShowcase }">
               <span>区域</span>
-              <span>暴露</span>
-              <span>恐慌</span>
-              <span>信任</span>
-              <span>脆弱性</span>
+              <template v-if="isCuratedShowcase">
+                <span>暴露压力</span>
+                <span>发现可见度</span>
+                <span>检测时效</span>
+                <span>医疗负荷</span>
+                <span>流动强度</span>
+                <span>物资充足度</span>
+                <span>社区支持度</span>
+                <span>公共信任度</span>
+              </template>
+              <template v-else>
+                <span>暴露</span>
+                <span>恐慌</span>
+                <span>信任</span>
+                <span>脆弱性</span>
+              </template>
             </div>
 
             <div class="region-list">
-              <article v-for="region in (expandedLists.regions ? regionRows : regionRows.slice(0, LIST_PREVIEW.regions))" :key="region.id" class="region-row">
+              <article v-for="region in (expandedLists.regions ? regionRows : regionRows.slice(0, LIST_PREVIEW.regions))" :key="region.id" class="region-row" :class="{ 'is-curated': isCuratedShowcase }">
                 <div class="region-meta">
                   <strong>{{ region.name }}</strong>
                   <span>{{ safeRuntimeCopy(region.tagline, '区域') }}</span>
                 </div>
-                <span class="metric mono">{{ region.exposure_score }}</span>
-                <span class="metric mono">{{ region.panic_level }}</span>
-                <span class="metric mono">{{ region.public_trust }}</span>
-                <span class="metric mono">{{ region.vulnerability_score }}</span>
+                <template v-if="isCuratedShowcase">
+                  <span class="metric mono">{{ region.exposure_pressure }}</span>
+                  <span class="metric mono">{{ region.detection_visibility }}</span>
+                  <span class="metric mono">{{ region.testing_turnaround }}</span>
+                  <span class="metric mono">{{ region.healthcare_load }}</span>
+                  <span class="metric mono">{{ region.mobility_intensity }}</span>
+                  <span class="metric mono">{{ region.supply_sufficiency }}</span>
+                  <span class="metric mono">{{ region.community_support }}</span>
+                  <span class="metric mono">{{ region.public_trust }}</span>
+                </template>
+                <template v-else>
+                  <span class="metric mono">{{ region.exposure_score }}</span>
+                  <span class="metric mono">{{ region.panic_level }}</span>
+                  <span class="metric mono">{{ region.public_trust }}</span>
+                  <span class="metric mono">{{ region.vulnerability_score }}</span>
+                </template>
               </article>
               <div v-if="regionRows.length === 0" class="empty-state">
                 等待后端返回区域矩阵或轮次快照。
@@ -242,7 +282,7 @@
 
           <section v-if="activeWorkspaceTab === 'spread'" class="panel timeline-panel">
             <div class="panel-title-row">
-              <h3>扩散与反馈事件</h3>
+              <h3>传播机制与反馈</h3>
               <span class="hint">{{ spreadEvents.length }} 个事件</span>
             </div>
 
@@ -276,7 +316,7 @@
               </div>
               <div class="loop-list">
                 <span v-for="loop in feedbackLoops" :key="loop" class="loop-pill">{{ safeRuntimeCopy(loop, '反馈链') }}</span>
-                <span v-if="feedbackLoops.length === 0" class="empty-loop">环境 → 生态 → 生计 → 恐慌/媒体 → 政策</span>
+                <span v-if="feedbackLoops.length === 0" class="empty-loop">{{ isCuratedShowcase ? '发现 → 检测 → 分诊 → 收治 → 社区支持 → 信任反馈' : '环境 → 生态 → 生计 → 恐慌/媒体 → 政策' }}</span>
               </div>
             </div>
           </section>
@@ -292,7 +332,7 @@
       >
         <section class="multi-agent-panel stage-panel">
           <div class="panel-title-row">
-            <h3>代理工作台</h3>
+            <h3>主体响应</h3>
             <span class="hint">
               {{ subregionRows.length }} 个子区域 · {{ agentRows.length }} 个代理体 · {{ agentInteractions.length }} 次交互
             </span>
@@ -450,6 +490,65 @@
             </div>
             <div v-else class="empty-state">截至当前所选轮次，尚无到期的政策执行记录。</div>
           </section>
+
+          <section class="relationship-runtime-panel stage-panel relationship-in-agent-panel">
+            <div class="panel-title-row">
+              <div>
+                <h3>关系演化与角色涌现</h3>
+                <p>关系变化来自主体行动与运行证据；这里与行动、政策和主体生命周期一起解释。</p>
+              </div>
+              <span class="hint">{{ relationshipStateRows.length }} 条关系 · {{ agentEmergenceRows.length }} 个生命周期事件</span>
+            </div>
+
+            <div class="relationship-summary-grid">
+              <div><span>活跃关系</span><strong>{{ relationshipDynamics.activeCount }}</strong></div>
+              <div><span>平均信任</span><strong>{{ relationshipDynamics.trustLabel }}</strong></div>
+              <div><span>平均协同</span><strong>{{ relationshipDynamics.coordinationLabel }}</strong></div>
+              <div><span>平均张力</span><strong>{{ relationshipDynamics.tensionLabel }}</strong></div>
+            </div>
+
+            <div class="relationship-runtime-grid">
+              <section class="runtime-ledger-section">
+                <div class="mini-panel-head">
+                  <h4>关系状态</h4>
+                  <span class="hint">随轮次变化</span>
+                </div>
+                <div v-if="relationshipStateRows.length > 0" class="relationship-state-list">
+                  <article v-for="item in relationshipStateRows.slice(0, 10)" :key="item.id" class="relationship-state-row">
+                    <div class="relationship-state-head">
+                      <strong>{{ item.sourceName }} → {{ item.targetName }}</strong>
+                      <span>{{ item.typeLabel }} · {{ item.statusLabel }}</span>
+                    </div>
+                    <div class="relationship-state-metrics">
+                      <span>信任 {{ item.trustLabel }}</span>
+                      <span>依赖 {{ item.dependencyLabel }}</span>
+                      <span>协同 {{ item.coordinationLabel }}</span>
+                      <span>张力 {{ item.tensionLabel }}</span>
+                    </div>
+                  </article>
+                </div>
+                <div v-else class="empty-state">截至当前所选轮次，尚未形成可核验的动态关系状态。</div>
+              </section>
+
+              <section class="runtime-ledger-section">
+                <div class="mini-panel-head">
+                  <h4>关系与主体变化</h4>
+                  <span class="hint">只影响当前轮及未来</span>
+                </div>
+                <div v-if="relationshipEventRows.length > 0 || agentEmergenceRows.length > 0" class="runtime-event-list">
+                  <article v-for="item in combinedRuntimeEvents.slice(0, 12)" :key="item.id" class="runtime-event-row">
+                    <span class="runtime-ledger-round mono">R{{ item.round }}</span>
+                    <div>
+                      <strong>{{ item.typeLabel }}</strong>
+                      <p>{{ item.summary }}</p>
+                      <small v-if="item.effectiveRound > item.round">R{{ item.effectiveRound }} 起生效</small>
+                    </div>
+                  </article>
+                </div>
+                <div v-else class="empty-state">截至当前所选轮次，尚无关系或主体生命周期变化。</div>
+              </section>
+            </div>
+          </section>
         </section>
       </section>
 
@@ -460,65 +559,6 @@
         :aria-label="activeWorkspaceTabLabel"
         class="workspace-panel"
       >
-        <section class="relationship-runtime-panel stage-panel">
-          <div class="panel-title-row">
-            <div>
-              <h3>动态关系台账</h3>
-              <p>关系由代理体行动与运行证据更新；风险对象只读取这些结果，不负责创建代理体。</p>
-            </div>
-            <span class="hint">{{ relationshipStateRows.length }} 条关系 · {{ agentEmergenceRows.length }} 个生命周期事件</span>
-          </div>
-
-          <div class="relationship-summary-grid">
-            <div><span>活跃关系</span><strong>{{ relationshipDynamics.activeCount }}</strong></div>
-            <div><span>平均信任</span><strong>{{ relationshipDynamics.trustLabel }}</strong></div>
-            <div><span>平均协同</span><strong>{{ relationshipDynamics.coordinationLabel }}</strong></div>
-            <div><span>平均张力</span><strong>{{ relationshipDynamics.tensionLabel }}</strong></div>
-          </div>
-
-          <div class="relationship-runtime-grid">
-            <section class="runtime-ledger-section">
-              <div class="mini-panel-head">
-                <h4>关系状态</h4>
-                <span class="hint">随轮次变化</span>
-              </div>
-              <div v-if="relationshipStateRows.length > 0" class="relationship-state-list">
-                <article v-for="item in relationshipStateRows.slice(0, 10)" :key="item.id" class="relationship-state-row">
-                  <div class="relationship-state-head">
-                    <strong>{{ item.sourceName }} → {{ item.targetName }}</strong>
-                    <span>{{ item.typeLabel }} · {{ item.statusLabel }}</span>
-                  </div>
-                  <div class="relationship-state-metrics">
-                    <span>信任 {{ item.trustLabel }}</span>
-                    <span>依赖 {{ item.dependencyLabel }}</span>
-                    <span>协同 {{ item.coordinationLabel }}</span>
-                    <span>张力 {{ item.tensionLabel }}</span>
-                  </div>
-                </article>
-              </div>
-              <div v-else class="empty-state">截至当前所选轮次，尚未形成可核验的动态关系状态。</div>
-            </section>
-
-            <section class="runtime-ledger-section">
-              <div class="mini-panel-head">
-                <h4>关系与代理体变化</h4>
-                <span class="hint">只影响当前轮及未来</span>
-              </div>
-              <div v-if="relationshipEventRows.length > 0 || agentEmergenceRows.length > 0" class="runtime-event-list">
-                <article v-for="item in combinedRuntimeEvents.slice(0, 12)" :key="item.id" class="runtime-event-row">
-                  <span class="runtime-ledger-round mono">R{{ item.round }}</span>
-                  <div>
-                    <strong>{{ item.typeLabel }}</strong>
-                    <p>{{ item.summary }}</p>
-                    <small v-if="item.effectiveRound > item.round">R{{ item.effectiveRound }} 起生效</small>
-                  </div>
-                </article>
-              </div>
-              <div v-else class="empty-state">截至当前所选轮次，尚无关系或代理体生命周期变化。</div>
-            </section>
-          </div>
-        </section>
-
         <section v-if="riskObjects.length > 0" class="risk-panel-shell">
           <div class="panel-title-row risk-panel-heading">
             <h3>风险对象</h3>
@@ -663,30 +703,14 @@
                 </div>
                 </div>
 
-                <div class="risk-causal-chain" aria-label="风险对象机制链">
-                  <div class="risk-causal-node">
-                    <span>触发源</span>
-                    <strong>{{ selectedRiskStatement.trigger_name || selectedRiskObject.root_pressures?.[0] || '场景触发因素' }}</strong>
-                  </div>
-                  <span class="risk-causal-arrow" aria-hidden="true">→</span>
-                  <div class="risk-causal-node mechanism">
-                    <span>机制步骤</span>
-                    <div class="risk-step-pills">
-                      <strong v-for="step in selectedRiskMechanismSteps" :key="step">{{ safeRuntimeCopy(step, '机制步骤') }}</strong>
-                      <strong v-if="selectedRiskMechanismSteps.length === 0">{{ selectedRiskObject.mechanism_edge_ids?.length || 0 }} 条已校验机制边</strong>
-                    </div>
-                  </div>
-                  <span class="risk-causal-arrow" aria-hidden="true">→</span>
-                  <div class="risk-causal-node">
-                    <span>受影响对象</span>
-                    <strong>{{ selectedRiskStatement.receptor_name || '主要受影响对象' }}</strong>
-                  </div>
-                  <span class="risk-causal-arrow" aria-hidden="true">→</span>
-                  <div class="risk-causal-node consequence">
-                    <span>具体后果</span>
-                    <strong>{{ selectedRiskStatement.consequence || selectedRiskObject.summary }}</strong>
-                  </div>
-                </div>
+                <KMechanismChain
+                  :trigger="selectedRiskStatement.trigger_name || selectedRiskObject.root_pressures?.[0] || '场景触发因素'"
+                  :steps="selectedRiskMechanismSteps.map(step => safeRuntimeCopy(step, '机制步骤'))"
+                  :empty-step-label="`${selectedRiskObject.mechanism_edge_ids?.length || 0} 条已校验机制边`"
+                  :receptor="selectedRiskStatement.receptor_name || '主要受影响对象'"
+                  :consequence="selectedRiskStatement.consequence || selectedRiskObject.summary"
+                  aria-label="风险对象机制链"
+                />
               </div>
 
               <div v-if="activeRiskDetailTab === 'scope'" class="risk-related-grid">
@@ -826,8 +850,8 @@
       </div>
       <template #actions>
         <button class="text-btn" type="button" @click="handleGoBack">返回场景设计</button>
-        <button class="ghost-btn intervention-trigger" type="button" @click="isInterventionPanelOpen = true">
-          干预推演
+        <button class="ghost-btn intervention-trigger" type="button" @click="handleInterventionAction">
+          {{ isCuratedShowcase ? '查看介入节点' : '干预推演' }}
           <span v-if="activeVariableRows.length" class="control-count mono">{{ activeVariableRows.length }}</span>
         </button>
         <button v-if="!isReplayPlayback && (canStop || isStopping)" class="ghost-btn" type="button" :disabled="isStopping" @click="handleStop">
@@ -839,7 +863,7 @@
       </template>
     </WorkflowActionBar>
 
-    <div v-if="isInterventionPanelOpen" class="intervention-overlay" role="presentation" @click.self="isInterventionPanelOpen = false">
+    <div v-if="isInterventionPanelOpen && !isCuratedShowcase" class="intervention-overlay" role="presentation" @click.self="isInterventionPanelOpen = false">
       <aside class="intervention-drawer" role="dialog" aria-modal="true" aria-labelledby="intervention-title">
         <header class="intervention-drawer-head">
           <div>
@@ -988,7 +1012,13 @@ import { useRoute, useRouter } from 'vue-router'
 import { getRunStatus, getRunStatusDetail, getSimulation, getSimulationConfig, injectSimulationVariable, startSimulation, stopSimulation } from '../api/simulation'
 import { generateReportAsync } from '../api/report'
 import { formatDistanceLabelZh, formatLandUseLabelZh, formatTokenLabelZh, normalizeDisplayLabels, safeDisplayError, safeDisplayText, sanitizeDisplayCopy, translateDisplayToken } from '../utils/displayText'
-import { buildPlaybackFrame, getFrameTimelineDuration } from '../utils/simulationPlayback'
+import {
+  advanceContinuousPlayhead,
+  buildContinuousPlaybackPlan,
+  buildContinuousPlaybackSnapshot,
+} from '../utils/simulationPlayback'
+import { STEP3_WORKSPACE_TABS } from '../config/workflowArchitecture'
+import KMechanismChain from './ui/KMechanismChain.vue'
 import KWorkflowTabs from './ui/KWorkflowTabs.vue'
 import WorkflowActionBar from './ui/WorkflowActionBar.vue'
 
@@ -1024,7 +1054,6 @@ const simulationSnapshot = ref(null)
 const configSnapshot = ref(null)
 const currentScenarioMode = ref(props.initialScenarioMode || route.query.scenario_mode || 'baseline_mode')
 const currentTemplate = ref(props.initialDiffusionTemplate || route.query.diffusion_template || 'marine')
-const roundIndex = ref(0)
 const injectionHistory = ref([])
 const isInjecting = ref(false)
 const interventionMessage = ref('')
@@ -1045,17 +1074,17 @@ const toggleList = (key) => { expandedLists.value[key] = !expandedLists.value[ke
 const LIST_PREVIEW = { regions: 5, subregions: 5, agents: 5, interactions: 6 }
 const lastRunMessage = ref('')
 const isPlayingAnimation = ref(false)
-const playbackSpeedMs = ref(1400)
+const playbackRate = ref(1)
 const hasAutoStartedReplay = ref(false)
-const playbackElapsedMs = ref(0)
+const hasUserPausedPlayback = ref(false)
+const playheadMs = ref(0)
 
 const policyModes = ['restrict', 'relocate', 'subsidize', 'monitor', 'disclose', 'repair', 'ban', 'reopen']
-const PRIMARY_HEAT_SCORE_KEY = 'vulnerability_score'
 
 let statusTimer = null
 let detailTimer = null
-let animationTimer = null
 let frameAnimationRaf = null
+let lastPlaybackRafAt = null
 let statusRefreshInFlight = false
 let detailRefreshInFlight = false
 
@@ -1065,27 +1094,88 @@ const playbackFrames = computed(() => {
   return roundSnapshots.value
 })
 
-const selectedAnimationFrame = computed(() => {
-  if (playbackFrames.value.length === 0) return null
-  const safeIndex = Math.min(Math.max(roundIndex.value, 0), playbackFrames.value.length - 1)
-  const frame = playbackFrames.value[safeIndex] || null
-  if (!frame || !props.animationData?.frames?.length) return frame
-  return buildPlaybackFrame(props.animationData, frame, {
-    elapsedMs: playbackElapsedMs.value,
-    durationMs: resolvePlaybackDelayMs(frame),
-    isPlaying: isPlayingAnimation.value,
-  })
+const playbackPayload = computed(() => {
+  if (Array.isArray(props.animationData?.frames) && props.animationData.frames.length > 0) {
+    return props.animationData
+  }
+  return {
+    frames: playbackFrames.value,
+    timeline: { events: [] },
+    meta: {
+      total_rounds: Math.max(0, playbackFrames.value.length - 1),
+      timeline_contract_version: 'legacy',
+    },
+  }
 })
 
+const playbackPlan = computed(() => buildContinuousPlaybackPlan(playbackPayload.value))
+const playbackDurationMs = computed(() => Math.max(1, Number(playbackPlan.value?.duration_ms || 1)))
+
+const selectedAnimationFrame = computed(() => {
+  if (playbackFrames.value.length === 0) return null
+  return buildContinuousPlaybackSnapshot(
+    playbackPayload.value,
+    playbackPlan.value,
+    playheadMs.value,
+    {
+      isPlaying: isPlayingAnimation.value,
+    },
+  )
+})
+
+const roundIndex = computed(() => Math.max(0, Number(selectedAnimationFrame.value?.playback_frame_index || 0)))
+
 const isReplayPlayback = computed(() => Boolean(props.isReplayOnly || simulationSnapshot.value?.is_replay_only || props.animationData?.meta?.artifact_mode === 'frozen'))
+const isCuratedShowcase = computed(() => (
+  String(route.query.demo_mode || '') === 'curated_showcase'
+  || String(props.animationData?.meta?.generation_mode || '') === 'curated_target_state'
+))
+const primaryHeatScoreKey = computed(() => (
+  isCuratedShowcase.value ? 'healthcare_load' : 'vulnerability_score'
+))
+const storyChapters = computed(() => {
+  const source = props.animationData?.story_chapters || props.animationData?.timeline?.story_chapters || []
+  return Array.isArray(source) ? source : []
+})
+const activeStoryChapter = computed(() => {
+  const round = Number(currentRoundNumber.value || 0)
+  return storyChapters.value.find((item) => (
+    Number(item?.round_start ?? 0) <= round && round <= Number(item?.round_end ?? 0)
+  )) || storyChapters.value[0] || null
+})
+const policyInterventions = computed(() => {
+  const source = props.animationData?.policy_interventions || []
+  return Array.isArray(source) ? source : []
+})
+
+const existingReportId = computed(() => {
+  const candidates = [
+    route.query.report_id,
+    simulationSnapshot.value?.report_id,
+    simulationSnapshot.value?.latest_report_id,
+    props.animationData?.meta?.report_id
+  ]
+  for (const candidate of candidates) {
+    const value = Array.isArray(candidate) ? candidate[0] : candidate
+    const reportId = String(value || '').trim()
+    if (reportId) return reportId
+  }
+  return ''
+})
 
 const progressPercent = computed(() => {
   if (selectedAnimationFrame.value && props.animationData?.frames?.length) {
     const total = Number(props.animationData?.meta?.total_rounds || playbackFrames.value.length - 1 || 0)
-    const current = Number(selectedAnimationFrame.value.round ?? 0)
+    const round = Number(selectedAnimationFrame.value.round ?? 0)
+    const roundElapsed = Number(selectedAnimationFrame.value.playback_round_elapsed_ms || 0)
+    const roundDuration = Math.max(1, Number(selectedAnimationFrame.value.playback_round_duration_ms || 1))
+    const current = round + Math.max(0, Math.min(0.999, roundElapsed / roundDuration))
     if (total > 0 && Number.isFinite(current)) {
       return Math.max(0, Math.min(100, Math.round((current / total) * 100)))
     }
+  }
+  if (playbackDurationMs.value > 1) {
+    return Math.max(0, Math.min(100, Math.round((playheadMs.value / playbackDurationMs.value) * 100)))
   }
   const explicitProgress = Number(runStatus.value.progress_percent ?? runDetail.value.progress_percent)
   if (Number.isFinite(explicitProgress) && explicitProgress > 0) {
@@ -1116,6 +1206,7 @@ const actionBarSummary = computed(() => {
 const canGenerateReport = computed(() => {
   if (isGeneratingReport.value) return false
   if (!props.simulationId) return false
+  if (existingReportId.value) return true
   if (isReplayPlayback.value) return true
   return ['completed', 'stopped'].includes(String(runStatus.value.runner_status || ''))
 })
@@ -1141,6 +1232,7 @@ const canInject = computed(() => {
 
 const reportButtonLabel = computed(() => {
   if (isGeneratingReport.value) return '报告生成中...'
+  if (existingReportId.value) return '查看报告'
   if (runStatus.value.runner_status === 'failed') return '等待可用轮次'
   if (!canGenerateReport.value) return '等待推演完成'
   return '生成报告'
@@ -1158,10 +1250,40 @@ const roundSnapshots = computed(() => {
   return Array.isArray(source) ? source : []
 })
 
+const baselineSnapshot = computed(() => {
+  if (!isCuratedShowcase.value) return null
+  const normalizeBaselineRows = (rows) => (Array.isArray(rows) ? rows : []).map((item) => ({
+    ...item,
+    ...(item?.state_vector || {}),
+    business_state: item?.business_state || item?.state_vector || {},
+  }))
+  const regions = normalizeBaselineRows(configSnapshot.value?.region_graph)
+  const subregions = normalizeBaselineRows(configSnapshot.value?.subregion_graph)
+  const agents = normalizeBaselineRows(
+    configSnapshot.value?.agent_configs || configSnapshot.value?.actor_profiles
+  )
+  return {
+    round: 0,
+    chapter_id: storyChapters.value[0]?.id || '',
+    chapter_name: storyChapters.value[0]?.name || '异常出现',
+    headline: '城市系统基线',
+    regions,
+    subregions,
+    agents,
+    agent_summary: {
+      active_agents: agents.length,
+      core_agents: agents.filter((item) => item?.representation_level === 'functional').length,
+      background_agents: agents.filter((item) => item?.representation_level === 'aggregate').length,
+    },
+    interactions: { agent_interactions: [], agent_environment_effects: [] },
+    feedback: { feedback_propagation: [] },
+  }
+})
+
 const selectedRoundSnapshot = computed(() => {
   if (props.animationData?.frames?.length) {
     const frameRound = Number(selectedAnimationFrame.value?.round ?? 0)
-    if (frameRound <= 0) return null
+    if (frameRound === 0) return baselineSnapshot.value
     return roundSnapshots.value.find(item => Number(extractRoundNumber(item, 0)) === frameRound) || runDetail.value.latest_round_snapshot || null
   }
   if (roundSnapshots.value.length === 0) {
@@ -1183,16 +1305,15 @@ const currentRoundNumber = computed(() => {
 function syncRoundIndexToRound(round) {
   const targetRound = Number(round || 0)
   if (!targetRound || playbackFrames.value.length === 0) return
-
-  const frameIndex = playbackFrames.value.findIndex((frame, idx) => {
-    return Number(frame?.round ?? extractRoundNumber(frame, idx)) === targetRound
-  })
-  if (frameIndex >= 0) {
-    roundIndex.value = frameIndex
-    return
-  }
-
-  roundIndex.value = Math.min(Math.max(targetRound, 0), playbackFrames.value.length - 1)
+  // Timeline playback owns its own visual cursor. Runtime polling may append
+  // committed rounds, but it must never pull a paused or buffered story ahead.
+  if (props.animationData?.frames?.length || hasUserPausedPlayback.value) return
+  const marker = (playbackPlan.value?.rounds || []).find(item => Number(item?.round) === targetRound)
+  if (!marker) return
+  playheadMs.value = Math.max(0, Math.min(
+    playbackDurationMs.value,
+    Number(marker.end_ms || marker.start_ms || 0) - 1,
+  ))
 }
 
 const selectedRoundLabel = computed(() => {
@@ -1203,7 +1324,15 @@ const selectedRoundLabel = computed(() => {
 })
 
 const latestSnapshot = computed(() => {
+  if (props.animationData?.frames?.length && currentRoundNumber.value === 0) {
+    return baselineSnapshot.value
+  }
   return selectedRoundSnapshot.value || runDetail.value.latest_round_snapshot || runDetail.value.latest_snapshot || null
+})
+
+const runtimeRoundCeiling = computed(() => {
+  const round = Number(currentRoundNumber.value)
+  return Number.isFinite(round) ? Math.max(0, round) : Number.MAX_SAFE_INTEGER
 })
 
 const agentSummary = computed(() => {
@@ -1251,7 +1380,7 @@ const environmentEffectCount = computed(() => {
 const regionRows = computed(() => {
   const snapshot = latestSnapshot.value || runDetail.value
   const regions = normalizeRegionRows(snapshot)
-  const key = PRIMARY_HEAT_SCORE_KEY
+  const key = primaryHeatScoreKey.value
 
   return regions
     .map(region => ({
@@ -1277,7 +1406,7 @@ const configuredSubregionAgentCount = computed(() => {
 const subregionRows = computed(() => {
   const source = latestSnapshot.value || runDetail.value
   const rows = normalizeSubregionRows(source)
-  const key = PRIMARY_HEAT_SCORE_KEY
+  const key = primaryHeatScoreKey.value
 
   return rows
     .map(item => ({
@@ -1319,7 +1448,7 @@ const agentActionRows = computed(() => {
   if (selectedRoundSnapshot.value) {
     return normalizeAgentActionRows(selectedRoundSnapshot.value).sort(sortByRoundDesc)
   }
-  const maxRound = currentRoundNumber.value || Number.MAX_SAFE_INTEGER
+  const maxRound = runtimeRoundCeiling.value
   return normalizeAgentActionRows(runDetail.value)
     .filter(item => item.round <= maxRound)
     .sort(sortByRoundDesc)
@@ -1353,18 +1482,14 @@ const configuredAgentProfileById = computed(() => {
 
 const agentRows = computed(() => {
   const source = latestSnapshot.value || runDetail.value
-  return normalizeAgentRows(source, PRIMARY_HEAT_SCORE_KEY, configuredAgentProfileById.value)
+  return normalizeAgentRows(source, primaryHeatScoreKey.value, configuredAgentProfileById.value)
     .map(a => ({
       ...a,
       regionLabel: resolveRegionName(a.regionLabel),
       subregionLabel: resolveRegionName(a.subregionLabel),
       latestAction: latestAgentActionById.value.get(String(a.id)) || null
     }))
-    .sort((a, b) => {
-      const scoreDelta = b.vulnerability_score - a.vulnerability_score
-      if (scoreDelta !== 0) return scoreDelta
-      return b.selectedScore - a.selectedScore
-    })
+    .sort((a, b) => b.selectedScore - a.selectedScore)
 })
 
 const selectedRoundInteractions = computed(() => {
@@ -1384,7 +1509,7 @@ const agentInteractions = computed(() => {
     return resolveRegions(selectedRoundInteractions.value)
   }
 
-  const maxRound = currentRoundNumber.value || Number.MAX_SAFE_INTEGER
+  const maxRound = runtimeRoundCeiling.value
   return resolveRegions(
     normalizeAgentInteractions(runDetail.value)
       .filter(item => (item.round || 0) <= maxRound)
@@ -1407,7 +1532,7 @@ const relationshipStateRows = computed(() => {
 })
 
 const relationshipEventRows = computed(() => {
-  const maxRound = currentRoundNumber.value || Number.MAX_SAFE_INTEGER
+  const maxRound = runtimeRoundCeiling.value
   return mergeRuntimeRows(
     normalizeRelationshipEventRows(selectedRoundSnapshot.value || {}, runtimeAgentNameById.value),
     normalizeRelationshipEventRows(runDetail.value, runtimeAgentNameById.value)
@@ -1415,7 +1540,7 @@ const relationshipEventRows = computed(() => {
 })
 
 const agentEmergenceRows = computed(() => {
-  const maxRound = currentRoundNumber.value || Number.MAX_SAFE_INTEGER
+  const maxRound = runtimeRoundCeiling.value
   return mergeRuntimeRows(
     normalizeAgentEmergenceRows(selectedRoundSnapshot.value || {}),
     normalizeAgentEmergenceRows(runDetail.value)
@@ -1428,7 +1553,7 @@ const combinedRuntimeEvents = computed(() => [
 ].sort(sortByRoundDesc))
 
 const policyExecutionRows = computed(() => {
-  const maxRound = currentRoundNumber.value || Number.MAX_SAFE_INTEGER
+  const maxRound = runtimeRoundCeiling.value
   return mergeRuntimeRows(
     normalizePolicyExecutionRows(selectedRoundSnapshot.value || {}, runtimeAgentNameById.value),
     normalizePolicyExecutionRows(runDetail.value, runtimeAgentNameById.value)
@@ -1497,7 +1622,7 @@ const agentInteractionScopeLabel = computed(() => {
 
 const spreadEvents = computed(() => {
   const source = normalizeEvents(runDetail.value)
-  const maxRound = currentRoundNumber.value || Number.MAX_SAFE_INTEGER
+  const maxRound = runtimeRoundCeiling.value
   return source.filter(event => (event.round || event.round_num || 0) <= maxRound)
 })
 
@@ -1738,12 +1863,15 @@ const playbackPulseStats = computed(() => {
   const events = Array.isArray(frame.propagation_events) ? frame.propagation_events : []
   const edgeStates = Array.isArray(frame.edge_states) ? frame.edge_states : []
   const nodeIds = Array.isArray(frame.focus_ids?.node_ids) ? frame.focus_ids.node_ids : []
-  if (events.length) {
+  const startedEventCount = Number(frame.playback_started_event_count)
+  if (events.length || Number.isFinite(startedEventCount)) {
     const elapsed = Number(frame.playback_elapsed_ms || 0)
     const activeIds = new Set(Array.isArray(frame.active_propagation_event_ids) ? frame.active_propagation_event_ids : [])
     const connectionEvents = events.filter(item => item?.edge_id || (item?.source_node_id && item?.target_node_id))
     return {
-      newEdges: connectionEvents.filter(item => elapsed >= Number(item?.timing?.start_ms || 0)).length,
+      newEdges: Number.isFinite(startedEventCount)
+        ? startedEventCount
+        : connectionEvents.filter(item => elapsed >= Number(item?.timing?.start_ms || 0)).length,
       activeEdges: connectionEvents.filter(item => activeIds.has(String(item?.event_id || ''))).length,
       focusNodes: nodeIds.length
     }
@@ -1757,15 +1885,38 @@ const playbackPulseStats = computed(() => {
 
 const playbackPulseRelations = computed(() => {
   const frame = selectedAnimationFrame.value || {}
-  const timelineEvents = Array.isArray(frame.propagation_events) ? frame.propagation_events : []
+  const curatedEvents = Array.isArray(frame.visible_events) ? frame.visible_events : []
+  if (isCuratedShowcase.value && curatedEvents.length) {
+    return curatedEvents.slice(0, 6).map((event, index) => ({
+      id: String(event?.id || `curated-event-${currentRoundNumber.value}-${index}`),
+      status: 'active',
+      statusLabel: '主线推进',
+      sourceName: safeRuntimeCopy(event?.title, '本轮主体行动'),
+      targetName: '',
+      typeLabel: `${safeRuntimeCopy(activeStoryChapter.value?.name, '演化章节')} · ${selectedRoundLabel.value}`,
+    }))
+  }
+  const activeAndTrailEvents = Array.isArray(frame.propagation_events) ? frame.propagation_events : []
+  const recentCompletedEvents = Array.isArray(frame.recent_completed_propagation_events)
+    ? frame.recent_completed_propagation_events
+    : []
+  const timelineEventById = new Map()
+  ;[...activeAndTrailEvents, ...recentCompletedEvents].forEach((event, index) => {
+    const id = String(event?.event_id || event?.id || `timeline-event-${index}`)
+    if (!timelineEventById.has(id)) timelineEventById.set(id, event)
+  })
+  const timelineEvents = [...timelineEventById.values()]
   if (timelineEvents.length) {
     const elapsed = Number(frame.playback_elapsed_ms || 0)
     const activeIds = new Set(Array.isArray(frame.active_propagation_event_ids) ? frame.active_propagation_event_ids : [])
+    const trailIds = new Set(Array.isArray(frame.trail_propagation_event_ids) ? frame.trail_propagation_event_ids : [])
     return timelineEvents
       .filter(item => (item?.edge_id || (item?.source_node_id && item?.target_node_id)) && elapsed >= Number(item?.timing?.start_ms || 0))
       .sort((a, b) => {
         const activeDelta = Number(activeIds.has(String(b?.event_id || ''))) - Number(activeIds.has(String(a?.event_id || '')))
         if (activeDelta !== 0) return activeDelta
+        const trailDelta = Number(trailIds.has(String(b?.event_id || ''))) - Number(trailIds.has(String(a?.event_id || '')))
+        if (trailDelta !== 0) return trailDelta
         return Number(b?.timing?.start_ms || 0) - Number(a?.timing?.start_ms || 0)
       })
       .slice(0, 6)
@@ -2024,43 +2175,19 @@ const riskObjectHighlightPayload = computed(() => {
 })
 
 const workspaceTabs = computed(() => {
-  return [
-    {
-      value: 'pulse',
-      panelId: 'workspace-panel-pulse',
-      index: '01',
-      label: '运行脉冲',
-      meta: `${playbackPulseStats.value.newEdges} 条新增`
-    },
-    {
-      value: 'state',
-      panelId: 'workspace-panel-state',
-      index: '02',
-      label: '状态与行动',
-      meta: `${regionRows.value.length} 个区域`
-    },
-    {
-      value: 'spread',
-      panelId: 'workspace-panel-spread',
-      index: '03',
-      label: '扩散与反馈',
-      meta: `${spreadEvents.value.length} 个事件`
-    },
-    {
-      value: 'agents',
-      panelId: 'workspace-panel-agents',
-      index: '04',
-      label: '代理工作台',
-      meta: `${agentRows.value.length} 个代理体`
-    },
-    {
-      value: 'risk',
-      panelId: 'workspace-panel-risk',
-      index: '05',
-      label: '关系与风险',
-      meta: `${relationshipStateRows.value.length} 条关系 · ${riskObjects.value.length} 个风险对象`
-    }
-  ]
+  const metaByTab = {
+    pulse: `${playbackPulseStats.value.newEdges} 条新增`,
+    state: `${regionRows.value.length} 个区域`,
+    spread: `${spreadEvents.value.length} 个事件`,
+    agents: `${agentRows.value.length} 个主体 · ${relationshipStateRows.value.length} 条关系`,
+    risk: `${riskObjects.value.length} 个风险对象`,
+  }
+  return STEP3_WORKSPACE_TABS.map((item, index) => ({
+    ...item,
+    panelId: `workspace-panel-${item.value}`,
+    index: String(index + 1).padStart(2, '0'),
+    meta: metaByTab[item.value],
+  }))
 })
 
 const activeWorkspaceTabLabel = computed(() => {
@@ -2299,7 +2426,7 @@ function collectGraphNodes(data) {
 }
 
 function extractRoundNumber(snapshot, fallback = 0) {
-  return snapshot?.round || snapshot?.round_num || snapshot?.step || fallback + 1
+  return snapshot?.round ?? snapshot?.round_num ?? snapshot?.step ?? fallback + 1
 }
 
 function snapshotKey(snapshot, idx) {
@@ -2323,6 +2450,7 @@ function normalizeRegionRows(source) {
         rows.push({ id: `${idx}`, name: safeRuntimeCopy(item, `区域 ${idx + 1}`) })
         return
       }
+      const state = { ...(item.state_vector || {}), ...(item.business_state || {}) }
       const name = item.region || item.region_name || item.name || item.label || item.id || `region_${idx}`
       rows.push({
         id: item.region_id || item.id || `${name}-${idx}`,
@@ -2332,12 +2460,19 @@ function normalizeRegionRows(source) {
         spread_pressure: normalizeScore(item.spread_pressure ?? item.spread ?? 0),
         ecosystem_integrity: normalizeScore(item.ecosystem_integrity ?? item.ecosystem ?? 100),
         livelihood_stability: normalizeScore(item.livelihood_stability ?? item.livelihood ?? 100),
-        public_trust: normalizeScore(item.public_trust ?? item.trust ?? 100),
+        public_trust: normalizeScore(item.public_trust ?? state.public_trust ?? item.trust ?? 100),
         panic_level: normalizeScore(item.panic_level ?? item.panic ?? 0),
         service_capacity: normalizeScore(item.service_capacity ?? item.service ?? 100),
         response_capacity: normalizeScore(item.response_capacity ?? item.response ?? 100),
         economic_stress: normalizeScore(item.economic_stress ?? item.stress ?? 0),
-        vulnerability_score: normalizeScore(item.vulnerability_score ?? item.vulnerability ?? 0)
+        vulnerability_score: normalizeScore(item.vulnerability_score ?? item.vulnerability ?? 0),
+        exposure_pressure: normalizeScore(item.exposure_pressure ?? state.exposure_pressure ?? item.exposure_score ?? 0),
+        detection_visibility: normalizeScore(item.detection_visibility ?? state.detection_visibility ?? 0),
+        testing_turnaround: normalizeScore(item.testing_turnaround ?? state.testing_turnaround ?? 0),
+        healthcare_load: normalizeScore(item.healthcare_load ?? state.healthcare_load ?? 0),
+        mobility_intensity: normalizeScore(item.mobility_intensity ?? state.mobility_intensity ?? 0),
+        supply_sufficiency: normalizeScore(item.supply_sufficiency ?? state.supply_sufficiency ?? 0),
+        community_support: normalizeScore(item.community_support ?? state.community_support ?? 0)
       })
     })
     return rows
@@ -2346,6 +2481,7 @@ function normalizeRegionRows(source) {
   if (raw && typeof raw === 'object') {
     Object.entries(raw).forEach(([key, value], idx) => {
       if (value && typeof value === 'object') {
+        const state = { ...(value.state_vector || {}), ...(value.business_state || {}) }
         rows.push({
           id: key,
           name: safeRuntimeCopy(value.region || value.name || key, `区域 ${idx + 1}`),
@@ -2354,12 +2490,19 @@ function normalizeRegionRows(source) {
           spread_pressure: normalizeScore(value.spread_pressure ?? value.spread ?? 0),
           ecosystem_integrity: normalizeScore(value.ecosystem_integrity ?? value.ecosystem ?? 100),
           livelihood_stability: normalizeScore(value.livelihood_stability ?? value.livelihood ?? 100),
-          public_trust: normalizeScore(value.public_trust ?? value.trust ?? 100),
+          public_trust: normalizeScore(value.public_trust ?? state.public_trust ?? value.trust ?? 100),
           panic_level: normalizeScore(value.panic_level ?? value.panic ?? 0),
           service_capacity: normalizeScore(value.service_capacity ?? value.service ?? 100),
           response_capacity: normalizeScore(value.response_capacity ?? value.response ?? 100),
           economic_stress: normalizeScore(value.economic_stress ?? value.stress ?? 0),
-          vulnerability_score: normalizeScore(value.vulnerability_score ?? value.vulnerability ?? 0)
+          vulnerability_score: normalizeScore(value.vulnerability_score ?? value.vulnerability ?? 0),
+          exposure_pressure: normalizeScore(value.exposure_pressure ?? state.exposure_pressure ?? value.exposure_score ?? 0),
+          detection_visibility: normalizeScore(value.detection_visibility ?? state.detection_visibility ?? 0),
+          testing_turnaround: normalizeScore(value.testing_turnaround ?? state.testing_turnaround ?? 0),
+          healthcare_load: normalizeScore(value.healthcare_load ?? state.healthcare_load ?? 0),
+          mobility_intensity: normalizeScore(value.mobility_intensity ?? state.mobility_intensity ?? 0),
+          supply_sufficiency: normalizeScore(value.supply_sufficiency ?? state.supply_sufficiency ?? 0),
+          community_support: normalizeScore(value.community_support ?? state.community_support ?? 0)
         })
       } else {
         rows.push({ id: `${key}-${idx}`, name: safeRuntimeCopy(key, `区域 ${idx + 1}`), selectedScore: normalizeScore(value) })
@@ -2426,6 +2569,7 @@ function normalizeSubregionRows(source) {
       }
     }
 
+    const state = { ...(item.state_vector || {}), ...(item.business_state || {}) }
     const name = item.name || item.subregion_name || item.label || item.region_name || `subregion_${idx}`
     const parentId = String(item.parent_region_id || item.parent_id || item.parent_region || '')
     return {
@@ -2457,12 +2601,19 @@ function normalizeSubregionRows(source) {
       spread_pressure: normalizeScore(item.spread_pressure ?? item.spread ?? 0),
       ecosystem_integrity: normalizeScore(item.ecosystem_integrity ?? item.ecosystem ?? 100),
       livelihood_stability: normalizeScore(item.livelihood_stability ?? item.livelihood ?? 100),
-      public_trust: normalizeScore(item.public_trust ?? item.trust ?? 100),
+      public_trust: normalizeScore(item.public_trust ?? state.public_trust ?? item.trust ?? 100),
       panic_level: normalizeScore(item.panic_level ?? item.panic ?? 0),
       service_capacity: normalizeScore(item.service_capacity ?? item.service ?? 100),
       response_capacity: normalizeScore(item.response_capacity ?? item.response ?? 100),
       economic_stress: normalizeScore(item.economic_stress ?? item.stress ?? 0),
-      vulnerability_score: normalizeScore(item.vulnerability_score ?? item.vulnerability ?? 0)
+      vulnerability_score: normalizeScore(item.vulnerability_score ?? item.vulnerability ?? 0),
+      exposure_pressure: normalizeScore(item.exposure_pressure ?? state.exposure_pressure ?? item.exposure_score ?? 0),
+      detection_visibility: normalizeScore(item.detection_visibility ?? state.detection_visibility ?? 0),
+      testing_turnaround: normalizeScore(item.testing_turnaround ?? state.testing_turnaround ?? 0),
+      healthcare_load: normalizeScore(item.healthcare_load ?? state.healthcare_load ?? 0),
+      mobility_intensity: normalizeScore(item.mobility_intensity ?? state.mobility_intensity ?? 0),
+      supply_sufficiency: normalizeScore(item.supply_sufficiency ?? state.supply_sufficiency ?? 0),
+      community_support: normalizeScore(item.community_support ?? state.community_support ?? 0)
     }
   })
 }
@@ -2515,7 +2666,7 @@ function normalizeAgentRows(source, scoreKey = 'vulnerability_score', configured
         ? item.archetype_key
         : rawRoleType
     ) || item.archetype_key || item.profession || item.entity_type || ''
-    const state = item.state_vector || {}
+    const state = { ...(item.state_vector || {}), ...(item.business_state || {}) }
     const selectedScore = normalizeScore(
       state[scoreKey] ?? item[scoreKey] ?? state.vulnerability_score ?? item.focus_score ?? item.exposure_score ?? 0
     )
@@ -2563,6 +2714,13 @@ function normalizeAgentRows(source, scoreKey = 'vulnerability_score', configured
       panic_level: normalizeScore(state.panic_level ?? item.panic_level ?? 0),
       public_trust: normalizeScore(state.public_trust ?? item.public_trust ?? 0),
       vulnerability_score: normalizeScore(state.vulnerability_score ?? item.vulnerability_score ?? 0),
+      exposure_pressure: normalizeScore(state.exposure_pressure ?? item.exposure_pressure ?? item.exposure_score ?? 0),
+      detection_visibility: normalizeScore(state.detection_visibility ?? item.detection_visibility ?? 0),
+      testing_turnaround: normalizeScore(state.testing_turnaround ?? item.testing_turnaround ?? 0),
+      healthcare_load: normalizeScore(state.healthcare_load ?? item.healthcare_load ?? 0),
+      mobility_intensity: normalizeScore(state.mobility_intensity ?? item.mobility_intensity ?? 0),
+      supply_sufficiency: normalizeScore(state.supply_sufficiency ?? item.supply_sufficiency ?? 0),
+      community_support: normalizeScore(state.community_support ?? item.community_support ?? 0),
       capabilityLabels,
       resourceSummary: resourceRows.slice(0, 2).join(' · '),
       motivations: uniqueList([
@@ -3103,7 +3261,7 @@ async function startRun() {
 async function handleStop() {
   if (!props.simulationId || isStopping.value) return
   if (isReplayPlayback.value) {
-    stopAnimationPlayback()
+    stopAnimationPlayback({ userInitiated: true })
     addLog('冻结演示回放已暂停')
     return
   }
@@ -3130,6 +3288,13 @@ async function handleStop() {
 async function handleNextStep() {
   if (!props.simulationId) return
 
+  const reportId = existingReportId.value
+  if (reportId) {
+    addLog(`打开已有报告: ${reportId}`)
+    router.push({ name: 'Analysis', params: { reportId }, query: { ...route.query, step: '4' } })
+    return
+  }
+
   if (isGeneratingReport.value) {
     addLog('报告生成请求已发送，请稍候...')
     return
@@ -3139,11 +3304,6 @@ async function handleNextStep() {
   addLog('正在生成 Kaleido 报告...')
 
   try {
-    if (isReplayPlayback.value && route.query.report_id) {
-      router.push({ name: 'Analysis', params: { reportId: route.query.report_id } })
-      return
-    }
-
     const graphId =
       simulationSnapshot.value?.graph_id ||
       configSnapshot.value?.graph_id ||
@@ -3165,7 +3325,7 @@ async function handleNextStep() {
     if (res.success && res.data) {
       const reportId = res.data.report_id
       addLog(`✓ 报告生成任务已启动: ${reportId}`)
-      router.push({ name: 'Analysis', params: { reportId } })
+      router.push({ name: 'Analysis', params: { reportId }, query: { ...route.query, step: '4' } })
     } else {
       addLog(`✗ 报告生成失败: ${res.error || '未知错误'}`)
       isGeneratingReport.value = false
@@ -3178,6 +3338,57 @@ async function handleNextStep() {
 
 function handleGoBack() {
   emit('go-back')
+}
+
+function seekToRound(round) {
+  const targetRound = Number(round ?? 0)
+  if (targetRound === 0) {
+    stopAnimationPlayback({ userInitiated: true })
+    playheadMs.value = 0
+    return
+  }
+  const marker = (playbackPlan.value?.rounds || []).find((item) => Number(item?.round) === targetRound)
+  if (!marker) return
+  stopAnimationPlayback({ userInitiated: true })
+  playheadMs.value = Math.max(0, Math.min(playbackDurationMs.value, Number(marker.start_ms || 0)))
+}
+
+function seekToStoryChapter(chapter) {
+  seekToRound(chapter?.round_start ?? 0)
+}
+
+function handleInterventionAction() {
+  if (!isCuratedShowcase.value) {
+    isInterventionPanelOpen.value = true
+    return
+  }
+  const current = Number(currentRoundNumber.value || 0)
+  const nearest = [...policyInterventions.value].sort((left, right) => {
+    const leftStart = Number(left?.round_start || 0)
+    const rightStart = Number(right?.round_start || 0)
+    const leftDistance = current >= leftStart && current <= Number(left?.round_end || leftStart) ? 0 : Math.abs(leftStart - current)
+    const rightDistance = current >= rightStart && current <= Number(right?.round_end || rightStart) ? 0 : Math.abs(rightStart - current)
+    return leftDistance - rightDistance
+  })[0]
+  const nearestStart = Number(nearest?.round_start ?? current)
+  const nearestEnd = Number(nearest?.round_end ?? nearestStart)
+  const focusRound = nearest && current >= nearestStart && current <= nearestEnd
+    ? current
+    : nearestStart
+  if (nearest) seekToRound(focusRound)
+  const reportId = existingReportId.value
+  if (!reportId) return
+  router.push({
+    name: 'Analysis',
+    params: { reportId },
+    query: {
+      ...route.query,
+      step: '4',
+      tab: 'intervention',
+      round: String(focusRound),
+      ...(nearest?.id ? { policy_id: nearest.id } : {})
+    }
+  })
 }
 
 async function refreshSimulationContext() {
@@ -3199,7 +3410,6 @@ async function refreshSimulationContext() {
       configSnapshot.value = configRes.value.data
       if (configRes.value.data.scenario_mode) currentScenarioMode.value = configRes.value.data.scenario_mode
       if (configRes.value.data.diffusion_template) currentTemplate.value = configRes.value.data.diffusion_template
-      if (configRes.value.data.max_rounds) roundIndex.value = 0
       if (configRes.value.data.time_config?.minutes_per_round) {
         addLog(`时间粒度: ${configRes.value.data.time_config.minutes_per_round} min / round`)
       }
@@ -3261,8 +3471,6 @@ async function refreshDetail() {
         )
         if (detailRound > 0) {
           syncRoundIndexToRound(detailRound)
-        } else {
-          roundIndex.value = Math.min(roundIndex.value, roundSnapshots.value.length - 1)
         }
       }
     }
@@ -3290,58 +3498,37 @@ function stopPolling() {
   }
 }
 
-function stopAnimationPlayback() {
-  if (animationTimer) {
-    clearTimeout(animationTimer)
-    animationTimer = null
-  }
+function stopAnimationPlayback({ userInitiated = false } = {}) {
   if (frameAnimationRaf) {
     cancelAnimationFrame(frameAnimationRaf)
     frameAnimationRaf = null
   }
+  lastPlaybackRafAt = null
   isPlayingAnimation.value = false
+  if (userInitiated) hasUserPausedPlayback.value = true
 }
 
-function resolvePlaybackDelayMs(frame = null) {
-  const baseSpeed = Number(props.animationData?.meta?.default_speed_ms || 1800)
-  const targetSpeed = Math.max(400, Number(playbackSpeedMs.value || baseSpeed))
-  const frameDuration = getFrameTimelineDuration(
-    props.animationData,
-    frame,
-    Number(frame?.playback_duration_ms || baseSpeed)
-  )
-  const scaled = frameDuration * (targetSpeed / Math.max(1, baseSpeed))
-  return Math.max(420, Math.round(scaled))
-}
-
-function queueNextAnimationTick() {
-  if (!isPlayingAnimation.value || playbackFrames.value.length <= 1) return
-  const frame = playbackFrames.value[Math.min(Math.max(roundIndex.value, 0), playbackFrames.value.length - 1)]
-  const durationMs = resolvePlaybackDelayMs(frame)
-  runFramePulse(durationMs, () => {
-    const maxIndex = Math.max(playbackFrames.value.length - 1, 0)
-    if (roundIndex.value >= maxIndex) {
-      stopAnimationPlayback()
+function queueContinuousPlaybackTick() {
+  if (!isPlayingAnimation.value || playbackFrames.value.length <= 1 || frameAnimationRaf) return
+  const tick = (now) => {
+    if (!isPlayingAnimation.value) {
+      frameAnimationRaf = null
+      lastPlaybackRafAt = null
       return
     }
-    roundIndex.value += 1
-    queueNextAnimationTick()
-  })
-}
-
-function runFramePulse(durationMs, onComplete = null) {
-  if (frameAnimationRaf) {
-    cancelAnimationFrame(frameAnimationRaf)
-    frameAnimationRaf = null
-  }
-  playbackElapsedMs.value = 0
-  const startAt = performance.now()
-  const tick = (now) => {
-    const elapsed = Math.min(durationMs, Math.max(0, now - startAt))
-    playbackElapsedMs.value = elapsed
-    if (elapsed >= durationMs) {
+    if (lastPlaybackRafAt === null) lastPlaybackRafAt = now
+    const wallDelta = Math.max(0, Math.min(64, now - lastPlaybackRafAt))
+    lastPlaybackRafAt = now
+    playheadMs.value = advanceContinuousPlayhead(
+      playheadMs.value,
+      wallDelta,
+      playbackRate.value,
+      playbackDurationMs.value,
+    )
+    if (playheadMs.value >= playbackDurationMs.value) {
       frameAnimationRaf = null
-      if (typeof onComplete === 'function') onComplete()
+      lastPlaybackRafAt = null
+      isPlayingAnimation.value = false
       return
     }
     frameAnimationRaf = requestAnimationFrame(tick)
@@ -3351,24 +3538,34 @@ function runFramePulse(durationMs, onComplete = null) {
 
 function toggleAnimationPlayback() {
   if (isPlayingAnimation.value) {
-    stopAnimationPlayback()
+    stopAnimationPlayback({ userInitiated: true })
     return
   }
   if (playbackFrames.value.length <= 1) return
-  if (roundIndex.value >= playbackFrames.value.length - 1) {
-    roundIndex.value = 0
-  }
+  if (playheadMs.value >= playbackDurationMs.value - 1) playheadMs.value = 0
+  hasUserPausedPlayback.value = false
   isPlayingAnimation.value = true
-  queueNextAnimationTick()
+  queueContinuousPlaybackTick()
+}
+
+function handlePlaybackScrub(event) {
+  stopAnimationPlayback({ userInitiated: true })
+  const requested = Number(event?.target?.value || 0)
+  playheadMs.value = Math.max(0, Math.min(playbackDurationMs.value, requested))
 }
 
 function maybeAutoplayReplay() {
   if (!isReplayPlayback.value) return
-  if (hasAutoStartedReplay.value || isPlayingAnimation.value) return
+  if (hasAutoStartedReplay.value || isPlayingAnimation.value || hasUserPausedPlayback.value) return
   if (playbackFrames.value.length <= 1) return
   hasAutoStartedReplay.value = true
   window.setTimeout(() => {
-    if (!isReplayPlayback.value || isPlayingAnimation.value || playbackFrames.value.length <= 1) return
+    if (
+      !isReplayPlayback.value
+      || isPlayingAnimation.value
+      || hasUserPausedPlayback.value
+      || playbackFrames.value.length <= 1
+    ) return
     toggleAnimationPlayback()
   }, 320)
 }
@@ -3390,36 +3587,50 @@ watch(
 watch(
   () => roundSnapshots.value.length,
   (value) => {
-    if (value > 0 && !props.animationData?.frames?.length) {
-      roundIndex.value = value - 1
-    }
+    if (value <= 0 || props.animationData?.frames?.length || hasUserPausedPlayback.value) return
+    const lastRound = playbackPlan.value?.rounds?.[playbackPlan.value.rounds.length - 1]
+    if (!lastRound) return
+    playheadMs.value = Math.max(0, Math.min(playbackDurationMs.value, Number(lastRound.end_ms || 0) - 1))
   }
 )
 
 watch(
   () => props.animationData,
   (value, previousValue) => {
-    if (value?.meta?.default_speed_ms) {
-      playbackSpeedMs.value = value.meta.default_speed_ms
+    if (!value?.frames?.length) return
+    const previousFrameCount = Array.isArray(previousValue?.frames) ? previousValue.frames.length : 0
+    const previousTimelineId = String(previousValue?.timeline?.timeline_id || '')
+    const nextTimelineId = String(value?.timeline?.timeline_id || '')
+    const timelineChanged = Boolean(
+      previousTimelineId
+      && nextTimelineId
+      && previousTimelineId !== nextTimelineId
+    )
+    const previousPlan = previousFrameCount > 0 ? buildContinuousPlaybackPlan(previousValue) : null
+    const previousDuration = Math.max(0, Number(previousPlan?.duration_ms || 0))
+    const wasAtBufferedEnd = previousDuration > 0 && playheadMs.value >= previousDuration - 32
+
+    if (timelineChanged) {
+      stopAnimationPlayback()
+      hasAutoStartedReplay.value = false
+      hasUserPausedPlayback.value = false
+      playheadMs.value = 0
+    } else if (previousFrameCount === 0) {
+      playheadMs.value = 0
+    } else {
+      playheadMs.value = Math.max(0, Math.min(playbackDurationMs.value, playheadMs.value))
     }
-    if (value?.frames?.length) {
-      const previousFrameCount = Array.isArray(previousValue?.frames) ? previousValue.frames.length : 0
-      const wasAtLatestFrame = previousFrameCount > 0 && roundIndex.value >= previousFrameCount - 1
-      const targetRound = Number(
-        runStatus.value.current_round ||
-        runDetail.value.current_round ||
-        runDetail.value.latest_round_snapshot?.round ||
-        0
-      )
-      if (!isReplayPlayback.value && targetRound > 0 && (previousFrameCount === 0 || wasAtLatestFrame)) {
-        syncRoundIndexToRound(targetRound)
-      } else if (previousFrameCount === 0) {
-        roundIndex.value = 0
-      } else {
-        roundIndex.value = Math.min(roundIndex.value, value.frames.length - 1)
-      }
-      maybeAutoplayReplay()
+
+    if (
+      !isReplayPlayback.value
+      && !hasUserPausedPlayback.value
+      && value.frames.length > 1
+      && (previousFrameCount <= 1 || wasAtBufferedEnd || timelineChanged)
+    ) {
+      isPlayingAnimation.value = true
+      queueContinuousPlaybackTick()
     }
+    maybeAutoplayReplay()
   },
   { immediate: true }
 )
@@ -3427,7 +3638,10 @@ watch(
 watch(
   () => props.simulationId,
   () => {
+    stopAnimationPlayback()
     hasAutoStartedReplay.value = false
+    hasUserPausedPlayback.value = false
+    playheadMs.value = 0
   }
 )
 
@@ -3440,22 +3654,6 @@ watch(
   },
   { immediate: true }
 )
-
-watch(roundIndex, () => {
-  if (!props.animationData?.frames?.length || isPlayingAnimation.value) return
-  window.setTimeout(() => {
-    if (isPlayingAnimation.value) return
-    const frame = playbackFrames.value[Math.min(Math.max(roundIndex.value, 0), playbackFrames.value.length - 1)]
-    runFramePulse(resolvePlaybackDelayMs(frame))
-  }, 0)
-})
-
-watch(playbackSpeedMs, () => {
-  if (isPlayingAnimation.value) {
-    stopAnimationPlayback()
-    toggleAnimationPlayback()
-  }
-})
 
 watch(
   [riskObjects, primaryRiskObjectId],
@@ -3580,6 +3778,50 @@ onUnmounted(() => {
   padding: 0 0 8px;
   background: rgba(255, 250, 244, 0.97);
   backdrop-filter: blur(18px);
+}
+
+.story-chapter-nav {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.story-chapter-nav button {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+  padding: 8px 10px;
+  border: 1px solid rgba(23, 48, 86, 0.1);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.72);
+  color: #596276;
+  text-align: left;
+  cursor: pointer;
+}
+
+.story-chapter-nav button span {
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+}
+
+.story-chapter-nav button strong {
+  overflow: hidden;
+  color: #27344a;
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.story-chapter-nav button.is-active {
+  border-color: rgba(31, 106, 84, 0.36);
+  background: rgba(31, 106, 84, 0.09);
+  box-shadow: inset 0 -2px 0 #1f6a54;
+}
+
+@media (max-width: 900px) {
+  .story-chapter-nav {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
 }
 
 .hero,
@@ -5329,6 +5571,11 @@ onUnmounted(() => {
   align-items: center;
 }
 
+.matrix-head.is-curated,
+.region-row.is-curated {
+  grid-template-columns: minmax(170px, 1.65fr) repeat(8, minmax(50px, 0.62fr));
+}
+
 .matrix-head {
   margin-bottom: 10px;
   font-size: 11px;
@@ -5633,6 +5880,11 @@ onUnmounted(() => {
   .matrix-head,
   .region-row {
     grid-template-columns: minmax(150px, 1.5fr) repeat(4, minmax(44px, 0.7fr));
+  }
+
+  .matrix-head.is-curated,
+  .region-row.is-curated {
+    grid-template-columns: minmax(140px, 1.4fr) repeat(8, minmax(44px, 0.58fr));
   }
 }
 

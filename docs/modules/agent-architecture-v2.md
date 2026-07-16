@@ -98,7 +98,7 @@ Step 1 的 AOI 决定分析边界，Effort 决定可投入的空间候选、规�
 - `agent_lineage_ledger.jsonl`：父子谱系、需求依据、创建轮和生效轮；
 - `agent_candidate_ledger.jsonl`：待观察、覆盖、延后、容量缺口和解析原因。
 
-Step 2 显示角色需求覆盖、未覆盖需求、新建聚合 Agent、政策执行绑定和完整建档依据。Step 3 的 Agent 工作台显示生命周期、表示粒度、能力、相对资源和最近行动；“关系与风险”显示关系状态、关系事件、Agent 生命周期事件和风险结果。机器枚举必须经过中文显示映射。
+Step 2 的“主体系统”显示角色需求覆盖、未覆盖需求、新建聚合 Agent、政策执行绑定、初始关系骨架和完整建档依据。Step 3 的“主体响应”显示生命周期、表示粒度、能力、相对资源、最近行动、关系状态、关系事件和 Agent 生命周期事件；“风险对象”单独展示运行风险结果。机器枚举必须经过中文显示映射。
 
 ## Effort 执行状态
 
@@ -127,7 +127,7 @@ Step 2 显示角色需求覆盖、未覆盖需求、新建聚合 Agent、政策�
 - Step 1 尚未完成按 EventMechanismGraph 发起的定向外部补查、完整 R4 内部单元证据和多空间假设比较。
 - 开放式的新机制端点发现还没有形成“发现 -> 外部取证 -> 新 RoleDemand”的完整闭环。
 - Token 账本和 Step 4 高强度分析尚未全部接线。
-- 武汉冻结案例按既定范围继续读取 V1 数据；共享组件保持兼容，未来迁移正式 Agent 数据合同时必须提升 golden artifact contract version。
+- 本地 `/demo/wuhan` 已默认进入只读武汉 V2 的已填充 Step 1；显式 `?version=v2` 保持同一路径，`?version=v1` 保留 V1 Step 2 回滚。V2 以显式 roster 展示目标态合同，不代表正式 `AgentPlannerV2` 已具备同等自动生成能力。两版共用正式 Step 1–4 组件，任何持久化合同变化都必须提升对应 golden artifact contract version；当前入口切换尚未生产部署，也不由构建器执行。
 
 ## 修改纪律
 
@@ -142,3 +142,4 @@ Step 2 显示角色需求覆盖、未覆盖需求、新建聚合 Agent、政策�
 - 2026-07-13：建立五档 Effort、地图空间细化和运行时 Agent 涌现底座。
 - 2026-07-13：完成 RoleDemand、AgentArchetype、AgentInstance、政策执行绑定、行动校验、状态变更、动态关系和风险只读边界的共享正式链路。
 - 2026-07-13：补齐 Step 2 建档审计与 Step 3 Agent/关系/政策解释界面，武汉冻结案例继续保持 V1 兼容。
+- 2026-07-15：新增武汉 V2 策划型目标态例外。其 240 个 Agent（72 个核心、168 个聚合）由版本化 roster 确定性编译，用来展示 Agent V2 的最终产品合同，不代表正式 `AgentPlannerV2` 已能自动生成同等内容，也不改变正式流程“按角色需求而非目标数量补齐”的规则。V2 仍输出 AgentPlan、PlacementPlan、ResolutionPlan、PolicyExecutionPlan、生命周期和关系账本，供共享 Step 2/3 组件验证。

@@ -58,7 +58,7 @@ import GraphPanel from '../components/GraphPanel.vue'
 import Step3Simulation from '../components/Step3Simulation.vue'
 import { getProject, getGraphData } from '../api/graph'
 import { getSimulation, getSimulationAnimation, getSimulationConfig, getSimulationGraphRealtime } from '../api/simulation'
-import { markWorkflowStep } from '../store/workflowNavigation'
+import { hydrateWorkflowFromSimulation } from '../store/workflowNavigation'
 import { sanitizeDisplayCopy } from '../utils/displayText'
 import {
   buildPropagationState,
@@ -76,6 +76,11 @@ const router = useRouter()
 const props = defineProps({
   simulationId: String
 })
+
+function cleanRouteId(value) {
+  if (Array.isArray(value)) return cleanRouteId(value[0])
+  return String(value || '').trim()
+}
 
 // Layout State
 const viewMode = ref('split') // Step3 的核心是运行演化图谱；默认保持左图可见，用户仍可主动收起
@@ -96,6 +101,8 @@ const graphHighlight = ref({ nodeIds: [], nodeNames: [], edgeIds: [], label: '',
 const animationData = ref(null)
 const animationFrame = ref(null)
 const isReplayOnly = ref(route.query.replay === '1')
+const linkedProjectId = ref('')
+const linkedReportId = ref(cleanRouteId(route.query.report_id))
 
 // --- Computed Layout Styles ---
 const leftPanelStyle = computed(() => {
@@ -158,8 +165,33 @@ const addLog = (msg) => {
   }
 }
 
+function syncWorkflowNavigation({
+  projectId = linkedProjectId.value,
+  reportId = linkedReportId.value,
+  status = currentStatus.value
+} = {}) {
+  const normalizedProjectId = cleanRouteId(projectId)
+  const normalizedReportId = cleanRouteId(reportId)
+  if (normalizedProjectId) linkedProjectId.value = normalizedProjectId
+  if (normalizedReportId) linkedReportId.value = normalizedReportId
+
+  const hasFinishedRun = status === 'completed' || Boolean(linkedReportId.value)
+  hydrateWorkflowFromSimulation({
+    simulationId: currentSimulationId.value,
+    projectId: linkedProjectId.value,
+    reportId: linkedReportId.value,
+    query: {
+      ...route.query,
+      ...(linkedReportId.value ? { report_id: linkedReportId.value } : {})
+    },
+    step3Status: hasFinishedRun ? 'done' : 'active',
+    step3Summary: hasFinishedRun ? '推演结果' : '推演播放中'
+  })
+}
+
 const updateStatus = (status) => {
   currentStatus.value = status
+  syncWorkflowNavigation({ status })
   if (status === 'completed' && animationData.value) {
     Promise.resolve().then(() => loadAnimationData({ incremental: true, silent: true }))
   }
@@ -209,8 +241,16 @@ const buildTimelineState = (state = {}, frame = {}, maxDelay = 0, focusIds = new
   const id = String(state.id || '')
   const isFocused = id && focusIds.has(id)
   const participatesInPulse = focusIds.size > 0 ? isFocused : ['new', 'active'].includes(rawStatus)
-  const duration = Math.max(800, Number(frame.playback_duration_ms || 1600))
-  const elapsed = Math.max(0, Number(frame.playback_elapsed_ms || duration))
+  const duration = Math.max(800, Number(
+    frame.playback_round_duration_ms
+    ?? frame.playback_duration_ms
+    ?? 1600,
+  ))
+  const elapsed = Math.max(0, Number(
+    frame.playback_round_elapsed_ms
+    ?? frame.playback_elapsed_ms
+    ?? duration,
+  ))
   const rawDelay = Math.max(0, Number(state.delay_ms || 0))
   const timelineDelay = maxDelay > 0
     ? Math.round((rawDelay / maxDelay) * duration * 0.72)
@@ -278,6 +318,7 @@ const withAnimationAttributes = (attributes = {}, state = {}) => ({
   propagation_confidence: state.propagation_confidence,
   propagation_grounding: state.propagation_grounding,
   propagation_current: state.propagation_current,
+  propagation_trail: state.propagation_trail,
   propagation_path_index: state.propagation_path_index,
   propagation_path_count: state.propagation_path_count,
 })
@@ -318,6 +359,7 @@ const buildResolvedPropagationState = (
       || (fallbackEdgeIds.has(edgeId) ? propagationState.pairStates.get(pairKey) : null)
     if (!pulse) return
     pulseByEdge.set(edge, pulse)
+    if (pulse.propagation_trail) return
     if (!allowEndpointPulse(edge)) return
 
     const edgeProgress = Math.max(0, Math.min(1, Number(pulse.animation_progress || 0)))
@@ -522,7 +564,13 @@ const applyAnimationToMapProjection = (projection, frame) => {
   const focusEdgeIds = new Set((frame.focus_ids?.edge_ids || []).map((item) => String(item || '')).filter(Boolean))
   const nodeStates = buildStateMap((frame.node_states || []).map((state) => buildTimelineState(state, frame, nodeMaxDelay, focusNodeIds)))
   const edgeStates = buildStateMap((frame.edge_states || []).map((state) => buildTimelineState(state, frame, edgeMaxDelay, focusEdgeIds)))
-  const propagationState = buildPropagationState(frame)
+  // The map covers much larger visual distances than the topology view. Keep
+  // the shared story clock and event ordering, but expose at most two grounded
+  // foreground routes so regional propagation remains readable.
+  const propagationState = buildPropagationState(frame, {
+    maxActiveEvents: 2,
+    maxTrailEvents: 2,
+  })
   if (!nodeStates.size && !propagationState.hasTimeline) return projection
   const projectionNodes = Array.isArray(projection.nodes) ? projection.nodes : []
   const projectionEdges = Array.isArray(projection.edges) ? projection.edges : []
@@ -894,7 +942,7 @@ const handleGoBack = () => {
   stopGraphRefresh()
 
   // 返回到 Step 2 (环境搭建)
-  const query = {}
+  const query = { ...route.query, step: '2' }
   if (route.query.scenario_mode) query.scenario_mode = route.query.scenario_mode
   if (route.query.diffusion_template) query.diffusion_template = route.query.diffusion_template
   if (route.query.search_mode) query.search_mode = route.query.search_mode
@@ -920,9 +968,16 @@ const loadSimulationData = async () => {
     const simRes = await getSimulation(currentSimulationId.value)
     if (simRes.success && simRes.data) {
       const simData = simRes.data
+      const reportId = route.query.report_id || simData.report_id || linkedReportId.value
+      syncWorkflowNavigation({
+        projectId: simData.project_id,
+        reportId,
+        status: reportId ? 'completed' : currentStatus.value
+      })
       isReplayOnly.value = Boolean(simData.is_replay_only || route.query.replay === '1')
       if (isReplayOnly.value) {
         currentStatus.value = 'completed'
+        syncWorkflowNavigation({ status: 'completed' })
       }
       let graphLoaded = false
 
@@ -1000,7 +1055,9 @@ const animationPayloadSignature = (payload) => {
   const timeline = payload?.timeline || {}
   return [
     timeline.contract_version || '',
-    Number(timeline.cursor || 0),
+    timeline.timeline_id || '',
+    Number(timeline.head?.cursor ?? timeline.cursor ?? 0),
+    Number(timeline.clock?.committed_end_ms ?? timeline.head?.global_end_ms ?? 0),
     frames.length,
     Number(frames[frames.length - 1]?.round || 0),
     Array.isArray(layout.nodes) ? layout.nodes.length : 0,
@@ -1012,15 +1069,35 @@ const loadAnimationData = async ({ incremental = false, silent = false } = {}) =
   if (!currentSimulationId.value || animationLoadInFlight) return false
   animationLoadInFlight = true
   try {
-    const cursor = Number(animationData.value?.timeline?.cursor || 0)
+    const cursor = Number(
+      animationData.value?.timeline?.head?.cursor
+      ?? animationData.value?.timeline?.cursor
+      ?? 0
+    )
+    const timelineId = String(animationData.value?.timeline?.timeline_id || '').trim()
     const frameRound = (Array.isArray(animationData.value?.frames) ? animationData.value.frames : [])
       .reduce((maximum, frame) => Math.max(maximum, Number(frame?.round ?? frame?.round_num) || 0), 0)
     const params = incremental && animationData.value
-      ? { after_cursor: cursor, after_round: frameRound }
+      ? {
+          after_cursor: cursor,
+          after_round: frameRound,
+          ...(timelineId ? { timeline_id: timelineId } : {})
+        }
       : {}
-    const res = await getSimulationAnimation(currentSimulationId.value, params)
+    let res = await getSimulationAnimation(currentSimulationId.value, params)
     if (res.success && res.data) {
-      const nextPayload = incremental && animationData.value
+      const resetRequired = Boolean(
+        incremental
+        && animationData.value
+        && res.data?.timeline?.window?.reset_required
+      )
+      if (resetRequired) {
+        // A cursor belongs to exactly one timeline epoch. Never merge a reset
+        // window into the current story; replace it with a fresh full snapshot.
+        res = await getSimulationAnimation(currentSimulationId.value)
+      }
+      if (!res.success || !res.data) return false
+      const nextPayload = incremental && animationData.value && !resetRequired
         ? mergeAnimationPayload(animationData.value, res.data)
         : res.data
       const changed = animationPayloadSignature(nextPayload) !== animationPayloadSignature(animationData.value)
@@ -1208,18 +1285,7 @@ watch(shouldRefreshAnimation, (newValue) => {
 
 onMounted(() => {
   addLog('SimulationRunView 初始化')
-  markWorkflowStep(2, {
-    visited: true,
-    status: 'done',
-    summary: '场景配置',
-    route: { name: 'Simulation', params: { simulationId: currentSimulationId.value }, query: { ...route.query } }
-  })
-  markWorkflowStep(3, {
-    visited: true,
-    status: 'active',
-    summary: '推演播放中',
-    route: { name: 'SimulationRun', params: { simulationId: currentSimulationId.value }, query: { ...route.query } }
-  })
+  syncWorkflowNavigation()
   
   if (route.query.scenario_mode) {
     addLog(`场景模式: ${route.query.scenario_mode}`)

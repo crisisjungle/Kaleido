@@ -27,6 +27,17 @@ from .scenario_planner import (
     ScenarioPlanner,
 )
 from .simulation_manager import SimulationManager, SimulationStatus
+from .spatial_evidence import (
+    build_spatial_refinement_snapshot,
+    compile_facility_query_plan,
+)
+from .wuhan_showcase_builder import (
+    WUHAN_V2_ARTIFACT_CONTRACT_VERSION,
+    WUHAN_V2_CASE_ID,
+    WUHAN_V2_SPATIAL_FIXTURE_ID,
+    WUHAN_V2_SPATIAL_GROUNDING,
+    WuhanShowcaseBuilder,
+)
 
 logger = get_logger("envfish.golden_case")
 
@@ -37,7 +48,9 @@ WUHAN_MINUTES_PER_ROUND = 4320
 WUHAN_SPATIAL_FIXTURE_ID = "golden_spatial_fixture::wuhan_covid_v1"
 WUHAN_SPATIAL_GROUNDING = "curated_deterministic_fixture"
 WUHAN_ARTIFACT_CONTRACT_VERSION = (
-    "2026-07-14.semantic-input.v1-scenario-planning.v2-animation-timeline.v2-split-edge-refs.v1-environment-diffusion.v1"
+    "2026-07-15.semantic-input.v1-scenario-planning.v2-animation-timeline.v3-"
+    "global-story-clock.v1-split-edge-refs.v1-environment-diffusion.v1-"
+    "facility-query-plan.v1-spatial-refinement-snapshot.v1"
 )
 WUHAN_EFFORT_SNAPSHOT_ID = "effort_wuhan_covid_v1_high"
 
@@ -79,9 +92,30 @@ WUHAN_CASE = GoldenCaseDefinition(
     report_title="武汉疫情黄金案例推演报告",
 )
 
+WUHAN_V2_CASE = GoldenCaseDefinition(
+    case_id=WUHAN_V2_CASE_ID,
+    title="武汉疫情城市系统复盘",
+    summary="策划型 Ultra 目标态黄金案例，完整展示武汉疫情期间六个城市系统的协同演化。",
+    profile=WUHAN_V2_CASE_ID,
+    scenario_mode="crisis_mode",
+    hazard_template_id="pest_disease_ecology",
+    diffusion_template="bio_ecological_transmission",
+    search_mode="ultra",
+    reference_time=WUHAN_REFERENCE_TIME,
+    step_unit="day",
+    step_size=3,
+    total_rounds=WUHAN_TOTAL_ROUNDS,
+    target_node_count=288,
+    target_agent_count=240,
+    report_title="武汉疫情城市系统复盘报告",
+)
+
 
 class GoldenCaseService:
-    CASES: Dict[str, GoldenCaseDefinition] = {WUHAN_CASE.case_id: WUHAN_CASE}
+    CASES: Dict[str, GoldenCaseDefinition] = {
+        WUHAN_CASE.case_id: WUHAN_CASE,
+        WUHAN_V2_CASE.case_id: WUHAN_V2_CASE,
+    }
 
     @classmethod
     def list_cases(cls) -> List[Dict[str, Any]]:
@@ -140,6 +174,7 @@ class GoldenCaseService:
         simulation_dir = os.path.join(root, "simulation")
         report_dir = os.path.join(root, "report")
         animation_dir = os.path.join(root, "animation")
+        artifact_paths = dict((manifest or {}).get("artifacts") or {})
 
         normalized["scene"] = {
             **dict((manifest or {}).get("scene") or {}),
@@ -157,6 +192,10 @@ class GoldenCaseService:
             "policy_plan": os.path.join(simulation_dir, "policy_plan.json"),
             "role_demands": os.path.join(simulation_dir, "role_demands.json"),
             "agent_planning_request": os.path.join(simulation_dir, "agent_planning_request.json"),
+            "facility_query_plan": os.path.join(simulation_dir, "facility_query_plan.json"),
+            "spatial_refinement_snapshot": os.path.join(
+                simulation_dir, "spatial_refinement_snapshot.json"
+            ),
             "spread_event_ledger": os.path.join(simulation_dir, "spread_event_ledger.jsonl"),
         }
         normalized["report"] = {
@@ -170,12 +209,32 @@ class GoldenCaseService:
             "dir": animation_dir,
             "file": os.path.join(animation_dir, "animation.json"),
         }
+        if artifact_paths or case_id == WUHAN_V2_CASE_ID:
+            simulation_dir = normalized["simulation"]["dir"]
+            normalized["artifacts"] = {
+                "foundation": os.path.join(simulation_dir, "background_foundation.json"),
+                "scenario": os.path.join(simulation_dir, "scenario_definition.json"),
+                "runtime": os.path.join(simulation_dir, "runtime_ledger.json"),
+                "analysis": os.path.join(simulation_dir, "analysis_bundle.json"),
+                "config": os.path.join(simulation_dir, "simulation_config.json"),
+                "animation": os.path.join(normalized["animation"]["dir"], "animation.json"),
+                "agent_plan": os.path.join(simulation_dir, "agent_plan.json"),
+                "placement_plan": os.path.join(simulation_dir, "agent_placement_plan.json"),
+                "resolution_plan": os.path.join(simulation_dir, "resolution_plan.json"),
+                "policy_execution_plan": os.path.join(simulation_dir, "policy_execution_plan.json"),
+                "facility_query_plan": os.path.join(simulation_dir, "facility_query_plan.json"),
+                "spatial_refinement_snapshot": os.path.join(
+                    simulation_dir, "spatial_refinement_snapshot.json"
+                ),
+            }
         return normalized
 
     @classmethod
     def _artifact_contract_version(cls, definition: GoldenCaseDefinition) -> str:
         if definition.case_id == WUHAN_CASE_ID:
             return WUHAN_ARTIFACT_CONTRACT_VERSION
+        if definition.case_id == WUHAN_V2_CASE_ID:
+            return WUHAN_V2_ARTIFACT_CONTRACT_VERSION
         return "unversioned"
 
     @classmethod
@@ -195,12 +254,18 @@ class GoldenCaseService:
             ((manifest or {}).get("simulation") or {}).get("policy_plan"),
             ((manifest or {}).get("simulation") or {}).get("role_demands"),
             ((manifest or {}).get("simulation") or {}).get("agent_planning_request"),
+            ((manifest or {}).get("simulation") or {}).get("facility_query_plan"),
+            ((manifest or {}).get("simulation") or {}).get("spatial_refinement_snapshot"),
             ((manifest or {}).get("simulation") or {}).get("spread_event_ledger"),
             ((manifest or {}).get("report") or {}).get("markdown"),
             ((manifest or {}).get("report") or {}).get("outline"),
             ((manifest or {}).get("animation") or {}).get("file"),
         ]
-        return all(path and os.path.exists(path) for path in required_paths)
+        required_artifacts = [
+            ((manifest or {}).get("artifacts") or {}).get(name)
+            for name in ((manifest or {}).get("required_artifacts") or [])
+        ]
+        return all(path and os.path.exists(path) for path in [*required_paths, *required_artifacts])
 
     @classmethod
     def ensure_scaffold(cls, case_id: str, *, force: bool = False) -> Dict[str, Any]:
@@ -215,6 +280,13 @@ class GoldenCaseService:
                 if normalized != manifest:
                     cls._write_json(manifest_path, normalized)
                 return normalized
+
+        if case_id == WUHAN_V2_CASE_ID:
+            os.makedirs(root, exist_ok=True)
+            return cls._normalize_manifest_paths(
+                case_id,
+                WuhanShowcaseBuilder().compile(definition, root),
+            )
 
         os.makedirs(root, exist_ok=True)
         scene_dir = os.path.join(root, "scene")
@@ -319,6 +391,14 @@ class GoldenCaseService:
             os.path.join(simulation_dir, "agent_planning_request.json"),
             step2_artifacts["agent_planning_request"],
         )
+        cls._write_json(
+            os.path.join(simulation_dir, "facility_query_plan.json"),
+            step2_artifacts["facility_query_plan"],
+        )
+        cls._write_json(
+            os.path.join(simulation_dir, "spatial_refinement_snapshot.json"),
+            step2_artifacts["spatial_refinement_snapshot"],
+        )
         cls._write_json(os.path.join(simulation_dir, "region_graph_snapshot.json"), region_graph)
         cls._write_json(os.path.join(simulation_dir, "subregion_graph_snapshot.json"), subregion_graph)
         cls._write_json(os.path.join(simulation_dir, "profiles_full.json"), profiles)
@@ -403,6 +483,10 @@ class GoldenCaseService:
                 "policy_plan": os.path.join(simulation_dir, "policy_plan.json"),
                 "role_demands": os.path.join(simulation_dir, "role_demands.json"),
                 "agent_planning_request": os.path.join(simulation_dir, "agent_planning_request.json"),
+                "facility_query_plan": os.path.join(simulation_dir, "facility_query_plan.json"),
+                "spatial_refinement_snapshot": os.path.join(
+                    simulation_dir, "spatial_refinement_snapshot.json"
+                ),
                 "spread_event_ledger": os.path.join(simulation_dir, "spread_event_ledger.jsonl"),
             },
             "report": {
@@ -418,6 +502,23 @@ class GoldenCaseService:
         }
         cls._write_json(manifest_path, manifest)
         return manifest
+
+    @classmethod
+    def read_artifact(cls, case_id: str, artifact_name: str) -> Dict[str, Any]:
+        """Read a named, public workflow projection from a frozen case."""
+        cls.get_case(case_id)
+        manifest = cls.ensure_scaffold(case_id)
+        allowed = {"foundation", "scenario", "runtime", "analysis"}
+        normalized_name = str(artifact_name or "").strip().lower()
+        if normalized_name not in allowed:
+            raise ValueError(f"Golden case artifact not found: {artifact_name}")
+        path = str(((manifest or {}).get("artifacts") or {}).get(normalized_name) or "")
+        if not path or not os.path.exists(path):
+            raise ValueError(f"Golden case artifact not found: {artifact_name}")
+        payload = cls._read_json(path, {})
+        if not isinstance(payload, dict):
+            raise ValueError(f"Golden case artifact is invalid: {artifact_name}")
+        return payload
 
     @classmethod
     def restore_case(cls, case_id: str, *, reuse: bool = True) -> Dict[str, Any]:
@@ -443,9 +544,29 @@ class GoldenCaseService:
         )
         project.status = ProjectStatus.GRAPH_COMPLETED
         project.graph_id = f"golden_graph::{case_id}"
-        project.simulation_requirement = cls._simulation_requirement()
+        is_curated_showcase = case_id == WUHAN_V2_CASE_ID
+        foundation_ref = {
+            "foundation_id": f"foundation::{case_id}",
+            "artifact_name": "foundation",
+            "contract_version": "background-foundation.v2",
+            "golden_case_id": case_id,
+        }
+        project.scene_id = foundation_ref["foundation_id"] if is_curated_showcase else project.scene_id
+        project.semantic_artifact_ref = dict(foundation_ref) if is_curated_showcase else project.semantic_artifact_ref
+        project.simulation_requirement = (
+            "复盘武汉疫情期间发现监测、医疗救治、交通流动、社区治理、物资供应和公共信息六个城市系统的协同演化。"
+            if is_curated_showcase
+            else cls._simulation_requirement()
+        )
         ProjectManager.save_project(project)
-        ProjectManager.save_extracted_text(project.project_id, cls._background_text())
+        ProjectManager.save_extracted_text(
+            project.project_id,
+            (
+                "武汉疫情城市系统复盘：公开历史节点构成时间骨架，主体行动、关系与连续状态为策划推演。"
+                if is_curated_showcase
+                else cls._background_text()
+            ),
+        )
 
         manager = SimulationManager()
         time_plan = dict(frozen_config.get("time_plan") or {})
@@ -467,6 +588,7 @@ class GoldenCaseService:
             diffusion_provider="heuristic",
             source_mode="golden_case",
             effort_snapshot=effort_snapshot,
+            semantic_artifact_ref=foundation_ref if is_curated_showcase else None,
             artifact_mode="frozen",
             artifact_root=manifest["simulation"]["dir"],
             golden_case_id=case_id,
@@ -478,18 +600,21 @@ class GoldenCaseService:
         simulation_state.entities_count = definition.target_node_count
         simulation_state.profiles_count = definition.target_agent_count
         simulation_state.region_count = 12
-        simulation_state.risk_objects_count = 3
+        simulation_state.risk_objects_count = 5 if is_curated_showcase else 3
         simulation_state.active_variables_count = len(
             (frozen_config.get("agent_planning_request") or {}).get("injected_variables") or []
         )
-        simulation_state.hazard_template_mode = "compatibility_projection"
+        simulation_state.hazard_template_mode = "curated_projection" if is_curated_showcase else "compatibility_projection"
         simulation_state.planning_input_id = str(
             scenario_planning_input.get("planning_input_id") or ""
         )
         simulation_state.planning_content_hash = str(
             scenario_planning_input.get("content_hash") or ""
         )
-        simulation_state.agent_plan_source = LEGACY_AGENT_PLAN_SOURCE
+        simulation_state.agent_plan_source = "curated_target_state" if is_curated_showcase else LEGACY_AGENT_PLAN_SOURCE
+        if is_curated_showcase:
+            simulation_state.resolved_foundation_ref = dict(foundation_ref)
+            simulation_state.scenario_input_authority = "curated_target_state"
         manager._save_simulation_state(simulation_state)
 
         outline_payload = cls._read_json(manifest["report"]["outline"], {})
@@ -534,6 +659,76 @@ class GoldenCaseService:
         report_id: str,
         reused: bool,
     ) -> Dict[str, Any]:
+        if case_id == WUHAN_V2_CASE_ID:
+            base_query = {
+                "scenario_mode": definition.scenario_mode,
+                "hazard_template_id": definition.hazard_template_id,
+                "diffusion_template": definition.diffusion_template,
+                "search_mode": definition.search_mode,
+                "reference_time": definition.reference_time,
+                "maxRounds": definition.total_rounds,
+                "golden_case_id": case_id,
+                "project_id": project_id,
+                "simulation_id": simulation_id,
+                "replay": "1",
+                "readonly": "1",
+                "report_id": report_id,
+                "demo_mode": "curated_showcase",
+                "version": "v2",
+            }
+            step_routes = {
+                "foundation": {
+                    "name": "SceneComposer",
+                    "params": {},
+                    "query": {**base_query, "step": "1", "restore": "1"},
+                },
+                "scenario": {
+                    "name": "Simulation",
+                    "params": {"simulationId": simulation_id},
+                    "query": {**base_query, "step": "2"},
+                },
+                "runtime": {
+                    "name": "SimulationRun",
+                    "params": {"simulationId": simulation_id},
+                    "query": {**base_query, "step": "3"},
+                },
+                "analysis": {
+                    "name": "Analysis",
+                    "params": {"reportId": report_id},
+                    "query": {**base_query, "step": "4"},
+                },
+            }
+            artifact_refs = {
+                name: {
+                    "case_id": case_id,
+                    "artifact_name": name,
+                    "url": f"/api/golden-cases/{case_id}/artifacts/{name}",
+                }
+                for name in ("foundation", "scenario", "runtime", "analysis")
+            }
+            return {
+                "case_id": case_id,
+                "project_id": project_id,
+                "foundation_id": f"foundation::{case_id}",
+                "scene_id": f"foundation::{case_id}",
+                "simulation_id": simulation_id,
+                "report_id": report_id,
+                "reused": reused,
+                "demo_mode": "curated_showcase",
+                "default_step": 1,
+                "next_step": "background_foundation",
+                "capabilities": {
+                    "editable": False,
+                    "live_intervention": False,
+                    "chapter_navigation": True,
+                    "copy_as_new": True,
+                },
+                "artifact_refs": artifact_refs,
+                "step_routes": step_routes,
+                # Compatibility fields remain Step 2 and Step 3 for V1-era clients.
+                "route": step_routes["scenario"],
+                "playback_route": step_routes["runtime"],
+            }
         return {
             "case_id": case_id,
             "project_id": project_id,
@@ -601,7 +796,8 @@ class GoldenCaseService:
                 continue
             if state.simulation_architecture != SIMULATION_ARCHITECTURE:
                 continue
-            if state.agent_plan_source != LEGACY_AGENT_PLAN_SOURCE:
+            expected_agent_plan_source = "curated_target_state" if case_id == WUHAN_V2_CASE_ID else LEGACY_AGENT_PLAN_SOURCE
+            if state.agent_plan_source != expected_agent_plan_source:
                 continue
             if state.planning_input_id != expected_planning_id or state.planning_content_hash != expected_planning_hash:
                 continue
@@ -1380,15 +1576,19 @@ class GoldenCaseService:
         transport_edges: List[Dict[str, Any]],
         spread_events: List[Dict[str, Any]],
     ) -> Dict[str, Any]:
+        is_wuhan_v2 = definition.case_id == WUHAN_V2_CASE_ID
+        spatial_grounding = WUHAN_V2_SPATIAL_GROUNDING if is_wuhan_v2 else WUHAN_SPATIAL_GROUNDING
+        spatial_fixture_id = WUHAN_V2_SPATIAL_FIXTURE_ID if is_wuhan_v2 else WUHAN_SPATIAL_FIXTURE_ID
+
         def fixture_spatial_attributes(attributes: Dict[str, Any]) -> Dict[str, Any]:
             return {
                 **attributes,
                 "is_geographic": True,
                 "placement": "curated_fixture",
-                "geographic_grounding": WUHAN_SPATIAL_GROUNDING,
-                "coordinate_grounding": WUHAN_SPATIAL_GROUNDING,
+                "geographic_grounding": spatial_grounding,
+                "coordinate_grounding": spatial_grounding,
                 "coordinates_observed": False,
-                "spatial_fixture_id": WUHAN_SPATIAL_FIXTURE_ID,
+                "spatial_fixture_id": spatial_fixture_id,
             }
 
         layout_nodes = []
@@ -1400,7 +1600,7 @@ class GoldenCaseService:
                     "labels": ["Entity", "Region"],
                     "kind": "region",
                     "is_geographic": True,
-                    "geographic_grounding": WUHAN_SPATIAL_GROUNDING,
+                    "geographic_grounding": spatial_grounding,
                     "lat": region["lat"],
                     "lon": region["lon"],
                     "attributes": fixture_spatial_attributes(
@@ -1416,7 +1616,7 @@ class GoldenCaseService:
                     "labels": ["Entity", "Region", "Subregion"],
                     "kind": "subregion",
                     "is_geographic": True,
-                    "geographic_grounding": WUHAN_SPATIAL_GROUNDING,
+                    "geographic_grounding": spatial_grounding,
                     "lat": subregion["lat"],
                     "lon": subregion["lon"],
                     "attributes": fixture_spatial_attributes(
@@ -1436,7 +1636,7 @@ class GoldenCaseService:
                     "labels": ["Entity", profile["agent_type"]],
                     "kind": "agent",
                     "is_geographic": True,
-                    "geographic_grounding": WUHAN_SPATIAL_GROUNDING,
+                    "geographic_grounding": spatial_grounding,
                     "lat": profile.get("lat") or 30.59,
                     "lon": profile.get("lon") or 114.30,
                     "attributes": fixture_spatial_attributes(
@@ -1479,11 +1679,11 @@ class GoldenCaseService:
                         "strength": edge.get("strength"),
                         "confidence": edge.get("confidence"),
                         "is_route_edge": True,
-                        "route_grounding": WUHAN_SPATIAL_GROUNDING,
-                        "geographic_grounding": WUHAN_SPATIAL_GROUNDING,
+                        "route_grounding": spatial_grounding,
+                        "geographic_grounding": spatial_grounding,
                         "route_observed": False,
                         "route_geometry_kind": "fixture_endpoint_projection",
-                        "spatial_fixture_id": WUHAN_SPATIAL_FIXTURE_ID,
+                        "spatial_fixture_id": spatial_fixture_id,
                     },
                 }
             )
@@ -1493,18 +1693,39 @@ class GoldenCaseService:
                     "id": rel["edge_id"],
                     "source": f"agent::{rel['source_agent_id']}",
                     "target": f"agent::{rel['target_agent_id']}",
-                    "name": rel["relation_type"],
+                    "name": rel.get("relation_label") or rel["relation_type"],
                     "fact_type": rel["relation_type"],
+                    "attributes": {
+                        "relation_label": rel.get("relation_label") or "主体关系",
+                        "layer": rel.get("layer") or "城市上下文关系",
+                        "provenance": rel.get("provenance") or "curated_projection",
+                    },
                 }
             )
+        dynamic_layout_by_id: Dict[str, Dict[str, Any]] = {}
+        dynamic_layout_order: List[str] = []
         for item in dynamic_edges:
+            edge_id = str(item.get("edge_id") or "").strip()
+            if not edge_id:
+                continue
+            if edge_id not in dynamic_layout_by_id:
+                dynamic_layout_order.append(edge_id)
+            dynamic_layout_by_id[edge_id] = item
+        for edge_id in dynamic_layout_order:
+            item = dynamic_layout_by_id[edge_id]
             layout_edges.append(
                 {
-                    "id": item["edge_id"],
+                    "id": edge_id,
                     "source": f"agent::{item['source_agent_id']}",
                     "target": f"agent::{item['target_agent_id']}",
-                    "name": item["edge_type"],
+                    "name": item.get("relation_label") or item["edge_type"],
                     "fact_type": "dynamic_edge",
+                    "attributes": {
+                        "relation_label": item.get("relation_label") or "运行关系",
+                        "lifecycle_label": item.get("lifecycle_label") or "激活",
+                        "layer": item.get("layer") or "机制运行关系",
+                        "provenance": item.get("provenance") or "curated_projection",
+                    },
                 }
             )
 
@@ -1559,7 +1780,7 @@ class GoldenCaseService:
             risk_by_round.setdefault(int(item["round"]), []).append(item)
         dynamic_by_round: Dict[int, List[Dict[str, Any]]] = {}
         for item in dynamic_edges:
-            dynamic_by_round.setdefault(int(item["created_round"]), []).append(item)
+            dynamic_by_round.setdefault(int(item.get("round") or item["created_round"]), []).append(item)
 
         for snapshot in round_snapshots:
             round_num = int(snapshot["round"])
@@ -1571,8 +1792,12 @@ class GoldenCaseService:
                     "round": round_num,
                     "timestamp": snapshot["timestamp"],
                     "narrative": {
-                        "title": f"第 {round_num} 轮态势",
-                        "summary": f"{top_region['name']} 成为当轮关键变化区域，脆弱性上升至 {top_region['vulnerability_score']:.0f}。",
+                        "title": snapshot.get("headline") or f"第 {round_num} 轮态势",
+                        "summary": (
+                            "；".join((snapshot.get("visible_highlights") or [])[:2])
+                            if snapshot.get("visible_highlights")
+                            else f"{top_region['name']} 成为当轮关键变化区域，脆弱性为 {top_region['vulnerability_score']:.0f}。"
+                        ),
                         "interaction_summary": interactions_by_round.get(round_num, [{}])[0].get("summary", ""),
                         "risk_summary": risk_by_round.get(round_num, [{}])[0].get("summary", ""),
                     },
@@ -1640,21 +1865,21 @@ class GoldenCaseService:
                 "simulation_id": f"golden::{definition.case_id}",
                 "source_mode": "golden_case",
                 "map_seed_id": None,
-                "geographic_grounding": WUHAN_SPATIAL_GROUNDING,
+                "geographic_grounding": spatial_grounding,
                 "data_quality": {
                     "status": "curated_fixture",
                     "formal_ready": False,
                     "fixture_ready": True,
                     "observed": False,
-                    "spatial_fixture_id": WUHAN_SPATIAL_FIXTURE_ID,
+                    "spatial_fixture_id": spatial_fixture_id,
                 },
                 "selection_summary": {
                     "source": "golden_fixture",
-                    "spatial_fixture_id": WUHAN_SPATIAL_FIXTURE_ID,
+                    "spatial_fixture_id": spatial_fixture_id,
                 },
                 "meta": {
-                    "geographic_grounding": WUHAN_SPATIAL_GROUNDING,
-                    "spatial_fixture_id": WUHAN_SPATIAL_FIXTURE_ID,
+                    "geographic_grounding": spatial_grounding,
+                    "spatial_fixture_id": spatial_fixture_id,
                     "coordinates_observed": False,
                     "geographic_node_count": len(layout_nodes),
                     "synthetic_node_count": 0,
@@ -1722,6 +1947,72 @@ class GoldenCaseService:
                 }
         payload["timeline"] = timeline
         return projector._normalize_animation_payload(payload)
+
+    @staticmethod
+    def _build_spatial_evidence_summary(
+        facility_query_plan: Dict[str, Any],
+        spatial_refinement_snapshot: Dict[str, Any],
+    ) -> Dict[str, int]:
+        return {
+            "request_count": len(facility_query_plan.get("requests") or []),
+            "required_r3_count": len(
+                facility_query_plan.get("required_r3_request_ids") or []
+            ),
+            "required_r4_count": len(
+                facility_query_plan.get("required_r4_request_ids") or []
+            ),
+            "covered_r3_count": sum(
+                1
+                for item in spatial_refinement_snapshot.get("request_coverage") or []
+                if item.get("resolution_level") == "R3"
+                and item.get("status") == "covered"
+            ),
+            "blocking_gap_count": sum(
+                1
+                for item in spatial_refinement_snapshot.get("evidence_gaps") or []
+                if item.get("blocking") is True
+            ),
+        }
+
+    @staticmethod
+    def _build_v1_spatial_catalog(
+        subregion_graph: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        """Project replay geometry as synthetic candidates, never verified R3.
+
+        V1 subregions were generated to make the frozen replay readable.  They
+        may help demonstrate which requirements a refinement worker would try
+        to resolve, but they are not observed facilities and therefore carry
+        evidence grade ``S`` below every R3 acceptance threshold.
+        """
+
+        classes_by_suffix = {
+            "market": ["seafood_market"],
+            "medical": ["hospital", "emergency_hospital", "emergency_medical_center"],
+            "community": ["residential_community"],
+        }
+        catalog: List[Dict[str, Any]] = []
+        for item in subregion_graph:
+            feature_id = str(item.get("region_id") or "")
+            suffix = feature_id.rsplit("::", 1)[-1]
+            catalog.append(
+                {
+                    "id": feature_id,
+                    "name": item.get("name") or "",
+                    "kind": "entity",
+                    "subtype": suffix,
+                    "facility_class_keys": list(classes_by_suffix.get(suffix, [])),
+                    "target_region_ids": [str(item.get("parent_region_id") or "")],
+                    "lat": item.get("lat"),
+                    "lon": item.get("lon"),
+                    "source_kind": "synthetic_model",
+                    "provider": "golden_fixture",
+                    "evidence_grade": "S",
+                    "provenance": "curated_deterministic_fixture",
+                    "spatial_fixture_id": WUHAN_SPATIAL_FIXTURE_ID,
+                }
+            )
+        return catalog
 
     @classmethod
     def _build_step2_planning_artifacts(
@@ -1828,6 +2119,40 @@ class GoldenCaseService:
         )
         planning_payload = planning.to_dict()
         agent_planning_request = LegacyAgentPlanningAdapter().plan(planning)
+        compiled_facility_plan = compile_facility_query_plan(planning)
+        facility_query_plan = compiled_facility_plan.to_dict()
+        spatial_refinement_snapshot = build_spatial_refinement_snapshot(
+            compiled_facility_plan,
+            target_catalog=cls._build_v1_spatial_catalog(subregion_graph),
+            provider_attempts=[
+                {
+                    "provider": "golden_fixture",
+                    "status": "fixture_candidates_only",
+                    "observed": False,
+                    "note_zh": "冻结回放坐标仅用于演示，不构成真实 R3 设施证据。",
+                }
+            ],
+            source_versions=[
+                {
+                    "source_key": WUHAN_SPATIAL_FIXTURE_ID,
+                    "version": "wuhan-covid-v1.synthetic-spatial.v1",
+                    "evidence_grade": "S",
+                }
+            ],
+        ).to_dict()
+        spatial_evidence_summary = cls._build_spatial_evidence_summary(
+            facility_query_plan,
+            spatial_refinement_snapshot,
+        )
+        agent_planning_request["facility_query_plan_ref"] = {
+            key: facility_query_plan.get(key)
+            for key in ("contract_version", "plan_id", "content_hash")
+        }
+        agent_planning_request["spatial_refinement_snapshot_ref"] = {
+            key: spatial_refinement_snapshot.get(key)
+            for key in ("contract_version", "snapshot_id", "content_hash")
+        }
+        agent_planning_request["spatial_evidence_summary"] = spatial_evidence_summary
         graph = dict(planning_payload.get("event_mechanism_graph") or {})
         event_names = [
             str(item.get("name") or "")
@@ -1859,6 +2184,9 @@ class GoldenCaseService:
             "role_demands": list(planning_payload.get("role_demands") or []),
             "assumptions": list(planning_payload.get("assumptions") or []),
             "agent_planning_request": agent_planning_request,
+            "facility_query_plan": facility_query_plan,
+            "spatial_refinement_snapshot": spatial_refinement_snapshot,
+            "spatial_evidence_summary": spatial_evidence_summary,
             "scenario_model": scenario_model,
             "simulation_audit": {
                 "mechanism_graph_source": "scenario_planner",

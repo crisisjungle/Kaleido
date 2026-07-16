@@ -65,6 +65,18 @@ class Config:
     # exceed Overpass's 32 MiB default working-memory declaration.
     OVERPASS_MAXSIZE_BYTES = int(os.environ.get('OVERPASS_MAXSIZE_BYTES', str(64 * 1024 * 1024)))
     MAP_SOURCE_CACHE_TTL_SECONDS = int(os.environ.get('MAP_SOURCE_CACHE_TTL_SECONDS', str(7 * 24 * 3600)))
+    MAP_SOURCE_NEGATIVE_CACHE_TTL_SECONDS = int(
+        os.environ.get('MAP_SOURCE_NEGATIVE_CACHE_TTL_SECONDS', '900')
+    )
+    # Step 2 机制驱动空间细化的受控本地目录。SQLite 是本地开发和离线
+    # 数据导入适配器；生产环境可在同一 SpatialCatalogPort 后替换 PostGIS。
+    SPATIAL_CATALOG_PATH = (
+        os.environ.get('SPATIAL_CATALOG_PATH', '').strip()
+        or os.path.join(UPLOAD_FOLDER, 'spatial_catalog.sqlite3')
+    )
+    SPATIAL_CATALOG_QUERY_LIMIT = int(
+        os.environ.get('SPATIAL_CATALOG_QUERY_LIMIT', '200')
+    )
     # Terrascope retired the legacy ``services.terrascope.be/wms/v2`` contract.
     # The official WorldCover data-access page now points to the TiTiler WMS
     # endpoint and its 1.3.0 layer identifiers.

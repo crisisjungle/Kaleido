@@ -32,6 +32,10 @@ from app.services.simulation_animation_service import (  # noqa: E402
     ANIMATION_CONTRACT_VERSION,
     TIMELINE_CONTRACT_VERSION,
 )
+from app.services.spatial_evidence import (  # noqa: E402
+    FACILITY_QUERY_PLAN_CONTRACT_VERSION,
+    SPATIAL_REFINEMENT_SNAPSHOT_CONTRACT_VERSION,
+)
 
 
 def _read_json(path: str, default: Any) -> Any:
@@ -106,6 +110,8 @@ def validate() -> Dict[str, Any]:
         manifest["simulation"]["policy_plan"],
         manifest["simulation"]["role_demands"],
         manifest["simulation"]["agent_planning_request"],
+        manifest["simulation"]["facility_query_plan"],
+        manifest["simulation"]["spatial_refinement_snapshot"],
         manifest["simulation"]["spread_event_ledger"],
         manifest["report"]["markdown"],
         manifest["report"]["outline"],
@@ -127,6 +133,8 @@ def validate() -> Dict[str, Any]:
     policy_plan = _read_json(manifest["simulation"]["policy_plan"], [])
     role_demands = _read_json(manifest["simulation"]["role_demands"], [])
     agent_request = _read_json(manifest["simulation"]["agent_planning_request"], {})
+    facility_query_plan = _read_json(manifest["simulation"]["facility_query_plan"], {})
+    spatial_snapshot = _read_json(manifest["simulation"]["spatial_refinement_snapshot"], {})
     injected_variables = _read_json(os.path.join(sim_dir, "injected_variables.json"), [])
     regions = _read_json(os.path.join(sim_dir, "region_graph_snapshot.json"), [])
     transport_edges = _read_json(os.path.join(sim_dir, "transport_edges.json"), [])
@@ -198,6 +206,49 @@ def validate() -> Dict[str, Any]:
     _require(
         (agent_request.get("scenario_planning_ref") or {}).get("content_hash") == planning.get("content_hash"),
         "agent adapter does not reference the frozen planning hash",
+        errors,
+    )
+    _require(
+        facility_query_plan.get("contract_version") == FACILITY_QUERY_PLAN_CONTRACT_VERSION,
+        "facility query plan contract mismatch",
+        errors,
+    )
+    _require(
+        spatial_snapshot.get("contract_version") == SPATIAL_REFINEMENT_SNAPSHOT_CONTRACT_VERSION,
+        "spatial refinement snapshot contract mismatch",
+        errors,
+    )
+    _require(
+        (agent_request.get("facility_query_plan_ref") or {}).get("content_hash")
+        == facility_query_plan.get("content_hash"),
+        "agent adapter facility query plan reference mismatch",
+        errors,
+    )
+    _require(
+        (agent_request.get("spatial_refinement_snapshot_ref") or {}).get("content_hash")
+        == spatial_snapshot.get("content_hash"),
+        "agent adapter spatial snapshot reference mismatch",
+        errors,
+    )
+    _require(
+        int((agent_request.get("spatial_evidence_summary") or {}).get("covered_r3_count") or 0) == 0,
+        "synthetic fixture candidates must not be counted as covered R3 evidence",
+        errors,
+    )
+    _require(
+        not (spatial_snapshot.get("selected_r3_features") or []),
+        "synthetic fixture candidates must not be selected as R3 evidence",
+        errors,
+    )
+    _require(
+        not (spatial_snapshot.get("r4_model_units") or []),
+        "R4 units must not be synthesized from unresolved V1 fixture candidates",
+        errors,
+    )
+    _require(
+        {str(item.get("evidence_grade") or "") for item in spatial_snapshot.get("source_versions") or []}
+        == {"S"},
+        "V1 spatial fixture source must retain evidence grade S",
         errors,
     )
     _require(

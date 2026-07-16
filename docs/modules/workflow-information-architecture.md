@@ -20,6 +20,8 @@ Step 1 map evidence, scene material, and locked Effort snapshot
 
 Step 1 inferred map nodes, Step 2 formal agents, and Step 3 runtime states are different layers and must not share a single ambiguous “agent generation” label.
 
+Route ownership follows the artifact boundary. `/scene-composer` is the canonical Step 1 workspace. `/process/:projectId` is a transitional route that resolves or creates the simulation artifact; as soon as a `simulation_id` exists it replaces itself with `/simulation/:simulationId`, the only canonical Step 2 review route. Step 2 therefore never navigates backward into another Step 2 implementation: its back action restores Step 1. `/simulation/:simulationId/start` and `/analysis/:reportId` remain the canonical Step 3 and Step 4 routes.
+
 ## Flow States
 
 The normal state sequence is:
@@ -54,15 +56,28 @@ The full cross-step contract, examples, environment boundary, and acceptance rul
 ## Unified Interface Rules
 
 - All four steps use `KaleidoWorkflowShell`, the same 60px product header, the same four-step menu, and one green brand-token system. Blue is not an action or selected-state color in the workflow.
+- Step 1 uses the same shell directly; its map is the visual pane and its background-definition form is the workbench pane. It does not maintain a parallel top bar or independent viewport grid.
 - Desktop workspaces use a deliberate graph/workbench split rather than independent page layouts. Mobile switches between two full-width local views instead of squeezing both panes together.
 - The right workbench is already the page surface. A child element may own scrolling or layout, but it must not draw another full-height rounded background, border, or shadow around the whole active page. Use section dividers for reading hierarchy; reserve a bounded card surface for a real selectable/comparable record, not for a wrapper around other containers.
-- Primary navigation uses `KWorkflowTabs`. Step 2 may use rich tabs with counts because its four result types are peer business objects; Step 3/4 use compact tabs; nested views with many choices use one select or a drawer instead of another horizontal tab row.
+- Primary navigation uses `KWorkflowTabs`. Step 2 uses five rich review tabs because plan, mechanism, space, subjects, and risk are peer checks; Step 3/4 use compact tabs. Nested views with many choices use one select or a drawer instead of another horizontal tab row.
 - A step has one progress representation for the same state. Do not render a legacy range and a new progress bar together.
 - Primary step actions stay in one workbench-internal tail bar. In Steps 1-3 the middle business surface is the only scroll container and the action bar is its flex sibling, so it remains visible without using viewport `fixed` positioning or covering content. The bar has one top divider and no rounded outer container, four-side border, shadow, or bottom gap. Step 4 does not render an empty bar when there is no real cross-step action. The header contains context and infrequent secondary actions, not a second competing action group.
 - Tags are secondary metadata. Use thin outline tags, neutral surfaces, and the green accent only for selected or positive state. Show no more than two or three representative tags inline and collapse the remainder into `+N`, a table detail row, or a drawer.
 - Repeated structured records use `KDataTable` when comparison is the task. Detail-heavy records open in a drawer; compact cards are reserved for genuinely small summaries.
 - Explanatory copy must justify its space. Empty-state guidance, error recovery, and evidence caveats remain; duplicated descriptions, implementation notes, and system logs do not belong in the business surface.
 - Normal completion transitions directly from process UI to the business result. Do not add success Toasts, success banners, completion badges, or copy that merely announces that the result was generated.
+- The four-step menu is artifact-route based, not only session-history based. When a user enters from history, a saved simulation or report must hydrate the Step 2/3/4 routes from `simulation_id`, `project_id`, and `report_id`; any step with a valid business artifact route is directly openable even if the current browser session did not visit it first. The Step 3 tail action must distinguish `查看报告` from `生成报告`: `查看报告` opens an existing `report_id`, while `生成报告` is the only action allowed to create a new report task.
+
+## Versioned Workflow Artifacts
+
+The four product steps now share one projection layer in `backend/app/services/workflow_artifacts.py`. It wraps existing truth sources rather than creating a second persistence system:
+
+- `background-foundation.v2` preserves Step 1 area, spatial catalog, stable contexts, source reference, research questions, analysis boundaries, open data gaps, and the locked Effort reference.
+- `scenario-definition.v2` combines the reviewed planning input with generated regions, Agents, initial relationships, policy bindings, risk definitions, and structured readiness checks. New prepared simulations persist `background_foundation.json` and `scenario_definition.json`; existing saved simulations receive the same projection when their configuration is read.
+- `runtime-ledger.v2` gives Step 3/4 one stable index over round snapshots, spread events, action decisions, state mutations, policy execution, relationship events/state, Agent emergence/lineage, risk state/events, and interventions. Existing ledger files remain authoritative.
+- `analysis-bundle.v2` is the Step 4 projection contract for findings, turning points, risk outcomes, intervention observations, evidence, uncertainty boundaries, and the formal-report reference.
+
+Contract versions are API/data boundaries, not new user-facing modules. The UI continues to use the four existing steps and their current tabs.
 
 ## Display Text Boundary
 
@@ -83,6 +98,8 @@ The full cross-step contract, examples, environment boundary, and acceptance rul
 
 ## Step 2 Rules
 
+- Step 2 has one product workspace. `/process/:projectId` may keep graph-building and simulation-creation compatibility logic, but it hands off immediately to `/simulation/:simulationId`; new review behavior must be implemented in the shared Step 2 component and verified through the canonical simulation route.
+
 - Configuration, generation, and review are mutually exclusive user-facing states.
 - Configuration follows one task order: scenario goal summary, disaster event chain, policy measures, automatic-plan summary, optional advanced corrections, and a fixed confirm action.
 - Event input exposes only name, description, order, and target regions/facilities. Policy input exposes only name, intent, and target regions/facilities. Compound sentences may be split into an editable ordered event chain.
@@ -91,7 +108,8 @@ The full cross-step contract, examples, environment boundary, and acceptance rul
 - Do not show zero-count risk, region, agent, or relationship result cards before generation completes.
 - The confirm-and-generate action stays outside the scrolling form.
 - Generation replaces the form with progress and the actual sequence: compound-event parsing, mechanism/propagation graph construction, temporal/spatial planning, role-capability extraction, Agent/relationship generation, and final assembly/validation. Any left-graph update is labeled as a generation preview.
-- Review uses peer tabs for risk definitions, region structure, Agents, and relationship network. Only the active result view is rendered.
+- Review uses five peer tabs: `演化计划`, `机制模型`, `空间结构`, `主体系统`, and `风险假设`. Initial relationships are part of `主体系统`; they do not occupy a separate top-level tab. Only the active result view is rendered.
+- Review ends with a six-part runtime readiness check covering event targets, temporal coverage, mechanism references, spatial references, role coverage/policy binding, and risk evidence references. Each issue opens the relevant review tab. Only structural blocking items disable `进入推演`; legal zero-risk and zero-policy cases remain runnable, while unresolved but recoverable scope/coverage items are warnings.
 - Risk review uses a compact horizontal selector above one full-width selected detail. Selector items contain only identity, family/mode, the primary state, and the two comparison scores; explanations, mechanism chains, affected subjects/regions, evidence, and metrics belong only to the selected detail. When all items fit, no navigation buttons are rendered. Only actual horizontal overflow introduces two small previous/next buttons while retaining trackpad and touch scrolling.
 - The frontend renders the complete risk collection returned by the current contract and must not use a fixed `.slice(0, 8)` or an Effort-based display cap. The current V2 backend may still limit active objects to eight, while dormant/history records and future contracts can produce a larger visible collection; the UI must remain usable for ten or more items.
 - Risk details use flat rows and dividers. Vertical risk-card walls, blue nested panels, tag walls, machine identifiers, and narrow split columns that force the causal chain to wrap into unreadable fragments are not valid review layouts.
@@ -103,29 +121,37 @@ The full cross-step contract, examples, environment boundary, and acceptance rul
 - Preparing the same planning hash twice reuses the active task. A conflicting hash is rejected until the active task finishes, preventing concurrent writes to one simulation.
 - Historical `injected_variables` remain readable through compatibility conversion and are never rewritten automatically.
 - System logs are internal diagnostics and do not belong in the Step 2 business surface.
-- This release does not include Agent V2, policy-executor binding, Step 3 runtime decisions, runtime variable injection, chat clarification, mid-flow Effort changes, or Step 4 report redesign.
+- Step 1 no longer exposes event or policy inputs. Legacy Step 1 injected variables remain readable for saved scenes, but new event order, policy intent, and time corrections are authored in Step 2.
 
 ## Step 3 Rules
 
 The runtime surface has three layers:
 
 1. Persistent transport: one progress rail, one percentage, and one play/pause action. Round, stage, scenario state, and simulated time are represented by the rail and downstream observations instead of four duplicate status cards.
-2. Peer observation views: `运行脉冲`, `状态与行动`, `扩散与反馈`, `代理工作台`, and `关系与风险`.
+2. Peer observation views: `本轮演化`, `空间状态`, `传播机制`, `主体响应`, and `风险对象`.
 3. Runtime intervention drawer: create an intervention, inspect active interventions, and review history.
 
 Only the active observation view scrolls. The left runtime graph and compact transport remain visible. Previous/next/latest, millisecond speed, and generic state-dimension controls are not normal user choices. System logs are internal diagnostics and do not belong in the business interface.
 
-`状态与行动` currently uses recorded agent interactions/actions. Do not label it “决策” until the runtime contract includes explicit decision candidates, selected decisions, and rationales.
+`主体响应` combines Agent state, validated actions, policy execution, dynamic relationships, and Agent lifecycle/emergence. `风险对象` reads their outcomes but remains a separate business object. Do not merge relations and risk back into one top-level view.
+
+Step 2 and Step 3 use the same `KMechanismChain` direction: `触发源 -> 机制节点 -> 受影响对象 -> 具体后果`. Chains up to six nodes render completely; seven to ten remain horizontally scrollable; longer chains collapse their middle path until expanded. Narrow screens switch the same component to a vertical direction.
 
 ## Step 4 Rules
 
-Step 4 has five stable primary views:
+Step 4 has five stable analysis views and one separate report-delivery mode:
 
-1. `结论总览`: a real summary derived from the report overview and round narratives.
-2. `演化复盘`: round narrative, region state, role lens, and feedback-chain subviews.
-3. `风险与机制`: risk counts, mechanism variables, mechanism chains, relation samples, and reasoning records.
-4. `证据探索`: graph-linked node context, provenance, evidence references, deep exploration, and follow-up questions.
-5. `正式报告`: the generated Markdown deliverable and its generation state.
+1. `结论与建议`: a real summary derived from the report overview and round narratives.
+2. `关键转折`: round narrative, region state, role lens, and feedback-chain evidence for direction-changing moments.
+3. `风险结果`: each Step 2 risk hypothesis is joined to the latest risk runtime state and risk-event ledger by stable risk ID, then classified as `已出现`, `持续增强`, `得到缓解`, `未被验证`, or `已关闭`; runtime-only risks are shown as `运行中新出现` without rewriting the original hypothesis.
+4. `政策观察`: policy execution and user interventions projected from runtime ledgers, with blocked conditions and explicit causality boundaries. Curated mainline cases show before/after observation windows and never imply counterfactual causality.
+5. `证据与边界`: graph-linked node context, provenance, evidence references, deep exploration, and follow-up questions.
+
+`正式报告` is not a peer analysis tab. `打开报告` enters a dedicated delivery surface and `返回分析工作台` restores the analysis view. Legacy `?tab=report` URLs continue to open that delivery surface.
+
+The delivery surface exposes the validated Markdown as `导出 Markdown` and uses the browser print flow for `打印 / PDF`. Export controls appear only after real report content exists. Print styling isolates the report from the surrounding graph and analysis workspace.
+
+All five views consume one `analysis-bundle.v2` projection rather than assembling incompatible summaries independently. `结论与建议` reads executive findings and the compact evidence counts; `关键转折` reads the shared turning-point index before opening the detailed narrative/region/role/feedback projections; `风险结果` and `干预评估` retain their ledger-backed details; `证据与边界` reads the bundle's impact scope, evidence index, and uncertainty boundaries before any node drill-down. Dynamic relationships remain evidence inside subject response, mechanisms, and the result graph; they are not promoted into a sixth analysis module.
 
 On desktop, the Step 4 hero and primary navigation remain visible while only the active view scrolls. Mobile falls back to normal document scrolling.
 
@@ -133,11 +159,11 @@ Step 4 reads as one continuous analysis sheet. The hero, lead conclusion, eviden
 
 The four `演化复盘` views are navigation, not a data filter. They must remain visible as one horizontal text-tab row at every width and may scroll horizontally when space is tight; they must never collapse into a native select. `角色透镜` uses flat comparison rows for the four role groups, showing node count, core state averages, and the leading affected region without representative-node tag walls or nested cards.
 
-`风险与机制` is a continuous analysis sheet. Counts are inline metadata, the scenario summary is plain lead text, and non-empty data groups are separated by rules rather than surface cards. State variables are shown in full as rows (`变量 / 方向 / 说明`); mechanism edges, relation samples, and reasoning rounds may show a clearly labelled bounded preview. Empty groups are omitted, so a fixture with mechanism edges but no variables or reasoning records does not produce zero-count containers.
+`风险结果` is a hypothesis-to-runtime comparison, not a mechanism artifact gallery. Every returned risk outcome stays visible, includes current tension/trend, affected regions/subjects, event/evidence counts, and an explicit interpretation boundary. An absent runtime signal is `未被验证`, not silently treated as safe; a declining trace is `得到缓解`, not reported as causal success. Mechanism IDs remain traceability references and are not promoted into a parallel Step 4 module.
 
 Analysis availability and report completion are different states. Runtime artifacts may make analysis available while the formal report is still `pending`, `planning`, or `generating`; Step 4 is only marked complete when the formal report reaches `completed`. The report surface polls its current report and progress until `completed` or `failed`, clears polling when unmounted, and reloads the final Markdown without requiring a tab switch or page refresh.
 
-Legacy query values `narrative`, `feedback`, `regions`, and `roles` continue to open the matching `演化复盘` subview. The `/report/:reportId` and `/interaction/:reportId` redirects continue to open `正式报告` and `证据探索` respectively.
+Legacy query values `narrative`, `feedback`, `regions`, and `roles` continue to open the matching `关键转折` subview. The `/report/:reportId` and `/interaction/:reportId` redirects continue to open the report delivery mode and `证据与边界` respectively.
 
 Role-lens region summaries render only resolved Chinese region names. Internal region IDs and placeholders such as `未命名区域` are omitted; when no real region can be resolved, the whole subsection is hidden rather than presenting invented analysis detail.
 
@@ -156,6 +182,7 @@ Each surface should make its graph meaning clear and keep right-side selections 
 - Workflow navigation: `frontend/src/store/workflowNavigation.js`
 - Step 2: `frontend/src/components/KaleidoStep2.vue`
 - Step 2 planner and Agent compatibility port: `backend/app/services/scenario_planner.py`
+- Versioned Step 1-4 workflow projections: `backend/app/services/workflow_artifacts.py`
 - Shared Effort contract: `backend/app/services/effort_contract.py`
 - Step 3: `frontend/src/components/KaleidoStep3.vue`
 - Step 3 shell: `frontend/src/views/SimulationRunView.vue`
@@ -163,6 +190,8 @@ Each surface should make its graph meaning clear and keep right-side selections 
 - Step 4 formal report: `frontend/src/components/Step4Report.vue`
 - Shared workflow shell: `frontend/src/components/KaleidoWorkflowShell.vue`
 - Shared workflow UI primitives: `frontend/src/components/ui/`
+- Shared workflow architecture constants: `frontend/src/config/workflowArchitecture.js`
+- Shared variable-length mechanism chain: `frontend/src/components/ui/KMechanismChain.vue`
 - Shared visual tokens: `frontend/src/styles/tokens.css`
 - Frontend display-text boundary: `frontend/src/utils/displayText.js`
 - Backend public-display projection: `backend/app/services/display_localization.py`
@@ -187,3 +216,11 @@ Each surface should make its graph meaning clear and keep right-side selections 
 - 2026-07-13: Removed the decorative full-height rounded shell from Step 2 while preserving it as the single scroll boundary, and flattened Step 4 section/report wrappers into one divider-led reading surface. Item-level comparison cards remain only where they carry a real record.
 - 2026-07-13: Added a shared seven-step typography scale for Step 1–4, removed browser-default 16px copy from workflow roots, capped primary workbench headlines at 20px, and documented the green theme, text roles, density rules, and browser verification contract.
 - 2026-07-14: Completed all-tab browser QA for Step 1–4, weakened remaining Step 4 source badges to transparent outline tags, and added deterministic formal-report heading de-duplication so legacy Markdown cannot repeat the delivery title or a section title on consecutive lines.
+- 2026-07-15: Removed repeated step-number/page-title kickers from the Step 1 and Step 4 content surfaces while preserving the shared top-bar four-step selector, moved Step 1 research-boundary disclosure into the bottom-left action slot, and rebuilt the Step 4 report identity row so its title and full summary retain width while the compact `打开报告` action and metrics occupy separate grid areas.
+- 2026-07-15: Repaired formal-report delivery layout: the report header/body now share the delivery-page inset, the report body owns the only vertical scroll boundary, print CSS releases every fixed-height/hidden-overflow shell ancestor for A4 pagination, and localized citations no longer render broken Markdown link fragments.
+- 2026-07-14: Started the V2 information-architecture implementation. Step 1 now separates range, baseline, facts, and research boundaries; Step 2 uses plan/mechanism/space/subject/risk review; Step 3 moves dynamic relationships into subject response and separates risks; Step 4 adds ledger-backed intervention evaluation and moves the formal report into delivery mode. Added one shared variable-length mechanism-chain component and regression coverage for the five-tab contracts.
+- 2026-07-14: Fixed history-entry workflow restoration so Step 2/3/4 menu entries are hydrated from existing simulation/report artifacts instead of stale session `visited` flags. Existing reports now open through `查看报告`; only missing reports use `生成报告` to start a new task.
+- 2026-07-14: Added versioned `BackgroundFoundation`, `ScenarioDefinition`, `RuntimeLedger`, and `AnalysisBundle` projections over the existing truth sources. Step 2 now exposes issue-localizing runtime readiness checks, and Step 4 now compares each risk hypothesis with runtime state/events instead of presenting mechanism records as risk results.
+- 2026-07-14: Removed the duplicate Step 2 route loop by making `/process` a transition into the canonical `/simulation` workspace, moved Step 1 onto the shared workflow shell, and connected Step 4 conclusion, turning-point, impact-scope, evidence, and uncertainty surfaces to one `analysis-bundle.v2` projection.
+- 2026-07-14: Added a formal V2 acceptance fixture covering zero validated risks, a 12-node mechanism path, 240 Agents, 239 initial relationships, 100 runtime rounds, analysis evidence, and report delivery references. The report reading surface now supports Markdown download and print/PDF delivery.
+- 2026-07-15: Added the Wuhan V2 four-step restore contract. Golden restore now registers stable foundation/scenario/runtime/analysis routes, preserves the full route query while moving backward or forward, restores Step 1 from a backend artifact rather than session storage, and keeps the read-only demo on the shared Step 1–4 product surfaces.

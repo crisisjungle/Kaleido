@@ -33,6 +33,17 @@ from ..services.mechanism_simulation_service import (
     normalize_simulation_architecture,
 )
 from ..services.scenario_planner import AGENT_V2_PLAN_SOURCE, ScenarioPlanner
+from ..services.scenario_foundation_resolver import (
+    FoundationResolutionError,
+    ScenarioFoundationResolver,
+)
+from ..services.mechanism_aware_spatial_refiner import MechanismAwareSpatialRefiner
+from ..services.spatial_catalog import SQLiteSpatialCatalog, SpatialCatalogFeature
+from ..services.spatial_evidence import (
+    build_spatial_refinement_snapshot,
+    compile_facility_query_plan,
+    normalize_spatial_catalog_candidate,
+)
 from ..services.semantic_input import SemanticArtifactStore, SemanticInputNormalizer
 from ..services.scene_material_generator import SceneMaterialGenerator
 from ..services.envfish_models import normalize_time_plan, normalize_transport_family
@@ -91,6 +102,7 @@ def _public_runtime_success(data: Any):
 
 
 PREPARE_STAGE_LABELS = {
+    "resolving_foundation": "核对并补充现实范围",
     "reading": "读取角色所需实体",
     "generating_profiles": "生成代理体与关系",
     "generating_config": "装配和校验场景",
@@ -278,13 +290,19 @@ def _prepare_stage_label(stage: Any) -> str:
     return PREPARE_STAGE_LABELS.get(key, "正在准备场景")
 
 
-def _build_scenario_foundation(project: Any, state: Any) -> Dict[str, Any]:
+def _build_scenario_foundation(
+    project: Any,
+    state: Any,
+    *,
+    map_seed_id: str = "",
+) -> Dict[str, Any]:
     """Create the immutable Step 1 reference consumed by the Step 2 planner."""
 
-    map_seed = MapSeedManager.get_seed(state.map_seed_id) if state.map_seed_id else None
+    effective_map_seed_id = str(map_seed_id or state.map_seed_id or "").strip()
+    map_seed = MapSeedManager.get_seed(effective_map_seed_id) if effective_map_seed_id else None
     map_graph = (
-        MapSeedManager.get_graph_snapshot(state.map_seed_id, allow_unavailable=True)
-        if state.map_seed_id
+        MapSeedManager.get_graph_snapshot(effective_map_seed_id, allow_unavailable=True)
+        if effective_map_seed_id
         else None
     )
     map_input = (map_seed or {}).get("input") if isinstance((map_seed or {}).get("input"), dict) else {}
@@ -311,11 +329,44 @@ def _build_scenario_foundation(project: Any, state: Any) -> Dict[str, Any]:
             continue
         is_region = "region" in labels or "region" in raw_type
         attributes = node.get("attributes") if isinstance(node.get("attributes"), dict) else {}
+        tags = attributes.get("tags") if isinstance(attributes.get("tags"), dict) else {}
+        facility_class_keys = attributes.get("facility_class_keys") or []
+        if isinstance(facility_class_keys, str):
+            facility_class_keys = [facility_class_keys]
+        elif not isinstance(facility_class_keys, list):
+            facility_class_keys = []
         target_catalog.append({
             "id": node_id,
             "name": str(node.get("name") or node.get("label") or node_id),
             "aliases": list(attributes.get("aliases") or []),
             "kind": "region" if is_region else "entity",
+            "category": str(attributes.get("category") or ""),
+            "subtype": str(attributes.get("subtype") or ""),
+            "facility_class_keys": list(facility_class_keys),
+            "node_family": str(attributes.get("node_family") or ""),
+            "spatial_level": str(attributes.get("spatial_level") or ""),
+            "source_kind": str(attributes.get("source_kind") or ""),
+            "source_key": str(
+                attributes.get("source_key")
+                or attributes.get("source_provider")
+                or tags.get("provider")
+                or attributes.get("provider")
+                or ""
+            ),
+            "provider": str(
+                tags.get("provider")
+                or attributes.get("source_provider")
+                or attributes.get("provider")
+                or ""
+            ),
+            "source_record_id": str(attributes.get("source_record_id") or node_id),
+            "evidence_grade": str(attributes.get("evidence_grade") or ""),
+            "dataset_version": str(attributes.get("dataset_version") or ""),
+            "coordinate_system": str(attributes.get("coordinate_system") or "WGS84"),
+            "confidence": attributes.get("confidence"),
+            "lat": attributes.get("lat"),
+            "lon": attributes.get("lon"),
+            "tags": dict(tags),
         })
         if is_region and node_id not in region_ids:
             region_ids.append(node_id)
@@ -364,12 +415,12 @@ def _build_scenario_foundation(project: Any, state: Any) -> Dict[str, Any]:
             },
             document_texts=[ProjectManager.get_extracted_text(project.project_id) or ""],
             map_context={
-                "map_seed_id": state.map_seed_id or "",
+                "map_seed_id": effective_map_seed_id,
                 "seed": map_seed or {},
                 "graph_data": map_graph or {},
                 "report_text": (
-                    MapSeedManager.get_report_text(state.map_seed_id)
-                    if state.map_seed_id else ""
+                    MapSeedManager.get_report_text(effective_map_seed_id)
+                    if effective_map_seed_id else ""
                 ),
             },
         )
@@ -393,12 +444,28 @@ def _build_scenario_foundation(project: Any, state: Any) -> Dict[str, Any]:
         semantic_artifact = latest_semantic_artifact
         semantic_ref = SemanticArtifactStore.public_ref(latest_semantic_artifact)
 
+    spatial_scope: Dict[str, Any] = {}
+    try:
+        center_lat = float(map_input.get("lat"))
+        center_lon = float(map_input.get("lon"))
+        radius_m = max(1, int(float(map_input.get("radius_m") or 3000)))
+    except (TypeError, ValueError):
+        pass
+    else:
+        if -90 <= center_lat <= 90 and -180 <= center_lon <= 180:
+            spatial_scope = {
+                "center_lat": center_lat,
+                "center_lon": center_lon,
+                "radius_m": radius_m,
+                "coordinate_system": "WGS84",
+            }
+
     foundation = {
-        "artifact_id": state.map_seed_id or project.project_id,
-        "contract_version": "foundation.step1.v3",
+        "artifact_id": effective_map_seed_id or project.project_id,
+        "contract_version": "foundation.step1.v4",
         "project_id": project.project_id,
         "graph_id": state.graph_id,
-        "map_seed_id": state.map_seed_id or "",
+        "map_seed_id": effective_map_seed_id,
         "location": (
             map_input.get("requested_location")
             or (map_seed or {}).get("title")
@@ -406,6 +473,7 @@ def _build_scenario_foundation(project: Any, state: Any) -> Dict[str, Any]:
         ),
         "region_ids": region_ids,
         "target_catalog": target_catalog,
+        "spatial_scope": spatial_scope,
         "semantic_artifact_ref": semantic_ref,
         "scene_semantics": (
             semantic_artifact.scene.model_dump(mode="json") if semantic_artifact else {}
@@ -418,10 +486,150 @@ def _build_scenario_foundation(project: Any, state: Any) -> Dict[str, Any]:
             [item.model_dump(mode="json") for item in semantic_artifact.policies]
             if semantic_artifact else []
         ),
+        "evidence_sources": _foundation_evidence_sources(map_seed or {}),
     }
     canonical = json.dumps(foundation, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     foundation["content_hash"] = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
     return foundation
+
+
+def _foundation_evidence_sources(map_seed: Dict[str, Any]) -> list[Dict[str, Any]]:
+    quality = map_seed.get("data_quality") if isinstance(map_seed.get("data_quality"), dict) else {}
+    providers = quality.get("providers") if isinstance(quality.get("providers"), dict) else {}
+    return [
+        {
+            "source": str(name),
+            "status": str((details or {}).get("status") or ""),
+        }
+        for name, details in providers.items()
+        if isinstance(details, dict)
+    ]
+
+
+def _refine_spatial_evidence(
+    facility_query_plan: Any,
+    *,
+    foundation: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Execute the R3 local-catalog pass without making Step 2 depend on it.
+
+    Catalog construction can fail because of local storage permissions or a
+    damaged database.  That is an operational failure, not evidence that the
+    requested facility does not exist.  Preserve the scenario and emit an
+    explicit failed provider attempt while leaving requirements uncovered.
+    """
+
+    try:
+        with SQLiteSpatialCatalog(Config.SPATIAL_CATALOG_PATH) as catalog:
+            reusable_features = _foundation_spatial_catalog_features(foundation)
+            if reusable_features:
+                catalog.upsert_many(reusable_features)
+            return MechanismAwareSpatialRefiner(
+                catalog,
+                query_limit=Config.SPATIAL_CATALOG_QUERY_LIMIT,
+            ).refine(
+                facility_query_plan,
+                foundation=foundation,
+            ).to_dict()
+    except Exception as exc:
+        logger.exception(
+            "spatial_refinement.catalog_unavailable catalog=%s error_type=%s",
+            Config.SPATIAL_CATALOG_PATH,
+            type(exc).__name__,
+        )
+        return build_spatial_refinement_snapshot(
+            facility_query_plan,
+            target_catalog=foundation.get("target_catalog") or [],
+            provider_attempts=[
+                {
+                    "provider_key": "controlled_spatial_catalog",
+                    "status": "failed",
+                    "reason_code": "catalog_unavailable",
+                    "error_type": type(exc).__name__,
+                    "result_count": 0,
+                }
+            ],
+            source_versions=foundation.get("evidence_sources") or [],
+        ).to_dict()
+
+
+def _foundation_spatial_catalog_features(
+    foundation: Dict[str, Any],
+) -> list[SpatialCatalogFeature]:
+    """Project traceable Step 1 point evidence into the reusable local index."""
+
+    features: list[SpatialCatalogFeature] = []
+    dataset_version = str(
+        foundation.get("map_seed_id")
+        or foundation.get("content_hash")
+        or "unversioned"
+    ).strip()
+    for raw in foundation.get("target_catalog") or []:
+        item = normalize_spatial_catalog_candidate(raw)
+        if item is None or str(item.get("kind") or "").lower() == "region":
+            continue
+        if not item.get("facility_class_keys"):
+            continue
+        try:
+            lat = float(item.get("lat"))
+            lon = float(item.get("lon"))
+        except (TypeError, ValueError):
+            continue
+        if not (-90 <= lat <= 90 and -180 <= lon <= 180):
+            continue
+        coordinate_system = str(item.get("coordinate_system") or "WGS84").strip().upper()
+        if coordinate_system != "WGS84":
+            continue
+        feature_id = str(item.get("feature_id") or "").strip()
+        display_name = str(
+            item.get("display_name")
+            or item.get("name")
+            or item.get("label_zh")
+            or ""
+        ).strip()
+        if not feature_id or not display_name:
+            continue
+        source_key = str(
+            item.get("source_key") or item.get("provider") or "step1_map_seed"
+        ).strip()
+        provider = str(item.get("provider") or source_key).strip()
+        properties = {
+            key: item.get(key)
+            for key in (
+                "aliases",
+                "category",
+                "subtype",
+                "node_family",
+                "spatial_level",
+                "source_kind",
+                "confidence",
+            )
+            if item.get(key) not in (None, "", [], {})
+        }
+        try:
+            features.append(
+                SpatialCatalogFeature(
+                    feature_id=feature_id,
+                    display_name=display_name,
+                    facility_class_keys=tuple(item.get("facility_class_keys") or []),
+                    geometry={"type": "Point", "coordinates": [lon, lat]},
+                    bbox=(lon, lat, lon, lat),
+                    source_key=source_key,
+                    provider=provider,
+                    source_record_id=str(item.get("source_record_id") or feature_id),
+                    evidence_grade=str(item.get("evidence_grade") or "D"),
+                    dataset_version=str(item.get("dataset_version") or dataset_version),
+                    coordinate_system="WGS84",
+                    tags=dict(item.get("tags") or {}),
+                    properties=properties,
+                )
+            )
+        except (TypeError, ValueError):
+            logger.debug(
+                "spatial_catalog.skip_invalid_foundation_feature feature_id=%s",
+                feature_id,
+            )
+    return features
 
 
 def _assert_workflow_effort_consistency(project: Any, state: Any) -> Dict[str, Any]:
@@ -472,6 +680,9 @@ def _scenario_temporal_payload(scenario: Dict[str, Any]) -> tuple[Dict[str, Any]
 
 
 def _validate_step2_planning_request(data: Dict[str, Any]) -> None:
+    missing_fields = [field for field in ("event_inputs", "policy_inputs") if field not in data]
+    if missing_fields:
+        raise ValueError("生成配置时必须提交完整的灾害事件和政策措施")
     for field_name, label in (("event_inputs", "灾害事件"), ("policy_inputs", "政策措施")):
         # One source sentence may legitimately project into both an event and a
         # policy. IDs only need to be unique within each semantic collection.
@@ -484,6 +695,10 @@ def _validate_step2_planning_request(data: Dict[str, Any]) -> None:
         for index, item in enumerate(values, start=1):
             if not isinstance(item, dict):
                 raise ValueError(f"{label}第 {index} 项格式无效")
+            if field_name == "event_inputs" and not str(
+                item.get("name") or item.get("title") or item.get("description") or ""
+            ).strip():
+                raise ValueError(f"灾害事件第 {index} 项缺少事件内容")
             input_id = str(item.get("input_id") or "").strip()
             if input_id:
                 if input_id in seen_ids:
@@ -496,9 +711,30 @@ def _validate_step2_planning_request(data: Dict[str, Any]) -> None:
                 targets = item.get(target_field, [])
                 if targets is not None and not isinstance(targets, list):
                     raise ValueError(f"{label}第 {index} 项的{target_label}必须使用数组格式")
+            target_labels = item.get("target_labels", [])
+            if target_labels is not None and not isinstance(target_labels, list):
+                raise ValueError(f"{label}第 {index} 项的目标名称必须使用数组格式")
+    if not data.get("event_inputs"):
+        raise ValueError("至少需要一个有效灾害事件才能生成配置")
     overrides = data.get("advanced_overrides", {})
     if overrides is not None and not isinstance(overrides, dict):
         raise ValueError("高级设置必须使用对象格式")
+
+
+def _authoritative_step2_snapshot(data: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "input_kind": "scenario_configuration",
+        "authority": "authoritative",
+        "event_inputs": list(data.get("event_inputs") or []),
+        "policy_inputs": list(data.get("policy_inputs") or []),
+        "advanced_overrides": dict(data.get("advanced_overrides") or {}),
+        "scenario_location": str(data.get("scenario_location") or "").strip(),
+    }
+
+
+def _snapshot_hash(value: Dict[str, Any]) -> str:
+    canonical = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 def _planning_input_matches_existing(
@@ -1047,20 +1283,130 @@ def prepare_simulation():
 
         effort_snapshot = _assert_workflow_effort_consistency(project, state)
         state.effort_snapshot = effort_snapshot
+        force_regenerate = bool(data.get('force_regenerate', False))
+        submitted_snapshot: Dict[str, Any] = {}
+        submitted_snapshot_hash = ""
         if uses_new_scenario_contract:
             assert_effort_reference(
                 effort_snapshot,
                 effort_snapshot_id=data.get('effort_snapshot_id'),
                 requested_level=data.get('effort_level'),
             )
+            submitted_snapshot = _authoritative_step2_snapshot(data)
+            submitted_snapshot_hash = _snapshot_hash(submitted_snapshot)
+            if state.config_generated and state.status in {
+                SimulationStatus.READY,
+                SimulationStatus.RUNNING,
+                SimulationStatus.PAUSED,
+                SimulationStatus.STOPPED,
+                SimulationStatus.COMPLETED,
+                SimulationStatus.FAILED,
+            }:
+                snapshot_path = os.path.join(
+                    manager._get_simulation_dir(simulation_id),
+                    'scenario_configuration_input.json',
+                )
+                existing_snapshot = read_json_file(snapshot_path, default={}) or {}
+                if (
+                    not force_regenerate
+                    and submitted_snapshot_hash
+                    and submitted_snapshot_hash == str(existing_snapshot.get('submitted_input_hash') or '')
+                ):
+                    existing_config = read_json_file(
+                        os.path.join(manager._get_simulation_dir(simulation_id), 'simulation_config.json'),
+                        default={},
+                    ) or {}
+                    return jsonify({
+                        "success": True,
+                        "data": {
+                            "simulation_id": simulation_id,
+                            "status": state.status.value,
+                            "already_prepared": True,
+                            "event_inputs": list(existing_config.get('event_inputs') or []),
+                            "policy_inputs": list(existing_config.get('policy_inputs') or []),
+                            "resolved_foundation_ref": dict(existing_config.get('resolved_foundation_ref') or {}),
+                            "step1_suggestion_ref": dict(existing_config.get('step1_suggestion_ref') or {}),
+                            "scenario_input_authority": "authoritative",
+                        },
+                    })
+                return jsonify({
+                    "success": False,
+                    "error": "推演配置生成后已锁定，不能覆盖或重新生成。",
+                    "code": "scenario_configuration_locked",
+                    "stage": "场景输入校验",
+                }), 409
 
         scenario_artifact = None
         scenario_planning_input: Dict[str, Any] = {}
+        facility_query_plan: Dict[str, Any] = {}
+        spatial_refinement_snapshot: Dict[str, Any] = {}
         if uses_scenario_planner:
-            foundation = _build_scenario_foundation(project, state)
+            base_seed_id = str(state.base_map_seed_id or state.map_seed_id or "").strip()
+            foundation = _build_scenario_foundation(project, state, map_seed_id=base_seed_id)
             if uses_new_scenario_contract:
                 semantic_event_inputs = data.get('event_inputs') or []
                 semantic_policy_inputs = data.get('policy_inputs') or []
+                requested_foundation_ref = data.get('foundation_ref')
+                if isinstance(requested_foundation_ref, dict):
+                    requested_seed_id = str(requested_foundation_ref.get('map_seed_id') or '').strip()
+                    requested_hash = str(requested_foundation_ref.get('content_hash') or '').strip()
+                    if (
+                        (requested_seed_id and requested_seed_id != str(foundation.get('map_seed_id') or ''))
+                        or (requested_hash and requested_hash != str(foundation.get('content_hash') or ''))
+                    ):
+                        return jsonify({
+                            "success": False,
+                            "error": "现实背景已发生变化，请重新进入场景配置。",
+                            "code": "foundation_reference_stale",
+                            "stage": "核对现实范围",
+                        }), 409
+                try:
+                    resolution = ScenarioFoundationResolver().resolve(
+                        base_foundation=foundation,
+                        event_inputs=semantic_event_inputs,
+                        policy_inputs=semantic_policy_inputs,
+                        simulation_id=simulation_id,
+                        effort_snapshot=effort_snapshot,
+                        scenario_location=str(data.get('scenario_location') or ''),
+                        foundation_builder=lambda seed_id: _build_scenario_foundation(
+                            project,
+                            state,
+                            map_seed_id=seed_id,
+                        ),
+                    )
+                except FoundationResolutionError as exc:
+                    write_json_file(
+                        os.path.join(manager._get_simulation_dir(simulation_id), 'foundation_resolution.json'),
+                        exc.artifact,
+                    )
+                    logger.warning(
+                        "foundation.resolve blocked simulation_id=%s code=%s reasons=%s unresolved=%s",
+                        simulation_id,
+                        exc.code,
+                        exc.artifact.get('enrichment_reasons'),
+                        exc.artifact.get('unresolved_targets'),
+                    )
+                    return jsonify({
+                        "success": False,
+                        "error": "当前输入中的地点或对象无法从现实资料中确认，请返回背景定义明确地点或对象。",
+                        "code": exc.code,
+                        "stage": "核对现实范围",
+                    }), 409
+                foundation = resolution.foundation
+                semantic_event_inputs = resolution.event_inputs
+                semantic_policy_inputs = resolution.policy_inputs
+                write_json_file(
+                    os.path.join(manager._get_simulation_dir(simulation_id), 'foundation_resolution.json'),
+                    resolution.artifact,
+                )
+                state.base_map_seed_id = base_seed_id or state.map_seed_id
+                if resolution.resolved_map_seed_id:
+                    state.map_seed_id = resolution.resolved_map_seed_id
+                state.resolved_foundation_ref = dict(
+                    resolution.artifact.get('resolved_foundation_ref') or {}
+                )
+                state.step1_suggestion_ref = dict(foundation.get('semantic_artifact_ref') or {})
+                state.scenario_input_authority = 'authoritative'
             else:
                 legacy_events, legacy_policies = ScenarioPlanner.convert_legacy_injected_variables(
                     data.get('injected_variables') or []
@@ -1072,8 +1418,8 @@ def prepare_simulation():
                 event_inputs=semantic_event_inputs,
                 policy_inputs=semantic_policy_inputs,
                 previous_artifact_ref=(
-                    data.get('semantic_artifact_ref')
-                    or foundation.get('semantic_artifact_ref')
+                    foundation.get('semantic_artifact_ref')
+                    or data.get('semantic_artifact_ref')
                 ),
             )
             normalized_payload = {
@@ -1081,6 +1427,18 @@ def prepare_simulation():
                 'event_inputs': [item.model_dump(mode='json') for item in semantic_artifact.events],
                 'policy_inputs': [item.model_dump(mode='json') for item in semantic_artifact.policies],
                 'semantic_artifact_ref': SemanticArtifactStore.public_ref(semantic_artifact),
+                'step1_suggestion_ref': dict(foundation.get('semantic_artifact_ref') or {}),
+                'resolved_foundation_ref': dict(
+                    state.resolved_foundation_ref
+                    or {
+                        key: foundation.get(key)
+                        for key in (
+                            'artifact_id', 'contract_version', 'project_id', 'graph_id',
+                            'map_seed_id', 'content_hash',
+                        )
+                        if foundation.get(key) not in (None, '')
+                    }
+                ),
             }
             scenario_artifact = ScenarioPlanner().build_from_payload(
                 foundation,
@@ -1088,14 +1446,18 @@ def prepare_simulation():
                 effort_snapshot_ref=effort_snapshot,
             )
             scenario_planning_input = scenario_artifact.to_dict()
+            compiled_facility_plan = compile_facility_query_plan(scenario_artifact)
+            facility_query_plan = compiled_facility_plan.to_dict()
+            spatial_refinement_snapshot = _refine_spatial_evidence(
+                compiled_facility_plan,
+                foundation=foundation,
+            )
             state.semantic_artifact_ref = SemanticArtifactStore.public_ref(semantic_artifact)
             manager._save_simulation_state(state)
-            if hasattr(project, 'semantic_artifact_ref'):
+            if not uses_new_scenario_contract and hasattr(project, 'semantic_artifact_ref'):
                 project.semantic_artifact_ref = dict(state.semantic_artifact_ref)
                 ProjectManager.save_project(project)
 
-        # 检查是否强制重新生成
-        force_regenerate = data.get('force_regenerate', False)
         logger.info(f"开始处理 /prepare 请求: simulation_id={simulation_id}, force_regenerate={force_regenerate}")
         
         # 获取模拟需求
@@ -1117,6 +1479,29 @@ def prepare_simulation():
             if scenario_artifact is None:
                 raise ValueError("场景规划工件尚未生成")
             agent_planning_request = plan_scenario_agents(scenario_artifact)
+            agent_planning_request["facility_query_plan_ref"] = {
+                key: facility_query_plan.get(key)
+                for key in ("contract_version", "plan_id", "content_hash")
+            }
+            agent_planning_request["spatial_refinement_snapshot_ref"] = {
+                key: spatial_refinement_snapshot.get(key)
+                for key in ("contract_version", "snapshot_id", "content_hash")
+            }
+            agent_planning_request["spatial_evidence_summary"] = {
+                "request_count": len(facility_query_plan.get("requests") or []),
+                "required_r3_count": len(facility_query_plan.get("required_r3_request_ids") or []),
+                "required_r4_count": len(facility_query_plan.get("required_r4_request_ids") or []),
+                "covered_r3_count": sum(
+                    1
+                    for item in spatial_refinement_snapshot.get("request_coverage") or []
+                    if item.get("resolution_level") == "R3" and item.get("status") == "covered"
+                ),
+                "blocking_gap_count": sum(
+                    1
+                    for item in spatial_refinement_snapshot.get("evidence_gaps") or []
+                    if item.get("blocking") is True
+                ),
+            }
             injected_variables = list(agent_planning_request.get('injected_variables') or [])
             adapter_requirement = str(agent_planning_request.get('simulation_requirement') or '').strip()
             if adapter_requirement:
@@ -1286,11 +1671,50 @@ def prepare_simulation():
             state.status = SimulationStatus.PREPARING
             state.error = None
             manager._save_simulation_state(state)
+            if uses_new_scenario_contract:
+                write_json_file(
+                    os.path.join(
+                        manager._get_simulation_dir(simulation_id),
+                        'scenario_configuration_input.json',
+                    ),
+                    {
+                        "contract_version": "scenario_configuration_input.v1",
+                        "input_kind": "scenario_configuration",
+                        "authority": "authoritative",
+                        "submitted_input_hash": submitted_snapshot_hash,
+                        "event_inputs": list(
+                            scenario_planning_input.get('normalized_user_events') or []
+                        ),
+                        "policy_inputs": list(
+                            scenario_planning_input.get('normalized_user_policies') or []
+                        ),
+                        "resolved_foundation_ref": dict(
+                            scenario_planning_input.get('resolved_foundation_ref') or {}
+                        ),
+                        "step1_suggestion_ref": dict(
+                            scenario_planning_input.get('step1_suggestion_ref') or {}
+                        ),
+                        "semantic_artifact_ref": dict(
+                            scenario_planning_input.get('semantic_artifact_ref') or {}
+                        ),
+                    },
+                )
 
         if uses_scenario_planner:
             write_json_file(
                 os.path.join(manager._get_simulation_dir(simulation_id), 'agent_planning_request.json'),
                 agent_planning_request,
+            )
+            write_json_file(
+                os.path.join(manager._get_simulation_dir(simulation_id), 'facility_query_plan.json'),
+                facility_query_plan,
+            )
+            write_json_file(
+                os.path.join(
+                    manager._get_simulation_dir(simulation_id),
+                    'spatial_refinement_snapshot.json',
+                ),
+                spatial_refinement_snapshot,
             )
 
         # ========== 同步获取实体数量（在后台任务启动前） ==========
@@ -1463,6 +1887,17 @@ def prepare_simulation():
                 ),
                 "already_prepared": False,
                 "expected_entities_count": state.entities_count,
+                **({
+                    "event_inputs": list(scenario_planning_input.get('normalized_user_events') or []),
+                    "policy_inputs": list(scenario_planning_input.get('normalized_user_policies') or []),
+                    "resolved_foundation_ref": dict(
+                        scenario_planning_input.get('resolved_foundation_ref') or {}
+                    ),
+                    "step1_suggestion_ref": dict(
+                        scenario_planning_input.get('step1_suggestion_ref') or {}
+                    ),
+                    "scenario_input_authority": "authoritative",
+                } if uses_new_scenario_contract else {}),
                 "entity_types": state.entity_types,
                 "scenario_mode": scenario_mode,
                 "diffusion_template": diffusion_template,
@@ -1483,6 +1918,9 @@ def prepare_simulation():
                 "scenario_planning_input": scenario_planning_input,
                 "agent_plan_source": agent_planning_request.get('agent_plan_source'),
                 "projection_warnings": agent_planning_request.get('projection_warnings') or [],
+                "facility_query_plan_ref": agent_planning_request.get('facility_query_plan_ref') or {},
+                "spatial_refinement_snapshot_ref": agent_planning_request.get('spatial_refinement_snapshot_ref') or {},
+                "spatial_evidence_summary": agent_planning_request.get('spatial_evidence_summary') or {},
             })
         if not uses_new_scenario_contract:
             response_data["target_agent_count"] = data.get('target_agent_count')
@@ -1675,6 +2113,7 @@ def get_simulation(simulation_id: str):
             }), 404
         
         result = state.to_dict()
+        result["report_id"] = _get_report_id_for_simulation(simulation_id)
 
         # 如果模拟已准备好，附加运行说明
         if state.status == SimulationStatus.READY:
@@ -1810,7 +2249,9 @@ def get_simulation_animation(simulation_id: str):
     ``after_cursor`` (legacy alias ``since_cursor``) advances timeline events.
     ``after_round`` (legacy-style alias ``since_round``) advances committed
     frames, including completed rounds that contain no timeline event. Clients
-    may send both watermarks in one poll.
+    may send both watermarks in one poll. ``timeline_id`` pins a delta request
+    to one playback epoch; a changed identity returns an empty window with
+    ``reset_required=true`` instead of mixing two histories.
     """
     try:
         raw_cursor = request.args.get("after_cursor")
@@ -1819,6 +2260,9 @@ def get_simulation_animation(simulation_id: str):
         raw_round = request.args.get("after_round")
         if raw_round is None:
             raw_round = request.args.get("since_round")
+        requested_timeline_id = (
+            str(request.args.get("timeline_id") or "").strip() or None
+        )
         after_cursor = None
         after_round = None
         if raw_cursor is not None:
@@ -1848,14 +2292,20 @@ def get_simulation_animation(simulation_id: str):
                     "error": "动画轮次必须是非负整数。",
                 }), 400
         animation_service = SimulationAnimationService(simulation_id)
-        payload = (
-            animation_service.get_animation()
-            if after_cursor is None and after_round is None
-            else animation_service.get_animation(
-                after_cursor=after_cursor,
-                after_round=after_round,
-            )
-        )
+        if (
+            after_cursor is None
+            and after_round is None
+            and requested_timeline_id is None
+        ):
+            payload = animation_service.get_animation()
+        else:
+            request_kwargs = {
+                "after_cursor": after_cursor,
+                "after_round": after_round,
+            }
+            if requested_timeline_id is not None:
+                request_kwargs["timeline_id"] = requested_timeline_id
+            payload = animation_service.get_animation(**request_kwargs)
         return _public_runtime_success(payload)
     except ValueError as exc:
         return jsonify({

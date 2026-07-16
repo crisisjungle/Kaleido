@@ -21,6 +21,7 @@ from queue import Queue
 from ..config import Config
 from ..utils.logger import get_logger
 from .risk_artifact_store import load_risk_artifacts
+from .workflow_artifacts import project_runtime_ledger
 from .zep_graph_memory_updater import ZepGraphMemoryManager
 from .simulation_ipc import SimulationIPCClient, CommandType, IPCResponse
 
@@ -1277,6 +1278,8 @@ class SimulationRunner:
             ]
         else:
             artifacts["regional_scores"] = []
+
+        artifacts["runtime_ledger"] = project_runtime_ledger(artifacts)
 
         return artifacts
     

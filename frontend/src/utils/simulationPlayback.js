@@ -1,6 +1,11 @@
 const TIMELINE_CACHE = new WeakMap()
+const CONTINUOUS_PLAN_CACHE = new WeakMap()
 const MAX_RENDERED_EVENTS_PER_FRAME = 18
-const MAX_CONCURRENT_WAVE_EVENTS = 6
+const MAX_CONCURRENT_WAVE_EVENTS = 3
+const MAX_RECENT_COMPLETED_EVENTS = 6
+const DEFAULT_CONTINUOUS_ROUND_MS = 5000
+const DEFAULT_CONTINUOUS_TRAIL_MS = 760
+const DEFAULT_CONTINUOUS_TRANSITION_MS = 120
 
 const clamp = (value, min = 0, max = 1) => Math.min(Math.max(Number(value) || 0, min), max)
 
@@ -94,9 +99,32 @@ const eventKind = event => asId(
 
 const readEventTiming = event => {
   const timing = event?.timing && typeof event.timing === 'object' ? event.timing : {}
+  const localStartMs = asFiniteNumber(
+    event?.start_ms ?? timing.local_start_ms ?? timing.start_ms,
+    Number.NaN,
+  )
+  const globalStartMs = asFiniteNumber(
+    event?.global_start_ms ?? timing.global_start_ms,
+    Number.NaN,
+  )
+  const durationMs = Math.max(0, asFiniteNumber(
+    event?.duration_ms ?? timing.duration_ms,
+    Number.NaN,
+  ))
+  const globalEndMs = asFiniteNumber(
+    event?.global_end_ms ?? timing.global_end_ms,
+    Number.NaN,
+  )
   return {
-    startMs: Math.max(0, asFiniteNumber(event?.start_ms ?? timing.start_ms, Number.NaN)),
-    durationMs: Math.max(0, asFiniteNumber(event?.duration_ms ?? timing.duration_ms, Number.NaN)),
+    startMs: Math.max(0, localStartMs),
+    localStartMs: Math.max(0, localStartMs),
+    globalStartMs: Number.isFinite(globalStartMs) ? Math.max(0, globalStartMs) : Number.NaN,
+    durationMs,
+    globalEndMs: Number.isFinite(globalEndMs)
+      ? Math.max(0, globalEndMs)
+      : Number.isFinite(globalStartMs) && Number.isFinite(durationMs)
+        ? Math.max(0, globalStartMs + durationMs)
+        : Number.NaN,
   }
 }
 
@@ -172,7 +200,10 @@ const normalizeEvent = (event, fallbackRound = 0, fallbackIndex = 0) => {
     display_summary: asId(display?.summary_zh || event?.summary_zh || event?.summary),
     timing: {
       start_ms: timing.startMs,
+      local_start_ms: timing.localStartMs,
+      ...(Number.isFinite(timing.globalStartMs) ? { global_start_ms: timing.globalStartMs } : {}),
       duration_ms: timing.durationMs,
+      ...(Number.isFinite(timing.globalEndMs) ? { global_end_ms: timing.globalEndMs } : {}),
     },
   }
 }
@@ -377,7 +408,7 @@ const currentEventsAt = (events, elapsedMs) => {
   // slice made an outbreak/diffusion path vanish mid-route as soon as several
   // later Agent events became active. Round-robin selection across phases
   // preserves the environment -> response -> relationship story while still
-  // enforcing the six-wave readability ceiling.
+  // enforcing the three-wave readability ceiling.
   const phaseOrder = []
   const byPhase = new Map()
   active.forEach((event) => {
@@ -504,6 +535,424 @@ export const getFrameTimelineDuration = (payload, frame, fallbackMs = 1600) => {
   return Math.max(fallback, latestEnd > 0 ? Math.ceil(latestEnd + 80) : fallback)
 }
 
+const continuousRoundTargetMs = (eventCount, fallbackMs = DEFAULT_CONTINUOUS_ROUND_MS) => {
+  if (eventCount <= 0) return 720
+  if (eventCount === 1) return 3000
+  if (eventCount <= 3) return 3800
+  return clamp(3900 + eventCount * 50, 4500, Math.max(5300, fallbackMs))
+}
+
+const continuousPlanEvent = (event, globalStartMs, durationMs) => {
+  const start = Math.max(0, Math.round(asFiniteNumber(globalStartMs, 0)))
+  const duration = Math.max(1, Math.round(asFiniteNumber(durationMs, 1)))
+  return {
+    ...event,
+    timing: {
+      ...(event?.timing || {}),
+      local_start_ms: Math.max(0, asFiniteNumber(event?.timing?.local_start_ms ?? event?.timing?.start_ms, 0)),
+      start_ms: start,
+      global_start_ms: start,
+      duration_ms: duration,
+      global_end_ms: start + duration,
+    },
+  }
+}
+
+const continuousFrameRound = (frame, fallback = 0) => Math.max(
+  0,
+  asFiniteNumber(frame?.round ?? frame?.round_num, fallback),
+)
+
+const buildContinuousV3Plan = (payload, frames, events, options) => {
+  const timeline = payload?.timeline && typeof payload.timeline === 'object' ? payload.timeline : {}
+  const clock = timeline.clock && typeof timeline.clock === 'object' ? timeline.clock : {}
+  const committedStart = Math.max(0, asFiniteNumber(clock.committed_start_ms, 0))
+  const frameByRound = new Map(frames.map((frame, index) => [continuousFrameRound(frame, index), { frame, index }]))
+  const eventsByRound = new Map()
+  events.forEach((event) => {
+    if (!eventsByRound.has(event.round)) eventsByRound.set(event.round, [])
+    eventsByRound.get(event.round).push(event)
+  })
+
+  const rawRounds = asArray(timeline.rounds)
+  const roundNumbers = new Set([
+    ...frames.map((frame, index) => continuousFrameRound(frame, index)),
+    ...events.map(event => event.round),
+    ...rawRounds.map((round, index) => continuousFrameRound(round, index)),
+  ])
+  const rawRoundByNumber = new Map(
+    rawRounds.map((round, index) => [continuousFrameRound(round, index), round]),
+  )
+  const rounds = [...roundNumbers].sort((left, right) => left - right).map((round, index, ordered) => {
+    const source = rawRoundByNumber.get(round) || {}
+    const roundEvents = eventsByRound.get(round) || []
+    const eventStarts = roundEvents
+      .map(event => asFiniteNumber(event?.timing?.global_start_ms, Number.NaN))
+      .filter(Number.isFinite)
+    const eventEnds = roundEvents
+      .map(event => asFiniteNumber(event?.timing?.global_end_ms, Number.NaN))
+      .filter(Number.isFinite)
+    const previous = index > 0 ? rawRoundByNumber.get(ordered[index - 1]) || {} : {}
+    const rawStart = asFiniteNumber(
+      source.start_ms,
+      eventStarts.length
+        ? Math.min(...eventStarts)
+        : asFiniteNumber(previous.end_ms, committedStart),
+    )
+    const rawDuration = Math.max(1, asFiniteNumber(source.duration_ms, Number.NaN))
+    const rawEnd = asFiniteNumber(
+      source.end_ms,
+      Number.isFinite(rawDuration)
+        ? rawStart + rawDuration
+        : eventEnds.length
+          ? Math.max(...eventEnds) + options.transitionMs
+          : rawStart + 720,
+    )
+    const startMs = Math.max(0, rawStart - committedStart)
+    const endMs = Math.max(startMs + 1, rawEnd - committedStart)
+    const frameEntry = frameByRound.get(round)
+    return {
+      ...source,
+      round,
+      start_ms: Math.round(startMs),
+      end_ms: Math.round(endMs),
+      duration_ms: Math.max(1, Math.round(endMs - startMs)),
+      frame_index: frameEntry?.index ?? Math.min(index, Math.max(frames.length - 1, 0)),
+      frame: frameEntry?.frame || frames[Math.min(index, Math.max(frames.length - 1, 0))] || { round },
+    }
+  })
+
+  const planEvents = events.map((event) => {
+    const round = rounds.find(item => item.round === event.round)
+    const globalStart = asFiniteNumber(event?.timing?.global_start_ms, Number.NaN)
+    const localStart = asFiniteNumber(event?.timing?.local_start_ms ?? event?.timing?.start_ms, 0)
+    const startMs = Number.isFinite(globalStart)
+      ? Math.max(0, globalStart - committedStart)
+      : Math.max(0, asFiniteNumber(round?.start_ms, 0) + localStart)
+    const explicitEnd = asFiniteNumber(event?.timing?.global_end_ms, Number.NaN)
+    const duration = Number.isFinite(explicitEnd) && Number.isFinite(globalStart)
+      ? Math.max(1, explicitEnd - globalStart)
+      : Math.max(1, asFiniteNumber(event?.timing?.duration_ms, 1000))
+    return continuousPlanEvent(event, startMs, duration)
+  })
+
+  const committedEnd = asFiniteNumber(clock.committed_end_ms, Number.NaN)
+  const latestRoundEnd = rounds.length ? rounds[rounds.length - 1].end_ms : 0
+  const latestEventEnd = planEvents.reduce(
+    (latest, event) => Math.max(latest, asFiniteNumber(event?.timing?.global_end_ms, 0)),
+    0,
+  )
+  const durationMs = Math.max(
+    1,
+    Number.isFinite(committedEnd) ? committedEnd - committedStart : 0,
+    latestRoundEnd,
+    latestEventEnd + options.transitionMs,
+  )
+
+  return {
+    contract_version: 'continuous-playback-plan.v1',
+    source_mode: 'timeline_v3_global_clock',
+    timeline_contract_version: asId(timeline.contract_version),
+    clock: {
+      ...clock,
+      committed_start_ms: 0,
+      committed_end_ms: Math.round(durationMs),
+      source_committed_start_ms: committedStart,
+    },
+    head: timeline.head || {},
+    rounds,
+    events: sortEvents(planEvents),
+    duration_ms: Math.round(durationMs),
+    trail_duration_ms: options.trailMs,
+  }
+}
+
+const buildContinuousV2Plan = (payload, frames, events, options) => {
+  const timeline = payload?.timeline && typeof payload.timeline === 'object' ? payload.timeline : {}
+  const frameByRound = new Map(frames.map((frame, index) => [continuousFrameRound(frame, index), { frame, index }]))
+  const eventsByRound = new Map()
+  events.forEach((event) => {
+    if (!eventsByRound.has(event.round)) eventsByRound.set(event.round, [])
+    eventsByRound.get(event.round).push(event)
+  })
+  const roundNumbers = new Set([
+    ...frames.map((frame, index) => continuousFrameRound(frame, index)),
+    ...events.map(event => event.round),
+  ])
+  if (!roundNumbers.size) roundNumbers.add(0)
+
+  const rounds = []
+  const plannedEvents = []
+  const plannedById = new Map()
+  let roundStartMs = 0
+
+  ;[...roundNumbers].sort((left, right) => left - right).forEach((round, roundOrder) => {
+    const sourceEvents = sortEvents(eventsByRound.get(round) || [])
+    const sourceSpan = sourceEvents.reduce((latest, event) => {
+      const start = asFiniteNumber(event?.timing?.local_start_ms ?? event?.timing?.start_ms, 0)
+      const duration = Math.max(1, asFiniteNumber(event?.timing?.duration_ms, 600))
+      return Math.max(latest, start + duration)
+    }, 0)
+    const targetRoundMs = continuousRoundTargetMs(sourceEvents.length, options.roundMs)
+    const targetContentMs = Math.max(600, targetRoundMs - options.transitionMs)
+    const scale = sourceSpan > 0 ? targetContentMs / sourceSpan : 1
+    const scaledDurationWork = sourceEvents.reduce((total, event) => (
+      total + Math.max(1, asFiniteNumber(event?.timing?.duration_ms, 600)) * scale
+    ), 0)
+    const durationFit = scaledDurationWork > 0
+      ? Math.min(1, (targetContentMs * MAX_CONCURRENT_WAVE_EVENTS * 0.78) / scaledDurationWork)
+      : 1
+    const activeEnds = []
+    let latestEnd = roundStartMs
+
+    sourceEvents.forEach((event) => {
+      const localStart = Math.max(0, asFiniteNumber(
+        event?.timing?.local_start_ms ?? event?.timing?.start_ms,
+        0,
+      ))
+      const sourceDuration = Math.max(1, asFiniteNumber(event?.timing?.duration_ms, 600))
+      let startMs = roundStartMs + localStart * scale
+      const parentEnd = asArray(event.parent_event_ids).reduce((latest, parentId) => {
+        const parent = plannedById.get(asId(parentId))
+        return parent
+          ? Math.max(latest, asFiniteNumber(parent?.timing?.global_end_ms, 0) + 80)
+          : latest
+      }, 0)
+      startMs = Math.max(startMs, parentEnd)
+
+      for (let index = activeEnds.length - 1; index >= 0; index -= 1) {
+        if (activeEnds[index] <= startMs) activeEnds.splice(index, 1)
+      }
+      while (activeEnds.length >= MAX_CONCURRENT_WAVE_EVENTS) {
+        startMs = Math.min(...activeEnds) + 24
+        for (let index = activeEnds.length - 1; index >= 0; index -= 1) {
+          if (activeEnds[index] <= startMs) activeEnds.splice(index, 1)
+        }
+      }
+
+      const durationMs = clamp(sourceDuration * scale * durationFit, 900, 2200)
+      const planned = continuousPlanEvent(event, startMs, durationMs)
+      plannedEvents.push(planned)
+      plannedById.set(planned.event_id, planned)
+      activeEnds.push(planned.timing.global_end_ms)
+      latestEnd = Math.max(latestEnd, planned.timing.global_end_ms)
+    })
+
+    const frameEntry = frameByRound.get(round)
+    const roundEndMs = sourceEvents.length
+      ? Math.max(roundStartMs + targetRoundMs, latestEnd + options.transitionMs)
+      : roundStartMs + 720
+    rounds.push({
+      round,
+      start_ms: Math.round(roundStartMs),
+      end_ms: Math.round(roundEndMs),
+      duration_ms: Math.max(1, Math.round(roundEndMs - roundStartMs)),
+      frame_index: frameEntry?.index ?? Math.min(roundOrder, Math.max(frames.length - 1, 0)),
+      frame: frameEntry?.frame || frames[Math.min(roundOrder, Math.max(frames.length - 1, 0))] || { round },
+    })
+    roundStartMs = roundEndMs
+  })
+
+  return {
+    contract_version: 'continuous-playback-plan.v1',
+    source_mode: 'compiled_v2_round_segments',
+    timeline_contract_version: asId(timeline.contract_version || payload?.meta?.timeline_contract_version || 'legacy'),
+    clock: {
+      unit: 'millisecond',
+      basis: 'frontend_compiled_round_segments',
+      committed_start_ms: 0,
+      committed_end_ms: Math.max(1, Math.round(roundStartMs)),
+    },
+    head: timeline.head || {},
+    rounds,
+    events: sortEvents(plannedEvents),
+    duration_ms: Math.max(1, Math.round(roundStartMs)),
+    trail_duration_ms: options.trailMs,
+  }
+}
+
+/**
+ * Compile the persisted simulation timeline into one monotonic presentation
+ * clock. Timeline V3 owns global timing. Timeline V2 remains compatible by
+ * receiving deterministic, append-stable round segments whose visual pacing is
+ * deliberately slower than the raw ledger timings.
+ */
+export const buildContinuousPlaybackPlan = (
+  payload,
+  {
+    roundDurationMs = DEFAULT_CONTINUOUS_ROUND_MS,
+    trailDurationMs = DEFAULT_CONTINUOUS_TRAIL_MS,
+    transitionMs = DEFAULT_CONTINUOUS_TRANSITION_MS,
+  } = {},
+) => {
+  const source = payload && typeof payload === 'object' ? payload : {}
+  const cacheKey = `${roundDurationMs}:${trailDurationMs}:${transitionMs}`
+  let cachedPlans = CONTINUOUS_PLAN_CACHE.get(source)
+  if (cachedPlans?.has(cacheKey)) return cachedPlans.get(cacheKey)
+
+  const frames = asArray(source.frames)
+    .map((frame, index) => ({ frame, index, round: continuousFrameRound(frame, index) }))
+    .sort((left, right) => left.round - right.round || left.index - right.index)
+    .map(item => item.frame)
+  const events = collectTimelineEvents(source)
+  const timeline = source.timeline && typeof source.timeline === 'object' ? source.timeline : {}
+  const hasGlobalClock = asId(timeline.contract_version) === 'simulation-playback-timeline.v3'
+    || events.some(event => Number.isFinite(asFiniteNumber(event?.timing?.global_start_ms, Number.NaN)))
+  const options = {
+    roundMs: Math.max(1000, asFiniteNumber(roundDurationMs, DEFAULT_CONTINUOUS_ROUND_MS)),
+    trailMs: Math.max(200, asFiniteNumber(trailDurationMs, DEFAULT_CONTINUOUS_TRAIL_MS)),
+    transitionMs: Math.max(0, asFiniteNumber(transitionMs, DEFAULT_CONTINUOUS_TRANSITION_MS)),
+  }
+  const plan = hasGlobalClock
+    ? buildContinuousV3Plan(source, frames, events, options)
+    : buildContinuousV2Plan(source, frames, events, options)
+  cachedPlans ||= new Map()
+  cachedPlans.set(cacheKey, plan)
+  CONTINUOUS_PLAN_CACHE.set(source, cachedPlans)
+  return plan
+}
+
+export const advanceContinuousPlayhead = (
+  playheadMs,
+  wallDeltaMs,
+  playbackRate,
+  durationMs,
+) => {
+  const duration = Math.max(0, asFiniteNumber(durationMs, 0))
+  const current = clamp(playheadMs, 0, duration)
+  const delta = Math.max(0, asFiniteNumber(wallDeltaMs, 0))
+  const rate = Math.max(0.1, asFiniteNumber(playbackRate, 1))
+  return clamp(current + delta * rate, 0, duration)
+}
+
+const continuousRoundAt = (rounds, elapsedMs) => {
+  if (!rounds.length) return null
+  const elapsed = Math.max(0, asFiniteNumber(elapsedMs, 0))
+  const matched = rounds.find((round, index) => (
+    elapsed >= asFiniteNumber(round.start_ms, 0)
+    && (
+      elapsed < asFiniteNumber(round.end_ms, round.start_ms + round.duration_ms)
+      || index === rounds.length - 1
+    )
+  ))
+  if (matched) return matched
+  const started = [...rounds]
+    .reverse()
+    .find(round => elapsed >= asFiniteNumber(round.start_ms, 0))
+  return started || rounds[0]
+}
+
+/**
+ * Resolve one renderer-compatible snapshot from the global story clock. The
+ * snapshot retains only the active wave plus a small, subdued causal trail, so
+ * graph, map, and the right-side pulse cards consume exactly the same event set.
+ */
+export const buildContinuousPlaybackSnapshot = (
+  payload,
+  plan,
+  playheadMs,
+  { isPlaying = false } = {},
+) => {
+  const sourcePlan = plan || buildContinuousPlaybackPlan(payload)
+  const totalDuration = Math.max(1, asFiniteNumber(sourcePlan?.duration_ms, 1))
+  const elapsed = clamp(playheadMs, 0, totalDuration)
+  const marker = continuousRoundAt(asArray(sourcePlan?.rounds), elapsed)
+  const frame = marker?.frame || asArray(payload?.frames)[marker?.frame_index || 0] || null
+  if (!frame) return null
+
+  const planEvents = asArray(sourcePlan?.events)
+  const activeEvents = currentEventsAt(planEvents, elapsed)
+  const activeIds = new Set(activeEvents.map(event => event.event_id))
+  const directParentIds = new Set(
+    activeEvents.flatMap(event => asArray(event.parent_event_ids).map(asId).filter(Boolean)),
+  )
+  const trailWindow = Math.max(200, asFiniteNumber(sourcePlan?.trail_duration_ms, DEFAULT_CONTINUOUS_TRAIL_MS))
+  const trailEvents = planEvents
+    .filter((event) => {
+      if (activeIds.has(event.event_id)) return false
+      const end = asFiniteNumber(event?.timing?.global_end_ms, Number.NaN)
+      if (!Number.isFinite(end) || end > elapsed) return false
+      return elapsed - end <= trailWindow || directParentIds.has(event.event_id)
+    })
+    .sort((left, right) => {
+      const parentDelta = Number(directParentIds.has(right.event_id)) - Number(directParentIds.has(left.event_id))
+      if (parentDelta !== 0) return parentDelta
+      return asFiniteNumber(right?.timing?.global_end_ms, 0) - asFiniteNumber(left?.timing?.global_end_ms, 0)
+    })
+    .slice(0, MAX_CONCURRENT_WAVE_EVENTS)
+  const playbackEvents = sortEvents([...trailEvents, ...activeEvents])
+  const startedConnectionEvents = planEvents.filter((event) => {
+    const start = asFiniteNumber(event?.timing?.global_start_ms ?? event?.timing?.start_ms, Number.NaN)
+    const hasConnection = Boolean(
+      event.edge_id
+      || eventPathEdgeIds(event).length
+      || (event.source_node_id && event.target_node_id)
+    )
+    return hasConnection && Number.isFinite(start) && start <= elapsed
+  })
+  const recentCompletedEvents = startedConnectionEvents
+    .filter((event) => {
+      const end = asFiniteNumber(event?.timing?.global_end_ms, Number.NaN)
+      return Number.isFinite(end) && end <= elapsed
+    })
+    .sort((left, right) => (
+      asFiniteNumber(right?.timing?.global_end_ms, 0)
+      - asFiniteNumber(left?.timing?.global_end_ms, 0)
+    ))
+    .slice(0, MAX_RECENT_COMPLETED_EVENTS)
+
+  const nodeIds = new Set()
+  const edgeIds = new Set()
+  activeEvents.forEach((event) => {
+    if (event.source_node_id) nodeIds.add(event.source_node_id)
+    const start = asFiniteNumber(event?.timing?.global_start_ms ?? event?.timing?.start_ms, 0)
+    const duration = Math.max(1, asFiniteNumber(event?.timing?.duration_ms, 1))
+    const rawProgress = clamp((elapsed - start) / duration)
+    if (event.target_node_id && rawProgress > 0.72) nodeIds.add(event.target_node_id)
+    eventEdgeSegments(event, elapsed)
+      .filter(segment => segment.progress > 0 && segment.progress < 1)
+      .forEach(segment => edgeIds.add(segment.edgeId))
+  })
+
+  const roundStart = Math.max(0, asFiniteNumber(marker?.start_ms, 0))
+  const roundDuration = Math.max(1, asFiniteNumber(marker?.duration_ms, 1))
+  const originalFocus = frame.focus_ids && typeof frame.focus_ids === 'object' ? frame.focus_ids : {}
+  return {
+    ...frame,
+    round: marker?.round ?? frame.round ?? 0,
+    playback_frame_index: Math.max(0, asFiniteNumber(marker?.frame_index, 0)),
+    playback_global_elapsed_ms: elapsed,
+    playback_elapsed_ms: elapsed,
+    playback_duration_ms: totalDuration,
+    playback_round_elapsed_ms: clamp(elapsed - roundStart, 0, roundDuration),
+    playback_round_duration_ms: roundDuration,
+    playback_plan_duration_ms: totalDuration,
+    playback_is_playing: Boolean(isPlaying),
+    playback_is_continuous: true,
+    continuous_has_timeline: planEvents.length > 0,
+    timeline_contract_version: asId(
+      sourcePlan?.timeline_contract_version
+      || payload?.timeline?.contract_version
+      || payload?.meta?.timeline_contract_version
+      || 'legacy',
+    ),
+    propagation_events: playbackEvents,
+    active_propagation_event_ids: activeEvents.map(event => event.event_id),
+    trail_propagation_event_ids: trailEvents.map(event => event.event_id),
+    // Keep renderer input bounded to active + trail events. The pulse panel
+    // receives a separate six-item history and a scalar cumulative count, so
+    // hundreds of completed events are never copied into graph/map props on
+    // every animation frame.
+    playback_started_event_count: startedConnectionEvents.length,
+    recent_completed_propagation_events: recentCompletedEvents,
+    focus_ids: {
+      ...originalFocus,
+      node_ids: [...nodeIds],
+      edge_ids: [...edgeIds],
+    },
+  }
+}
+
 const statusRank = status => ({ hidden: 0, steady: 1, faded: 2, new: 3, active: 4 }[status] || 0)
 
 /**
@@ -582,29 +1031,44 @@ const mergePulseState = (map, id, next) => {
   }
 }
 
-export const buildPropagationState = frame => {
+export const buildPropagationState = (
+  frame,
+  {
+    maxActiveEvents = Number.POSITIVE_INFINITY,
+    maxTrailEvents = maxActiveEvents,
+  } = {},
+) => {
   const nodeStates = new Map()
   const edgeStates = new Map()
   const pairStates = new Map()
   const events = asArray(frame?.propagation_events)
-  if (!events.length) return { nodeStates, edgeStates, pairStates, hasTimeline: false }
+  const hasTimeline = events.length > 0 || frame?.continuous_has_timeline === true
+  if (!events.length) return { nodeStates, edgeStates, pairStates, hasTimeline }
 
   const elapsed = Math.max(0, asFiniteNumber(frame?.playback_elapsed_ms, 0))
   const hasActiveSelection = Array.isArray(frame?.active_propagation_event_ids)
-  const activeEventIds = new Set(asArray(frame?.active_propagation_event_ids).map(asId).filter(Boolean))
+  const limitIds = (values, limit) => {
+    const ids = asArray(values).map(asId).filter(Boolean)
+    if (!Number.isFinite(Number(limit))) return ids
+    return ids.slice(0, Math.max(0, Math.floor(Number(limit))))
+  }
+  const activeEventIds = new Set(limitIds(frame?.active_propagation_event_ids, maxActiveEvents))
+  const trailEventIds = new Set(limitIds(frame?.trail_propagation_event_ids, maxTrailEvents))
   events.forEach(event => {
     const start = Math.max(0, asFiniteNumber(event?.timing?.start_ms, 0))
     const duration = Math.max(1, asFiniteNumber(event?.timing?.duration_ms, 1))
-    if (elapsed >= start + duration) return
-    const rawProgress = clamp((elapsed - start) / duration)
+    const eventId = asId(event.event_id)
+    const trail = trailEventIds.has(eventId) && elapsed >= start + duration
+    if (elapsed >= start + duration && !trail) return
+    const rawProgress = trail ? 1 : clamp((elapsed - start) / duration)
     if (elapsed < start) return
     // buildPlaybackFrame applies the concurrency cap used by the right-side
     // "current wave" cards.  Render exactly that same event set on the graph
     // and map so a dense round cannot show twelve active paths while the
-    // product says that only six events are currently propagating.
-    if (hasActiveSelection && !activeEventIds.has(asId(event.event_id))) return
-    const current = elapsed < start + duration
-    const status = current ? 'active' : 'new'
+    // product says that only three events are currently propagating.
+    if (hasActiveSelection && !activeEventIds.has(eventId) && !trail) return
+    const current = !trail && elapsed < start + duration
+    const status = trail ? 'faded' : current ? 'active' : 'new'
     const common = {
       status,
       raw_animation_status: status,
@@ -618,16 +1082,19 @@ export const buildPropagationState = frame => {
       propagation_confidence: clamp(event.confidence ?? 0.5),
       propagation_grounding: asId(event.grounding || 'legacy'),
       propagation_current: current,
+      propagation_trail: trail,
     }
 
     const sourceProgress = clamp(rawProgress / 0.2)
-    mergePulseState(nodeStates, asId(event.source_node_id), {
-      ...common,
-      id: asId(event.source_node_id),
-      animation_progress: sourceProgress,
-      animation_due: sourceProgress > 0,
-      propagation_role: 'source',
-    })
+    if (!trail) {
+      mergePulseState(nodeStates, asId(event.source_node_id), {
+        ...common,
+        id: asId(event.source_node_id),
+        animation_progress: sourceProgress,
+        animation_due: sourceProgress > 0,
+        propagation_role: 'source',
+      })
+    }
 
     const pathProgress = eventPathProgress(event, elapsed)
     if (pathProgress > 0) {
@@ -648,8 +1115,8 @@ export const buildPropagationState = frame => {
           ...commonEdgeState,
           id: segment.edgeId,
           edge_ids: explicitEdgeIds,
-          status: segmentCurrent ? 'active' : 'new',
-          raw_animation_status: segmentCurrent ? 'active' : 'new',
+          status: trail ? 'faded' : segmentCurrent ? 'active' : 'new',
+          raw_animation_status: trail ? 'faded' : segmentCurrent ? 'active' : 'new',
           timeline_delay_ms: Math.round(segment.startMs),
           animation_progress: segment.progress,
           propagation_current: segmentCurrent,
@@ -677,8 +1144,8 @@ export const buildPropagationState = frame => {
           {
             ...commonEdgeState,
             id: '',
-            status: current && pathProgress < 1 ? 'active' : 'new',
-            raw_animation_status: current && pathProgress < 1 ? 'active' : 'new',
+            status: trail ? 'faded' : current && pathProgress < 1 ? 'active' : 'new',
+            raw_animation_status: trail ? 'faded' : current && pathProgress < 1 ? 'active' : 'new',
             propagation_current: current && pathProgress < 1,
             // This is only a neutral visual bridge.  It is not evidence that
             // any concrete business relationship carried the event.
@@ -689,7 +1156,7 @@ export const buildPropagationState = frame => {
     }
 
     const targetProgress = clamp((rawProgress - 0.72) / 0.28)
-    if (targetProgress > 0) {
+    if (!trail && targetProgress > 0) {
       mergePulseState(nodeStates, asId(event.target_node_id), {
         ...common,
         id: asId(event.target_node_id),
@@ -700,7 +1167,7 @@ export const buildPropagationState = frame => {
     }
   })
 
-  return { nodeStates, edgeStates, pairStates, hasTimeline: true }
+  return { nodeStates, edgeStates, pairStates, hasTimeline }
 }
 
 const visualEdgeId = edge => asId(edge?.uuid || edge?.id || edge?.edge_id)
@@ -919,14 +1386,33 @@ export const mergeAnimationPayload = (currentPayload, incomingPayload) => {
     if (!grouped.has(round)) grouped.set(round, [])
     grouped.get(round).push(event)
   })
-  const rounds = [...grouped.entries()]
-    .sort((left, right) => left[0] - right[0])
-    .map(([round, items]) => ({
-      round,
-      event_ids: items.map(item => asId(item?.id || item?.event_id)).filter(Boolean),
-      start_sequence: asFiniteNumber(items[0]?.sequence, 0),
-      end_sequence: asFiniteNumber(items[items.length - 1]?.sequence, 0),
-    }))
+  const roundMetadata = new Map()
+  asArray(currentTimeline.rounds).forEach((item, index) => {
+    const round = asFiniteNumber(item?.round ?? item?.round_num, index)
+    if (!roundMetadata.has(round)) roundMetadata.set(round, item)
+  })
+  asArray(incomingTimeline.rounds).forEach((item, index) => {
+    const round = asFiniteNumber(item?.round ?? item?.round_num, index)
+    if (!roundMetadata.has(round)) roundMetadata.set(round, item)
+  })
+  const roundNumbers = new Set([...grouped.keys(), ...roundMetadata.keys()])
+  const rounds = [...roundNumbers]
+    .sort((left, right) => left - right)
+    .map((round) => {
+      const items = grouped.get(round) || []
+      const source = roundMetadata.get(round) || {}
+      return {
+        ...source,
+        round,
+        event_ids: items.map(item => asId(item?.id || item?.event_id)).filter(Boolean),
+        start_sequence: items.length
+          ? asFiniteNumber(items[0]?.sequence, source.start_sequence || 0)
+          : asFiniteNumber(source.start_sequence, 0),
+        end_sequence: items.length
+          ? asFiniteNumber(items[items.length - 1]?.sequence, source.end_sequence || 0)
+          : asFiniteNumber(source.end_sequence, 0),
+      }
+    })
 
   return {
     ...currentPayload,

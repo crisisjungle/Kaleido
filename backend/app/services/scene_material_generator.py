@@ -13,7 +13,7 @@ import os
 import uuid
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from ..config import Config
 from ..utils.file_parser import FileParser
@@ -585,8 +585,12 @@ class SceneMaterialGenerator:
         revised["semantic_artifact_ref"] = SemanticArtifactStore.public_ref(semantic_artifact)
         revised["semantic_revision"] = semantic_artifact.revision
         revised["scene_semantics"] = semantic_artifact.scene.model_dump(mode="json")
-        revised["normalized_event_inputs"] = [item.model_dump(mode="json") for item in semantic_artifact.events]
-        revised["normalized_policy_inputs"] = [item.model_dump(mode="json") for item in semantic_artifact.policies]
+        suggested_events = self._suggested_inputs(semantic_artifact.events)
+        suggested_policies = self._suggested_inputs(semantic_artifact.policies)
+        revised["suggested_event_inputs"] = suggested_events
+        revised["suggested_policy_inputs"] = suggested_policies
+        revised["normalized_event_inputs"] = suggested_events
+        revised["normalized_policy_inputs"] = suggested_policies
         revised["updated_at"] = datetime.now().isoformat()
         revised["revision_history"] = [
             *(seed.get("revision_history") or []),
@@ -1018,8 +1022,12 @@ class SceneMaterialGenerator:
             "semantic_artifact_ref": SemanticArtifactStore.public_ref(semantic_artifact),
             "semantic_revision": semantic_artifact.revision,
             "scene_semantics": semantic_artifact.scene.model_dump(mode="json"),
-            "normalized_event_inputs": [item.model_dump(mode="json") for item in semantic_artifact.events],
-            "normalized_policy_inputs": [item.model_dump(mode="json") for item in semantic_artifact.policies],
+            "suggested_event_inputs": self._suggested_inputs(semantic_artifact.events),
+            "suggested_policy_inputs": self._suggested_inputs(semantic_artifact.policies),
+            # Compatibility projection for older Step 2 clients. New clients
+            # consume the explicit suggestion fields above.
+            "normalized_event_inputs": self._suggested_inputs(semantic_artifact.events),
+            "normalized_policy_inputs": self._suggested_inputs(semantic_artifact.policies),
             "input": {
                 "location": input_bundle["location"],
                 "time_scope": input_bundle["time_scope"],
@@ -1037,6 +1045,16 @@ class SceneMaterialGenerator:
             },
             **sanitized,
         }
+
+    @staticmethod
+    def _suggested_inputs(values: Sequence[Any]) -> List[Dict[str, Any]]:
+        result: List[Dict[str, Any]] = []
+        for value in values:
+            item = value.model_dump(mode="json") if hasattr(value, "model_dump") else dict(value or {})
+            item["source_origin"] = "step1_suggestion"
+            item["authority"] = "draft"
+            result.append(item)
+        return result
 
     @staticmethod
     def _semantic_variables(semantic_artifact: SemanticInputArtifact) -> List[Dict[str, Any]]:

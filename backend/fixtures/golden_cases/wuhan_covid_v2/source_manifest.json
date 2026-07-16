@@ -1,0 +1,70 @@
+{
+  "case_id": "wuhan_covid_v2",
+  "boundary_note": "公开来源用于约束历史日期、地点与已发生措施；主体间关系、行动细节和连续状态为策划推演，不冒充观测事实。华南海鲜市场仅作为早期病例聚集锚点，不表达为疫情起源。",
+  "sources": [
+    {
+      "id": "source_who_timeline",
+      "title": "世界卫生组织新冠疫情时间线",
+      "publisher": "世界卫生组织",
+      "url": "https://www.who.int/news/item/29-06-2020-covidtimeline",
+      "provenance": "observed/public_source",
+      "claim_scope": ["2019年12月底武汉出现不明原因肺炎报告", "2020年1月病原识别与人际传播确认的时间骨架"]
+    },
+    {
+      "id": "source_who_origins_annex",
+      "title": "世界卫生组织新冠病毒溯源联合研究附件",
+      "publisher": "世界卫生组织",
+      "url": "https://www.who.int/docs/default-source/coronaviruse/who-convened-global-study-of-origins-of-sars-cov-2-china-part-annexes.pdf",
+      "provenance": "observed/public_source",
+      "claim_scope": ["华南海鲜市场作为早期病例聚集与环境采样地点，不据此表达疫情起源", "2019年12月底武汉市疾控中心参与流行病学调查与采样", "早期不明原因肺炎患者转入金银潭医院收治"]
+    },
+    {
+      "id": "source_wuhan_mobility",
+      "title": "武汉离汉通道管控与恢复记录",
+      "publisher": "武汉市公安局",
+      "url": "https://gaj.wuhan.gov.cn/hjfc/jdxw/202004/t20200424_1122441.html",
+      "provenance": "observed/public_source",
+      "claim_scope": ["2020-01-23离汉通道管控", "2020-01-23武汉天河机场、三大火车站等离汉通道实施封控", "2020-04-08解除离汉通道管控"]
+    },
+    {
+      "id": "source_huoshenshan",
+      "title": "火神山医院交付记录",
+      "publisher": "国家卫生健康委员会",
+      "url": "https://www.nhc.gov.cn/wjw/xwdt/202002/b9211ef6fdc24ea890668d516e110316.shtml",
+      "provenance": "observed/public_source",
+      "claim_scope": ["2020-02-02火神山医院交付"]
+    },
+    {
+      "id": "source_leishenshan",
+      "title": "武汉雷神山医院交付使用记录",
+      "publisher": "国家卫生健康委员会",
+      "url": "https://www.nhc.gov.cn/xcs/xwbd/202002/7392a0b60b2d45a390c1640d26ecbf36.shtml",
+      "provenance": "observed/public_source",
+      "claim_scope": ["2020-02-08雷神山医院交付使用"]
+    },
+    {
+      "id": "source_fangcang",
+      "title": "武汉方舱医院启用记录",
+      "publisher": "武汉市发展和改革委员会",
+      "url": "https://fgw.wuhan.gov.cn/xwzx/mtgz/202004/t20200416_1011177.html",
+      "provenance": "observed/public_source",
+      "claim_scope": ["2020-02-05首批方舱医院投入使用", "武汉客厅方舱与洪山体育馆方舱属于已启用方舱医院"]
+    },
+    {
+      "id": "source_transport_restart_nodes",
+      "title": "武汉对外交通重启准备记录",
+      "publisher": "武汉市商务局",
+      "url": "https://sw.wuhan.gov.cn/xwdt/gzdt/202004/t20200423_1078769.shtml",
+      "provenance": "observed/public_source",
+      "claim_scope": ["2020-04-08武汉天河机场与三大火车站恢复准备", "恢复阶段实施健康码核验与体温检测"]
+    },
+    {
+      "id": "source_reopening",
+      "title": "武汉解除离汉通道管控",
+      "publisher": "国家卫生健康委员会",
+      "url": "https://www.nhc.gov.cn/wjw/xwdt/202004/70b9a61472254f6dbd97f59398d1ed79.shtml",
+      "provenance": "observed/public_source",
+      "claim_scope": ["2020-04-08武汉恢复离汉交通"]
+    }
+  ]
+}

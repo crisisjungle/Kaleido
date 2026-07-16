@@ -12,9 +12,9 @@
           v-for="item in visibleSteps"
           :key="item.step"
           class="workflow-item"
-          :class="{ active: item.step === currentStep, disabled: !item.visited && item.step !== currentStep }"
+          :class="{ active: item.step === currentStep, disabled: !isStepNavigable(item) }"
           type="button"
-          :disabled="!item.visited && item.step !== currentStep"
+          :disabled="!isStepNavigable(item)"
           @click="goToStep(item)"
         >
           <span class="item-index">{{ String(item.step).padStart(2, '0') }}</span>
@@ -32,7 +32,7 @@
 <script setup>
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
-import { getWorkflowSteps } from '../store/workflowNavigation'
+import { getWorkflowSteps, hasWorkflowRoute } from '../store/workflowNavigation'
 
 const props = defineProps({
   currentStep: {
@@ -51,18 +51,21 @@ const menuRef = ref(null)
 const triggerRef = ref(null)
 const popoverRef = ref(null)
 const popoverStyle = ref({})
-const steps = getWorkflowSteps()
-
-const visibleSteps = computed(() => steps)
+const visibleSteps = computed(() => getWorkflowSteps())
 
 function statusLabel(item) {
-  if (item.status === 'active') return '当前步骤'
-  if (item.status === 'done' || item.visited) return '可查看'
+  if (item.step === props.currentStep) return '进行中'
+  if (item.status === 'done' || (item.visited && item.step < props.currentStep)) return '已完成'
+  if (item.visited || hasWorkflowRoute(item)) return '可查看'
   return '后续步骤'
 }
 
+function isStepNavigable(item) {
+  return item.step === props.currentStep || item.visited || hasWorkflowRoute(item)
+}
+
 function goToStep(item) {
-  if (!item.visited && item.step !== props.currentStep) return
+  if (!isStepNavigable(item)) return
   open.value = false
   if (item.step === props.currentStep) return
   if (item.route?.name) {

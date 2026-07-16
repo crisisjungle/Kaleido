@@ -1,6 +1,6 @@
 # Kaleido Deployment And Ops
 
-Last updated: 2026-07-14
+Last updated: 2026-07-15
 
 ## Current Production Shape
 
@@ -41,9 +41,23 @@ Last updated: 2026-07-14
 - `frontend/nginx.conf`
 - `package.json`
 
+## Spatial Catalog Persistence
+
+- Step 2 的嵌入式受控空间目录默认写入
+  `backend/uploads/spatial_catalog.sqlite3`，生产环境也可通过
+  `SPATIAL_CATALOG_PATH` 改到单独持久卷。
+- 发布切换不得覆盖该文件；导入新版本 GeoJSON 前先执行 `--dry-run`，记录
+  数据版本和摘要哈希，并备份现有目录文件。
+- 当前 SQLite 目录是单机适配器。扩大到多实例或大范围数据时，应在同一
+  `SpatialCatalogPort` 后接 PostGIS，而不是把 SQLite 文件复制到多个可写副本。
+
 ## Known Risks
 
 - The repository currently has no RCDF-style single deploy script with built-in lock, manifest, backup, health check, and rollback. Manual deployments must follow the recorded release rules until that script exists.
 - `latest` tags are mutable. Always record old image IDs before replacing them.
 - The production `.env` contains runtime provider credentials. Do not copy it into build artifacts or print secret values in release notes.
 - Kaleido currently has no database migration gate in the compose release path, but generated files, uploads, and logs still need preservation across container replacement.
+
+## Wuhan V2 Release Boundary
+
+`wuhan_covid_v2` is currently a local shadow fixture only. `backend/scripts/build_wuhan_showcase.py` may compile and validate local golden artifacts, but it must not deploy them, change `/demo/wuhan` away from V1, rebuild a production image, or overwrite the V1 fixture. Promotion requires separate semantic and visual acceptance, browser verification of all four direct routes, V1/V2 screenshot and playback comparison, and an explicit alias-switch change with V1 retained at `?version=v1`.

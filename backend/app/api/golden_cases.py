@@ -24,6 +24,19 @@ def list_golden_cases():
         return jsonify({"success": False, "error": public_error_message(exc, "读取演示案例失败，请稍后重试。")}), 500
 
 
+@golden_cases_bp.route("/<case_id>/artifacts/<artifact_name>", methods=["GET"])
+def get_golden_case_artifact(case_id: str, artifact_name: str):
+    """Return a stable Step 1-4 business artifact for a frozen showcase."""
+    try:
+        payload = GoldenCaseService.read_artifact(case_id, artifact_name)
+        return jsonify({"success": True, "data": sanitize_public_dto(payload)})
+    except ValueError as exc:
+        return jsonify({"success": False, "error": public_error_message(exc, "演示案例产物不存在。")}), 404
+    except Exception as exc:
+        logger.exception(f"读取演示案例产物失败: {case_id}/{artifact_name}")
+        return jsonify({"success": False, "error": public_error_message(exc, "读取演示案例产物失败，请稍后重试。")}), 500
+
+
 @golden_cases_bp.route("/<case_id>/restore", methods=["POST"])
 def restore_golden_case(case_id: str):
     """

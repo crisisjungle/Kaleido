@@ -256,7 +256,7 @@ class MapSpatialSelectionContractTestCase(unittest.TestCase):
                 lat=CENTER_LAT,
                 lon=CENTER_LON,
                 radius_m=3_000,
-                profile="site_street:v4-batched-named",
+                profile="site_street:v5-batched-facilities",
             )
             manager._write_source_cache(
                 "overpass",
@@ -274,9 +274,189 @@ class MapSpatialSelectionContractTestCase(unittest.TestCase):
                     3_000,
                 )
 
-        self.assertEqual(status["status"], "cached")
+        # A legacy cache without per-batch completeness may still provide
+        # evidence, but it must not short-circuit retries or masquerade as a
+        # complete cache hit.
+        self.assertEqual(status["status"], "partial")
+        self.assertFalse(status["batch_coverage"]["complete"])
+        self.assertEqual(
+            status["batch_coverage"]["missing_batches"],
+            [
+                "administrative",
+                "water_ecology",
+                "settlement_landuse",
+                "public_facilities",
+                "critical_infrastructure",
+                "service_hubs",
+                "transport",
+            ],
+        )
         self.assertLess(features[0]["distance_m"], 2_000)
         self.assertNotEqual(features[0]["distance_m"], 99_999)
+
+    def test_partial_overpass_cache_retries_only_missing_batches(self):
+        manager = MapSeedManager()
+        manager._llm_client = None
+        cached_admin = make_feature(
+            "relation_101",
+            "缓存行政区",
+            lat=CENTER_LAT,
+            lon=CENTER_LON,
+            category="region",
+            subtype="admin_district",
+            spatial_level="district",
+        )
+        cached_admin["tags"]["overpass_batch"] = "administrative"
+        cached_batches = [
+            {"batch": "administrative", "status": "completed", "raw_element_count": 1},
+            {"batch": "water_ecology", "status": "completed", "raw_element_count": 0},
+            {"batch": "settlement_landuse", "status": "completed", "raw_element_count": 0},
+            {"batch": "public_facilities", "status": "failed", "error": "timeout"},
+            {"batch": "critical_infrastructure", "status": "completed", "raw_element_count": 0},
+            {"batch": "service_hubs", "status": "completed", "raw_element_count": 0},
+            {"batch": "transport", "status": "completed", "raw_element_count": 0},
+        ]
+        calls = []
+
+        def fake_overpass(_url, **kwargs):
+            query = str(kwargs.get("data") or "")
+            calls.append(query)
+            return {
+                "elements": [
+                    {
+                        "type": "node",
+                        "id": 202,
+                        "lat": CENTER_LAT + 0.005,
+                        "lon": CENTER_LON,
+                        "tags": {"name": "补查医院", "amenity": "hospital"},
+                    }
+                ]
+            }
+
+        with tempfile.TemporaryDirectory() as cache_dir:
+            manager.SOURCE_CACHE_DIR = cache_dir
+            cache_key = manager._source_cache_key(
+                "overpass",
+                lat=CENTER_LAT,
+                lon=CENTER_LON,
+                radius_m=3_000,
+                profile="site_street:v5-batched-facilities",
+            )
+            manager._write_source_cache(
+                "overpass",
+                cache_key,
+                features=[cached_admin],
+                status={
+                    "status": "partial",
+                    "provider": "osm_overpass",
+                    "batches": cached_batches,
+                },
+            )
+            with patch.object(Config, "OVERPASS_ENDPOINTS", ["https://example.test/interpreter"]), patch(
+                "app.services.map_seed_manager._safe_http_json",
+                side_effect=fake_overpass,
+            ):
+                features, status = manager._collect_spatial_features(
+                    CENTER_LAT,
+                    CENTER_LON,
+                    3_000,
+                )
+
+        self.assertEqual(len(calls), 1)
+        self.assertIn('amenity~"hospital|clinic|doctors', calls[0])
+        self.assertEqual(status["status"], "completed")
+        self.assertTrue(status["batch_coverage"]["complete"])
+        self.assertEqual(status["batch_coverage"]["missing_batches"], [])
+        self.assertEqual(status["category_coverage"]["coverage_ratio"], 1.0)
+        self.assertEqual({item["name"] for item in features}, {"缓存行政区", "补查医院"})
+        hospital = next(item for item in features if item["name"] == "补查医院")
+        self.assertEqual(hospital["tags"]["overpass_batch"], "public_facilities")
+
+    def test_public_facility_batch_keeps_clinic_and_shelter_as_separate_r3_candidates(self):
+        manager = MapSeedManager()
+        manager._llm_client = None
+
+        def fake_overpass(_url, **kwargs):
+            query = str(kwargs.get("data") or "")
+            if 'amenity~"hospital|clinic|doctors' not in query:
+                return {"elements": []}
+            return {
+                "elements": [
+                    {
+                        "type": "node",
+                        "id": 301,
+                        "lat": CENTER_LAT + 0.002,
+                        "lon": CENTER_LON,
+                        "tags": {"name": "社区诊所", "amenity": "clinic"},
+                    },
+                    {
+                        "type": "node",
+                        "id": 302,
+                        "lat": CENTER_LAT - 0.002,
+                        "lon": CENTER_LON,
+                        "tags": {"name": "滨海避难场所", "amenity": "shelter"},
+                    },
+                ]
+            }
+
+        with tempfile.TemporaryDirectory() as cache_dir:
+            manager.SOURCE_CACHE_DIR = cache_dir
+            with patch.object(Config, "OVERPASS_ENDPOINTS", ["https://example.test/interpreter"]), patch(
+                "app.services.map_seed_manager._safe_http_json",
+                side_effect=fake_overpass,
+            ):
+                features, status = manager._collect_spatial_features(
+                    CENTER_LAT,
+                    CENTER_LON,
+                    3_000,
+                )
+
+        by_subtype = {item["subtype"]: item for item in features}
+        self.assertIn("clinic", by_subtype)
+        self.assertIn("shelter", by_subtype)
+        self.assertEqual(by_subtype["clinic"]["tags"]["overpass_batch"], "public_facilities")
+        self.assertTrue(status["batch_coverage"]["complete"])
+
+    def test_complete_empty_overpass_result_uses_short_negative_cache(self):
+        manager = MapSeedManager()
+        manager._llm_client = None
+        call_count = 0
+
+        def empty_overpass(_url, **_kwargs):
+            nonlocal call_count
+            call_count += 1
+            return {"elements": []}
+
+        with tempfile.TemporaryDirectory() as cache_dir:
+            manager.SOURCE_CACHE_DIR = cache_dir
+            with patch.object(Config, "OVERPASS_ENDPOINTS", ["https://example.test/interpreter"]), patch.object(
+                Config,
+                "MAP_SOURCE_NEGATIVE_CACHE_TTL_SECONDS",
+                900,
+            ), patch(
+                "app.services.map_seed_manager._safe_http_json",
+                side_effect=empty_overpass,
+            ):
+                first_features, first_status = manager._collect_spatial_features(
+                    CENTER_LAT,
+                    CENTER_LON,
+                    3_000,
+                )
+                first_call_count = call_count
+                second_features, second_status = manager._collect_spatial_features(
+                    CENTER_LAT,
+                    CENTER_LON,
+                    3_000,
+                )
+
+        self.assertEqual(first_features, [])
+        self.assertEqual(first_status["status"], "empty")
+        self.assertTrue(first_status["batch_coverage"]["complete"])
+        self.assertGreater(first_call_count, 0)
+        self.assertEqual(call_count, first_call_count)
+        self.assertEqual(second_features, [])
+        self.assertEqual(second_status["status"], "cached")
+        self.assertEqual(second_status["cache_source_status"], "empty")
 
     def test_worldcover_uses_current_official_wms_contract_as_context_only(self):
         manager = MapSeedManager()
@@ -796,11 +976,75 @@ class MapSpatialSelectionContractTestCase(unittest.TestCase):
         self.assertEqual(status["query_strategy"], "thematic_batches")
         self.assertEqual(status["successful_batch_count"], 2)
         self.assertEqual(status["failed_batch_count"], 0)
+        self.assertTrue(status["batch_coverage"]["complete"])
+        self.assertEqual(status["category_coverage"]["coverage_ratio"], 1.0)
         self.assertEqual({item["batch"] for item in status["batches"]}, {
             "administrative",
             "regional_boundaries",
         })
         self.assertEqual(features[0]["name"], "测试行政区")
+
+    def test_public_skeleton_is_not_formal_when_required_categories_are_missing(self):
+        public_admin = make_feature(
+            "public_admin",
+            "公开行政区",
+            lat=CENTER_LAT,
+            lon=CENTER_LON,
+            category="region",
+            subtype="admin_district",
+            spatial_level="district",
+            provider="osm_overpass",
+        )
+        summary = summarize_source_status(
+            overpass_status={
+                "status": "partial",
+                "provider": "osm_overpass",
+                "error": "public facilities timeout",
+                "category_coverage": {
+                    "required_categories": [
+                        "administrative",
+                        "water_ecology",
+                        "settlement_landuse",
+                        "public_facilities",
+                        "critical_infrastructure",
+                        "service_hubs",
+                        "transport",
+                    ],
+                    "covered_categories": ["administrative"],
+                    "missing_categories": [
+                        "water_ecology",
+                        "settlement_landuse",
+                        "public_facilities",
+                        "critical_infrastructure",
+                        "service_hubs",
+                        "transport",
+                    ],
+                    "complete": False,
+                },
+            },
+            worldcover_status={"status": "failed"},
+            features=[public_admin],
+        )
+
+        self.assertTrue(summary["skeleton_ready"])
+        self.assertFalse(summary["formal_ready"])
+        self.assertEqual(summary["status"], "partial")
+        self.assertEqual(
+            summary["availability"]["reason_code"],
+            "required_spatial_categories_incomplete",
+        )
+        self.assertEqual(
+            summary["required_category_coverage"]["missing_categories"],
+            [
+                "water_ecology",
+                "settlement_landuse",
+                "public_facilities",
+                "critical_infrastructure",
+                "service_hubs",
+                "transport",
+            ],
+        )
+        self.assertEqual(summary["readiness"]["skeleton_ready"], True)
 
     def test_filtered_out_public_site_cannot_make_selected_reference_skeleton_formal(self):
         candidates = [

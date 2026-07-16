@@ -1,0 +1,41 @@
+{
+  "case_id": "wuhan_covid_v2",
+  "title": "武汉疫情城市系统复盘报告",
+  "executive_summary": "这条主线展示的不是单一措施的胜负，而是城市从低可见度异常、医疗与流动双重承压，逐步形成检测、收治、社区、供应和指挥协同，再进入恢复准备的系统过程。",
+  "conclusions": [
+    "早期风险的核心不是缺少主体，而是临床线索、检测能力和上报链路尚未形成短反馈环。",
+    "医疗高压阶段的关键变化来自分诊、转运、床位扩充、方舱分级和物资调度同时接入统一账本。",
+    "社区网格与供应网络将宏观政策转换为可执行的居民支持，是城市协同阶段的重要稳定器。",
+    "交通恢复并非简单回到初始状态，而是在健康核验、持续监测和备用容量约束下重新开放网络。"
+  ],
+  "policies": [
+    {"id":"monitoring_reporting","name":"监测上报","round_start":3,"round_end":9,"intent":"缩短临床异常到公共卫生研判的反馈链。"},
+    {"id":"testing_tracing","name":"检测追踪","round_start":5,"round_end":26,"intent":"提高病例可见度并补齐接触关系。"},
+    {"id":"transport_control","name":"交通管控","round_start":10,"round_end":28,"intent":"在传播确认阶段重塑高强度跨区流动。"},
+    {"id":"capacity_expansion","name":"医疗扩容","round_start":12,"round_end":27,"intent":"通过定点收治、应急医院、方舱和转运降低容量摩擦。"},
+    {"id":"supply_community","name":"社区治理与供应保障","round_start":12,"round_end":31,"intent":"承接居民排查、重点照护、药品与生活物资连续性。"},
+    {"id":"phased_recovery","name":"分阶段恢复","round_start":26,"round_end":36,"intent":"在持续监测与健康核验约束下恢复城市网络。"}
+  ],
+  "risks": [
+    {"id":"hidden_transmission","name":"隐匿传播","description":"异常病例在发现、检测和上报链路之外继续形成接触关系。"},
+    {"id":"healthcare_overload","name":"医疗挤兑","description":"分诊、检验、转运和床位需求同时超过可协调容量。"},
+    {"id":"cross_district_mobility","name":"跨区流动","description":"交通枢纽与日常流动连接多个局部风险网络。"},
+    {"id":"supply_continuity","name":"供应与生活连续性","description":"医疗与生活物资无法按需求稳定到达机构和社区。"},
+    {"id":"information_trust","name":"信息与信任波动","description":"不确定信息、服务落差和反馈延迟削弱社会协同。"}
+  ],
+  "turning_points": [
+    {"id":"turning_detection","round":3,"title":"异常线索进入上报链路","summary":"零散临床信号开始被组织为可复核的公共卫生事件。"},
+    {"id":"turning_confirmation","round":9,"title":"人际传播风险升级","summary":"医护感染与跨区就诊路径使风险从局部聚集转为城市系统问题。"},
+    {"id":"turning_mobility","round":11,"title":"离汉通道管控","summary":"交通网络从传播通道转为受控保障网络。"},
+    {"id":"turning_capacity","round":15,"title":"方舱进入分级收治网络","summary":"轻症收治、定点救治与社区转介形成新的容量结构。"},
+    {"id":"turning_coordination","round":24,"title":"跨系统联合调度成形","summary":"床位、物资、社区诉求和风险态势被放入同一协同节奏。"},
+    {"id":"turning_recovery","round":36,"title":"城市网络重启","summary":"离汉交通恢复，但持续监测与健康核验仍保留。"}
+  ],
+  "uncertainty_boundaries": [
+    "Agent、主体关系、每轮行动细节与连续状态均为策划推演，用于展示系统机制，不代表逐人逐事的历史记录。",
+    "政策观察只比较主线账本中介入前后的状态变化，不宣称未经反事实验证的因果效果。",
+    "空间锚点包含真实公开地点、区级聚合空间和功能网络；聚合空间不对应单一物理地址。",
+    "华南海鲜市场只作为早期病例聚集锚点，不表达为疫情起源。"
+  ],
+  "report_sections": ["案例边界","六条故事线","关键转折","五类风险结果","政策观察","节点探索","证据索引","不确定性边界"]
+}

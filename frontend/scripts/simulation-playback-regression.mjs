@@ -1,5 +1,8 @@
 import assert from 'node:assert/strict'
 import {
+  advanceContinuousPlayhead,
+  buildContinuousPlaybackPlan,
+  buildContinuousPlaybackSnapshot,
   buildPlaybackFrame,
   buildPropagationState,
   buildTimelineBaseState,
@@ -214,7 +217,7 @@ const denseFrame = buildPlaybackFrame({ timeline: { events: denseEvents } }, { r
   isPlaying: true,
 })
 assert.equal(denseFrame.propagation_events.length, 18, '高密度轮次必须限制可读的传播前沿')
-assert(denseFrame.active_propagation_event_ids.length <= 6, '同一时刻不得把整轮关系同时点亮')
+assert(denseFrame.active_propagation_event_ids.length <= 3, '同一时刻最多保留三条可读传播路径')
 assert(
   denseFrame.propagation_events.some(event => event.phase === 'relationship_change'),
   '高密度抽样必须保留后续关系阶段，不能只展示最早一类事件',
@@ -263,11 +266,10 @@ const phaseBalancedFrame = buildPlaybackFrame({
   durationMs: 1600,
   isPlaying: true,
 })
-assert.equal(phaseBalancedFrame.active_propagation_event_ids.length, 6, '阶段轮询后仍必须遵守六条并发上限')
+assert.equal(phaseBalancedFrame.active_propagation_event_ids.length, 3, '阶段轮询后仍必须遵守三条并发上限')
 assert(
-  phaseBalancedFrame.active_propagation_event_ids.includes('balanced-diffusion-0')
-    && phaseBalancedFrame.active_propagation_event_ids.includes('balanced-diffusion-1'),
-  '尚未结束的爆发扩散波不得被较晚启动的 Agent 事件挤出当前传播层',
+  phaseBalancedFrame.active_propagation_event_ids.includes('balanced-diffusion-0'),
+  '尚未结束的爆发扩散主波不得被较晚启动的 Agent 事件挤出当前传播层',
 )
 assert(
   phaseBalancedFrame.active_propagation_event_ids.some(id => id.startsWith('balanced-agent-'))
@@ -362,8 +364,13 @@ const concurrentFrame = buildPlaybackFrame(concurrentPayload, { round: 9 }, {
   durationMs: 1200,
 })
 const concurrentState = buildPropagationState(concurrentFrame)
-assert.equal(concurrentFrame.active_propagation_event_ids.length, 6, '当前传播事件必须受统一并发上限约束')
-assert.equal(concurrentState.pairStates.size, 6, '左侧图谱必须只渲染右侧当前波所列的同一批事件')
+assert.equal(concurrentFrame.active_propagation_event_ids.length, 3, '当前传播事件必须受统一三条并发上限约束')
+assert.equal(concurrentState.pairStates.size, 3, '左侧图谱必须只渲染右侧当前波所列的同一批事件')
+const mapConcurrentState = buildPropagationState(concurrentFrame, {
+  maxActiveEvents: 2,
+  maxTrailEvents: 2,
+})
+assert.equal(mapConcurrentState.pairStates.size, 2, '地图必须在共享故事顺序中最多突出两条前景传播路径')
 
 const explicitParallelFrame = buildPlaybackFrame({
   timeline: {
@@ -493,6 +500,158 @@ assert.deepEqual(
   '无边 ID 且同端点有多条业务边时只能选择一条确定性的中性可视路径',
 )
 
+const crossRoundPayload = {
+  frames: [
+    { round: 0, node_states: [], edge_states: [], focus_ids: { node_ids: [], edge_ids: [] } },
+    { round: 1, node_states: [], edge_states: [], focus_ids: { node_ids: [], edge_ids: [] } },
+  ],
+  timeline: {
+    contract_version: 'simulation-playback-timeline.v2',
+    events: [
+      {
+        id: 'cross-round-parent',
+        round: 0,
+        phase: 'environment_diffusion',
+        kind: 'spread_applied',
+        source: { node_ids: ['cross-source'] },
+        target: { node_ids: ['cross-middle'] },
+        path_edge_ids: ['cross-parent-edge'],
+        related_edge_ids: [],
+        timing: { start_ms: 0, duration_ms: 600 },
+      },
+      {
+        id: 'cross-round-child',
+        round: 1,
+        phase: 'environment_diffusion',
+        kind: 'spread_applied',
+        parent_event_ids: ['cross-round-parent'],
+        source: { node_ids: ['cross-middle'] },
+        target: { node_ids: ['cross-target'] },
+        path_edge_ids: ['cross-child-edge'],
+        related_edge_ids: [],
+        timing: { start_ms: 0, duration_ms: 600 },
+      },
+    ],
+  },
+}
+const crossRoundPlan = buildContinuousPlaybackPlan(crossRoundPayload)
+assert.equal(crossRoundPlan.source_mode, 'compiled_v2_round_segments', 'Timeline V2 必须进入连续 round 段兼容编译')
+assert.equal(crossRoundPlan.rounds[1].start_ms, crossRoundPlan.rounds[0].end_ms, '相邻轮次必须共享一个无空帧的全局边界')
+const plannedCrossParent = crossRoundPlan.events.find(event => event.event_id === 'cross-round-parent')
+const plannedCrossChild = crossRoundPlan.events.find(event => event.event_id === 'cross-round-child')
+assert(
+  plannedCrossChild.timing.global_start_ms >= plannedCrossParent.timing.global_end_ms,
+  '跨轮子事件不得在父传播完成前启动',
+)
+const crossBoundarySnapshot = buildContinuousPlaybackSnapshot(
+  crossRoundPayload,
+  crossRoundPlan,
+  crossRoundPlan.rounds[1].start_ms + 100,
+  { isPlaying: true },
+)
+assert.equal(crossBoundarySnapshot.round, 1, '全局 playhead 跨过 checkpoint 后必须派生下一轮')
+assert(
+  crossBoundarySnapshot.playback_global_elapsed_ms > crossRoundPlan.rounds[0].end_ms,
+  '跨轮后全局 playhead 不得归零',
+)
+assert.equal(crossBoundarySnapshot.playback_round_elapsed_ms, 100, '轮内 elapsed 只能作为状态投影的派生值')
+assert(
+  crossBoundarySnapshot.trail_propagation_event_ids.includes('cross-round-parent'),
+  '跨轮子事件启动时必须保留父路径的低亮视觉记忆',
+)
+const crossBoundaryState = buildPropagationState(crossBoundarySnapshot)
+assert.equal(crossBoundaryState.edgeStates.get('cross-parent-edge')?.status, 'faded', '父路径 trail 必须降级为低亮而不是重新激活')
+
+const v3Payload = {
+  frames: [{ round: 0 }, { round: 1 }],
+  timeline: {
+    contract_version: 'simulation-playback-timeline.v3',
+    clock: {
+      unit: 'millisecond',
+      basis: 'committed_story_clock',
+      committed_start_ms: 1000,
+      committed_end_ms: 7000,
+    },
+    head: { cursor: 2, checkpoint_round: 1, committed_end_ms: 7000 },
+    rounds: [
+      { round: 0, start_ms: 1000, end_ms: 3000, duration_ms: 2000, start_cursor: 0, end_cursor: 1, checkpoint_id: 'checkpoint-0' },
+      { round: 1, start_ms: 3000, end_ms: 7000, duration_ms: 4000, start_cursor: 1, end_cursor: 2, checkpoint_id: 'checkpoint-1' },
+    ],
+    events: [
+      {
+        id: 'v3-parent',
+        round: 0,
+        kind: 'spread_applied',
+        source: { node_ids: ['v3-source'] },
+        target: { node_ids: ['v3-middle'] },
+        path_edge_ids: ['v3-parent-edge'],
+        timing: { local_start_ms: 200, global_start_ms: 1200, duration_ms: 1000, global_end_ms: 2200 },
+      },
+      {
+        id: 'v3-child',
+        round: 1,
+        kind: 'spread_applied',
+        parent_event_ids: ['v3-parent'],
+        source: { node_ids: ['v3-middle'] },
+        target: { node_ids: ['v3-target'] },
+        path_edge_ids: ['v3-child-edge'],
+        timing: { local_start_ms: 200, global_start_ms: 3200, duration_ms: 1200, global_end_ms: 4400 },
+      },
+    ],
+  },
+}
+const v3Plan = buildContinuousPlaybackPlan(v3Payload)
+assert.equal(v3Plan.source_mode, 'timeline_v3_global_clock', 'Timeline V3 的后端 global clock 必须优先于前端 fallback')
+assert.equal(v3Plan.duration_ms, 6000, 'V3 committed clock 必须归一化为一个连续播放区间')
+assert.equal(v3Plan.rounds[1].start_ms, 2000, 'V3 round checkpoint 必须相对 committed_start_ms 归一化')
+assert.equal(v3Plan.events[0].timing.global_start_ms, 200, 'V3 event global timing 必须保持后端权威相对位置')
+assert.equal(v3Plan.events[1].timing.global_start_ms, 2200, 'V3 子事件不得被 V2 编译器重新排期')
+const v3Snapshot = buildContinuousPlaybackSnapshot(v3Payload, v3Plan, 2300, { isPlaying: true })
+assert.equal(v3Snapshot.round, 1)
+assert.equal(v3Snapshot.playback_global_elapsed_ms, 2300)
+assert.equal(v3Snapshot.playback_started_event_count, 2, '已延展关系必须按全局 playhead 单调累计，不能随 trail 消失回落')
+const settledV3Snapshot = buildContinuousPlaybackSnapshot(v3Payload, v3Plan, 5000, { isPlaying: true })
+assert.equal(settledV3Snapshot.propagation_events.length, 0, 'renderer 不得在传播完成后持续接收历史事件')
+assert.equal(settledV3Snapshot.playback_started_event_count, 2, '传播间隙的累计关系数不得回落为零')
+assert.deepEqual(
+  settledV3Snapshot.recent_completed_propagation_events.map(event => event.event_id),
+  ['v3-child', 'v3-parent'],
+  '传播间隙仍须为右栏保留最近完成的主链，而不是重新清空故事',
+)
+
+const pausedAt = 3500
+const normalAdvance = advanceContinuousPlayhead(pausedAt, 100, 0.5, 10000)
+const fasterAdvance = advanceContinuousPlayhead(normalAdvance, 100, 2, 10000)
+assert.equal(normalAdvance, 3550, '恢复播放必须从暂停 playhead 继续，不能回到轮首')
+assert.equal(fasterAdvance, 3750, '切换播放速率只能改变后续增量，不能重启当前轮次')
+
+const canonicalPacingPayload = {
+  frames: Array.from({ length: 10 }, (_, round) => ({ round })),
+  timeline: {
+    contract_version: 'simulation-playback-timeline.v2',
+    events: Array.from({ length: 10 }, (_, round) => (
+      Array.from({ length: 12 }, (_, index) => ({
+        id: `canonical-${round}-${index}`,
+        round,
+        phase: index < 3 ? 'environment_diffusion' : index < 9 ? 'agent_response' : 'relationship_change',
+        kind: index < 3 ? 'spread_applied' : index < 9 ? 'agent_interaction' : 'relationship_event',
+        source: { node_ids: [`canonical-source-${round}-${index}`] },
+        target: { node_ids: [`canonical-target-${round}-${index}`] },
+        path_edge_ids: [`canonical-edge-${round}-${index}`],
+        timing: {
+          start_ms: index < 3 ? index * 160 : index < 9 ? 520 + (index - 3) * 80 : 1040 + (index - 9) * 160,
+          duration_ms: index < 3 ? 760 : index < 9 ? 560 : 520,
+        },
+      }))
+    )).flat(),
+  },
+}
+const canonicalPacingPlan = buildContinuousPlaybackPlan(canonicalPacingPayload)
+assert(
+  canonicalPacingPlan.duration_ms >= 45000 && canonicalPacingPlan.duration_ms <= 60000,
+  `十轮 canonical 故事节奏应在约 45-60 秒，实际为 ${canonicalPacingPlan.duration_ms}ms`,
+)
+
 const mergedPayload = mergeAnimationPayload({
   frames: [{ round: 1, marker: 'history-1' }, { round: 2, marker: 'history-2' }],
   timeline: { cursor: 2, events: [{ id: 'history-event', round: 2, sequence: 2 }] },
@@ -502,6 +661,35 @@ const mergedPayload = mergeAnimationPayload({
 })
 assert.deepEqual(mergedPayload.frames.map(frame => frame.round), [1, 2, 3], '增量帧必须按轮次稳定合并')
 assert.equal(mergedPayload.frames[1].marker, 'history-2', '重复轮次不得替换已经播放的历史帧')
+
+const mergedV3Payload = mergeAnimationPayload({
+  frames: [{ round: 0 }],
+  timeline: {
+    contract_version: 'simulation-playback-timeline.v3',
+    timeline_id: 'timeline::stable',
+    clock: { committed_end_ms: 3000 },
+    head: { cursor: 1, checkpoint_round: 0 },
+    rounds: [{ round: 0, start_ms: 0, end_ms: 3000, duration_ms: 3000, checkpoint_id: 'checkpoint-0' }],
+    events: [{ id: 'stable-0', round: 0, sequence: 1 }],
+  },
+}, {
+  frames: [{ round: 1 }],
+  timeline: {
+    contract_version: 'simulation-playback-timeline.v3',
+    timeline_id: 'timeline::stable',
+    clock: { committed_end_ms: 7000 },
+    head: { cursor: 2, checkpoint_round: 1 },
+    rounds: [{ round: 1, start_ms: 3000, end_ms: 7000, duration_ms: 4000, checkpoint_id: 'checkpoint-1' }],
+    events: [{ id: 'stable-1', round: 1, sequence: 2 }],
+  },
+})
+assert.equal(mergedV3Payload.timeline.timeline_id, 'timeline::stable')
+assert.equal(mergedV3Payload.timeline.clock.committed_end_ms, 7000, '增量合并必须推进 V3 committed clock')
+assert.deepEqual(
+  mergedV3Payload.timeline.rounds.map(round => round.checkpoint_id),
+  ['checkpoint-0', 'checkpoint-1'],
+  '增量合并不得丢失 V3 round checkpoint 元数据',
+)
 
 const laterRoundSelectionGraph = {
   nodes: [

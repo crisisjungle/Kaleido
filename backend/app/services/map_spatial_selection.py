@@ -554,15 +554,22 @@ def summarize_source_status(
     ]
     fallback_providers = sorted({_provider_of(feature) for feature in fallback_features})
     fallback_count = len(fallback_features)
-    overpass_ok = str(overpass_status.get("status") or "").lower() in {"completed", "ready", "cached"}
+    required_category_coverage = _required_category_coverage(overpass_status)
+    overpass_ok = (
+        str(overpass_status.get("status") or "").lower() in {"completed", "ready", "cached"}
+        and bool(required_category_coverage["complete"])
+    )
     worldcover_ok = str(worldcover_status.get("status") or "").lower() in {"completed", "ready", "cached"}
     worldcover_analytic_ok = worldcover_ok and str(
         worldcover_status.get("analysis_grade") or ""
     ).lower() not in {"contextual_only", "visualization_only"}
 
-    if overpass_ok and worldcover_analytic_ok and public_count > 0:
+    skeleton_ready = bool(public_count > 0)
+    formal_ready = bool(skeleton_ready and overpass_ok)
+
+    if formal_ready and worldcover_analytic_ok:
         status = "complete"
-    elif public_count > 0:
+    elif skeleton_ready:
         status = "partial"
     else:
         status = "unavailable"
@@ -574,7 +581,6 @@ def summarize_source_status(
     blocking_failures = [
         failure for failure in provider_failures if failure["required_for_formal_ready"]
     ]
-    formal_ready = bool(public_count > 0)
     if formal_ready:
         availability = {
             "status": "ready",
@@ -585,28 +591,48 @@ def summarize_source_status(
             "provider_failures": provider_failures,
         }
     else:
-        retryable = any(bool(item.get("retryable")) for item in blocking_failures)
-        reason_code = (
-            str(blocking_failures[0].get("reason_code") or "formal_provider_unavailable")
-            if blocking_failures
-            else "no_formal_features_selected"
+        category_coverage_incomplete = (
+            required_category_coverage.get("contract_source") != "legacy_provider_status"
+            and not bool(required_category_coverage["complete"])
         )
+        retryable = category_coverage_incomplete or any(
+            bool(item.get("retryable")) for item in blocking_failures
+        )
+        if category_coverage_incomplete:
+            reason_code = "required_spatial_categories_incomplete"
+        else:
+            reason_code = (
+                str(blocking_failures[0].get("reason_code") or "formal_provider_unavailable")
+                if blocking_failures
+                else "no_formal_features_selected"
+            )
         availability = {
             "status": "unavailable",
             "available": False,
             "retryable": retryable,
             "reason_code": reason_code,
             "message": (
-                "正式地理数据暂时不可用，可以重新获取。"
-                if retryable
-                else "当前没有取得可用于正式空间判断的地理数据。"
+                "必要空间类别尚未完整取得，可以重新获取。"
+                if category_coverage_incomplete
+                else (
+                    "正式地理数据暂时不可用，可以重新获取。"
+                    if retryable
+                    else "当前没有取得可用于正式空间判断的地理数据。"
+                )
             ),
             "provider_failures": provider_failures,
         }
 
     return {
         "status": status,
+        "skeleton_ready": skeleton_ready,
+        "required_category_coverage": required_category_coverage,
         "formal_ready": formal_ready,
+        "readiness": {
+            "skeleton_ready": skeleton_ready,
+            "required_category_coverage": required_category_coverage,
+            "formal_ready": formal_ready,
+        },
         "availability": availability,
         "retryable": bool(availability["retryable"]),
         "reason_code": availability["reason_code"],
@@ -623,10 +649,75 @@ def summarize_source_status(
             "worldcover": dict(worldcover_status or {}),
         },
         "warning": (
-            "正式地理数据不可用；参考地点和背景数据仅保留为诊断记录，不得进入正式空间分析。"
-            if public_count == 0
-            else ""
+            "必要空间类别尚未完整取得；已有空间骨架不能视为完整正式数据。"
+            if skeleton_ready and not formal_ready
+            else (
+                "正式地理数据不可用；参考地点和背景数据仅保留为诊断记录，不得进入正式空间分析。"
+                if public_count == 0
+                else ""
+            )
         ),
+    }
+
+
+def _required_category_coverage(overpass_status: Mapping[str, Any]) -> Dict[str, Any]:
+    """Normalize new batch coverage while keeping legacy completed payloads valid."""
+
+    payload = dict(overpass_status or {})
+    category_coverage = payload.get("category_coverage")
+    if isinstance(category_coverage, Mapping):
+        required = list(
+            dict.fromkeys(
+                str(item or "").strip()
+                for item in category_coverage.get("required_categories") or []
+                if str(item or "").strip()
+            )
+        )
+        covered = list(
+            dict.fromkeys(
+                str(item or "").strip()
+                for item in category_coverage.get("covered_categories") or []
+                if str(item or "").strip()
+            )
+        )
+        missing = [item for item in required if item not in set(covered)]
+        complete = bool(category_coverage.get("complete")) and not missing
+        return {
+            "required_categories": required,
+            "covered_categories": covered,
+            "missing_categories": missing,
+            "complete": complete,
+            "coverage_ratio": round(len(covered) / len(required), 4) if required else (1.0 if complete else 0.0),
+            "contract_source": "category_coverage_v1",
+        }
+
+    batch_coverage = payload.get("batch_coverage")
+    if isinstance(batch_coverage, Mapping):
+        required = list(batch_coverage.get("expected_batches") or [])
+        covered = list(batch_coverage.get("completed_batches") or [])
+        missing = [item for item in required if item not in set(covered)]
+        complete = bool(batch_coverage.get("complete")) and not missing
+        return {
+            "required_categories": required,
+            "covered_categories": covered,
+            "missing_categories": missing,
+            "complete": complete,
+            "coverage_ratio": round(len(covered) / len(required), 4) if required else (1.0 if complete else 0.0),
+            "contract_source": "batch_coverage_v1",
+        }
+
+    # Frozen fixtures and previously persisted seeds predate batch metadata.
+    # Preserve their existing meaning, while every newly collected Overpass
+    # result emits explicit category coverage and cannot use this projection.
+    state = str(payload.get("status") or "").strip().lower()
+    legacy_complete = state in {"completed", "ready", "cached"}
+    return {
+        "required_categories": [],
+        "covered_categories": [],
+        "missing_categories": [],
+        "complete": legacy_complete,
+        "coverage_ratio": 1.0 if legacy_complete else 0.0,
+        "contract_source": "legacy_provider_status",
     }
 
 

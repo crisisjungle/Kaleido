@@ -107,7 +107,7 @@
 - `complete`：Overpass 可用、分析级 WorldCover 可用且存在公开空间观测。当前 WMS 不是分析级，因此在迁移到 COG 前通常不能达到这一完整条件。
 - `partial`：最终入选骨架已有公开正式观测，但某个辅助来源或类别仍不足；结果可以进入正式流程，同时必须展示缺失来源。
 - `unavailable`：最终入选骨架没有公开正式观测；即使仍有逆地理、天气、WMS 背景或本地参考点，也不能称为已完成。
-- `formal_ready=true`：最终入选的空间骨架中至少存在来自 `osm_overpass`/OSM 或未来 `worldcover_cog` 的公开分析级空间观测；仅仅在候选池里出现、随后被粒度或焦点规则淘汰的 OSM 点不能让结果变成正式可用。
+- `formal_ready=true`：最终入选的空间骨架中至少存在公开分析级空间观测，且当前查询策略要求的所有 Overpass 类别/批次均已完整执行；仅仅出现一个行政区或某个公开节点、或只有部分批次返回，都不能让结果变成正式可用。
 - `formal_ready=false`：地图种子最终状态为 `unavailable`，仅保存诊断图层/报告用于排错；不得把结果描述成“已完成公开地理与卫星事实识别”，也不得让参考地名或天气中心点伪装成正式证据。
 
 地图种子采用二元门槛：只有 `status=ready && data_quality.formal_ready=true` 才可进入正式推演；否则统一为 `status=unavailable`。异步任务不会把不可用结果记为 completed，而会以失败终态携带结构化 `availability`。状态接口同时返回 `available`、`retryable`、`reason_code` 和 `provider_failures`；每个 provider 失败包含是否为正式门槛、归一化原因、可否重试、原始错误、尝试和批次诊断。旧的 `status=ready/formal_ready=false` 记录在 API 层也会归一化为不可用。诊断文件仍保留，但默认图谱、图层和报告访问器不会把它们交给下游，项目创建与 seed-to-simulation 接口会硬阻断。
@@ -187,7 +187,8 @@ Agent 的生成与投影遵循以下边界：
 - 当前缓存按近似位置和半径复用，提升了稳定性但可能带来最长一个 TTL 的陈旧数据；高时效灾情对象需要独立实时源。
 - OSM 在不同城市和地区的标注密度、名称完整度和行政边界质量不一致；空间/类别均衡只能降低偏差，不能补齐不存在的数据。
 - 中文地点抽取目前支持常见行政后缀简称、候选名称和地址标签匹配；非行政俗称、跨语言名称及“我主要看右边/靠海一侧”等相对表达仍需更强的实体解析或用户显式确认。
-- `formal_ready` 当前判断是否存在公开分析级空间观测，不代表每一种关键类别都已覆盖。后续可按场景增加必需证据集合，例如污染场景必须同时有受体与污染源，疏散场景必须有居住/交通/医疗证据。
+- 新地图种子同时记录 `skeleton_ready`、`required_category_coverage` 和兼容字段 `formal_ready`。`formal_ready` 只有在公开空间骨架存在、当前查询策略的必需批次全部完成且 Overpass 状态有效时才为真；一个行政区或任意公开节点不能再单独触发正式就绪。
+- 批次完成不等于场景设施覆盖。Step 2 通过 `FacilityQueryPlan` 和 `SpatialRefinementSnapshot` 另行判断医院、核设施、监测站、避难设施等 R3/R4 需求，详见 `docs/modules/spatial-evidence-resolution.md`。
 - `formal_ready=false` 已在地图种子状态、任务状态、派生文件访问器、项目创建和 seed-to-simulation 接口上硬阻断；若未来允许人工确认覆盖，必须设计独立、可审计的显式流程，不能重新复用 `ready`。
 - 历史 seed 若没有 `data_quality`，一律按 `formal_ready=false/status=unknown` 处理；其既有坐标会显示为示意位置（AOI 范围节点除外），重新生成区域时只保留单一 AOI，不再沿用旧参考点聚类。
 - 本次规则改变地图种子和下游空间合同。若冻结 Demo 依赖旧合同，应提升 golden artifact contract version 并刷新夹具；纯样式变化仍应留在共享组件中。

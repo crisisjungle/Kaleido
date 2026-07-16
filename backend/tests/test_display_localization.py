@@ -196,6 +196,21 @@ def test_report_markdown_projection_preserves_layout_and_removes_internal_blocks
     assert find_public_display_leaks(projected) == []
 
 
+def test_report_markdown_keeps_citation_labels_without_broken_link_fragments():
+    projected = sanitize_public_dto({
+        "markdown_content": (
+            "## 证据索引\n\n"
+            "- [世界卫生组织新冠疫情时间线](https://www.who.int/news/item/covidtimeline)（世界卫生组织）"
+        )
+    })
+
+    markdown = projected["markdown_content"]
+    assert "世界卫生组织新冠疫情时间线（世界卫生组织）" in markdown
+    assert "https://" not in markdown
+    assert "](" not in markdown
+    assert find_public_display_leaks(projected) == []
+
+
 def test_report_summary_keeps_business_prose_when_legacy_aliases_are_present():
     projected = sanitize_public_dto({
         "outline": {

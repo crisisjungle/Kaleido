@@ -104,6 +104,7 @@ class UserEventInput:
     order: int
     target_region_ids: List[str] = field(default_factory=list)
     target_entity_ids: List[str] = field(default_factory=list)
+    target_labels: List[str] = field(default_factory=list)
     atomic_keys: List[str] = field(default_factory=list)
     open_concept: str = ""
     expected_effects: List[str] = field(default_factory=list)
@@ -112,6 +113,7 @@ class UserEventInput:
     intensity_label_zh: str = ""
     start_round: Optional[int] = None
     duration_rounds: Optional[int] = None
+    source_origin: str = "step2_user"
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -125,6 +127,7 @@ class UserPolicyInput:
     order: int = 1
     target_region_ids: List[str] = field(default_factory=list)
     target_entity_ids: List[str] = field(default_factory=list)
+    target_labels: List[str] = field(default_factory=list)
     action_primitives: List[str] = field(default_factory=list)
     executor_capability_keys: List[str] = field(default_factory=list)
     expected_effects: List[str] = field(default_factory=list)
@@ -134,6 +137,7 @@ class UserPolicyInput:
     intensity_label_zh: str = ""
     start_round: Optional[int] = None
     duration_rounds: Optional[int] = None
+    source_origin: str = "step2_user"
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -183,6 +187,10 @@ class ScenarioPlanningInput:
     role_demands: List[Dict[str, Any]]
     assumptions: List[str]
     semantic_artifact_ref: Dict[str, Any] = field(default_factory=dict)
+    step1_suggestion_ref: Dict[str, Any] = field(default_factory=dict)
+    resolved_foundation_ref: Dict[str, Any] = field(default_factory=dict)
+    input_kind: str = "scenario_configuration"
+    input_authority: str = "authoritative"
     simulation_architecture: str = SIMULATION_ARCHITECTURE
     compatibility: Dict[str, Any] = field(
         default_factory=lambda: {
@@ -942,6 +950,8 @@ class ScenarioPlanner:
                 user_policies=raw.get("policy_inputs") or [],
                 advanced_overrides=overrides,
                 semantic_artifact_ref=raw.get("semantic_artifact_ref"),
+                step1_suggestion_ref=raw.get("step1_suggestion_ref"),
+                resolved_foundation_ref=raw.get("resolved_foundation_ref"),
             )
         return self.build_from_legacy(
             foundation=foundation,
@@ -958,6 +968,8 @@ class ScenarioPlanner:
         user_policies: Optional[Sequence[UserPolicyInput | Mapping[str, Any]]],
         advanced_overrides: Optional[Mapping[str, Any]] = None,
         semantic_artifact_ref: Optional[Mapping[str, Any]] = None,
+        step1_suggestion_ref: Optional[Mapping[str, Any]] = None,
+        resolved_foundation_ref: Optional[Mapping[str, Any]] = None,
     ) -> ScenarioPlanningInput:
         foundation_ref = self._normalize_foundation_ref(foundation)
         effort_ref, effort_assumptions = self._normalize_effort_ref(effort_snapshot_ref)
@@ -989,6 +1001,10 @@ class ScenarioPlanner:
             "role_demands": role_demands,
             "assumptions": assumptions,
             "semantic_artifact_ref": dict(semantic_artifact_ref or {}),
+            "step1_suggestion_ref": dict(step1_suggestion_ref or {}),
+            "resolved_foundation_ref": dict(resolved_foundation_ref or foundation_ref),
+            "input_kind": "scenario_configuration",
+            "input_authority": "authoritative",
         }
         planning_input_id = _stable_id("scenario_plan", semantic_payload)
         artifact = ScenarioPlanningInput(
@@ -1005,6 +1021,10 @@ class ScenarioPlanner:
             role_demands=role_demands,
             assumptions=assumptions,
             semantic_artifact_ref=dict(semantic_artifact_ref or {}),
+            step1_suggestion_ref=dict(step1_suggestion_ref or {}),
+            resolved_foundation_ref=dict(resolved_foundation_ref or foundation_ref),
+            input_kind="scenario_configuration",
+            input_authority="authoritative",
         )
         payload_without_hash = artifact.to_dict()
         payload_without_hash["content_hash"] = ""
@@ -1052,12 +1072,18 @@ class ScenarioPlanner:
                 raw.get("target_entity_ids") if raw.get("target_entity_ids") is not None else raw.get("target_nodes"),
                 f"灾害事件 {index} 的目标设施或对象",
             )
+            target_labels = _normalize_id_list(
+                raw.get("target_labels") if raw.get("target_labels") is not None else raw.get("target_text"),
+                f"灾害事件 {index} 的目标名称",
+            )
             atomic_keys = _unique_strings(raw.get("atomic_keys") or [])
             intensity = raw.get("intensity") if isinstance(raw.get("intensity"), Mapping) else {}
             time_data = raw.get("time") if isinstance(raw.get("time"), Mapping) else {}
             input_id = _clean_text(raw.get("input_id") or raw.get("variable_id"))
             if not input_id:
-                input_id = _stable_id("event_input", index, name, description, target_region_ids, target_entity_ids)
+                input_id = _stable_id(
+                    "event_input", index, name, description, target_region_ids, target_entity_ids, target_labels
+                )
             if input_id in seen_ids:
                 raise ValueError(f"灾害事件输入标识重复: {input_id}")
             seen_ids.add(input_id)
@@ -1069,6 +1095,7 @@ class ScenarioPlanner:
                     order=order,
                     target_region_ids=target_region_ids,
                     target_entity_ids=target_entity_ids,
+                    target_labels=target_labels,
                     atomic_keys=atomic_keys,
                     open_concept=_clean_text(raw.get("open_concept")),
                     expected_effects=_unique_strings(raw.get("expected_effects") or []),
@@ -1089,6 +1116,7 @@ class ScenarioPlanner:
                         if time_data.get("duration_rounds") is not None
                         else None
                     ),
+                    source_origin=_clean_text(raw.get("source_origin")) or "step2_user",
                 )
             )
         return sorted(normalized, key=lambda item: (item.order, item.input_id))
@@ -1117,9 +1145,15 @@ class ScenarioPlanner:
                 raw.get("target_entity_ids") if raw.get("target_entity_ids") is not None else raw.get("target_nodes"),
                 f"政策措施 {index} 的目标设施或对象",
             )
+            target_labels = _normalize_id_list(
+                raw.get("target_labels") if raw.get("target_labels") is not None else raw.get("target_text"),
+                f"政策措施 {index} 的目标名称",
+            )
             input_id = _clean_text(raw.get("input_id") or raw.get("variable_id"))
             if not input_id:
-                input_id = _stable_id("policy_input", index, name, intent, target_region_ids, target_entity_ids)
+                input_id = _stable_id(
+                    "policy_input", index, name, intent, target_region_ids, target_entity_ids, target_labels
+                )
             if input_id in seen_ids:
                 raise ValueError(f"政策措施输入标识重复: {input_id}")
             seen_ids.add(input_id)
@@ -1131,6 +1165,7 @@ class ScenarioPlanner:
                     order=order,
                     target_region_ids=target_region_ids,
                     target_entity_ids=target_entity_ids,
+                    target_labels=target_labels,
                     action_primitives=_unique_strings(raw.get("action_primitives") or []),
                     executor_capability_keys=_unique_strings(raw.get("executor_capability_keys") or []),
                     expected_effects=_unique_strings(raw.get("expected_effects") or []),
@@ -1157,6 +1192,7 @@ class ScenarioPlanner:
                         and (raw.get("time") or {}).get("duration_rounds") is not None
                         else None
                     ),
+                    source_origin=_clean_text(raw.get("source_origin")) or "step2_user",
                 )
             )
         return sorted(normalized, key=lambda item: (item.order, item.input_id))
@@ -2091,7 +2127,18 @@ class ScenarioPlanner:
             "content_hash": content_hash,
             "contract_version": _clean_text(raw.get("contract_version")) or "foundation.legacy",
         }
-        for key in ("region_ids", "regions", "selected_regions", "location", "project_id", "graph_id"):
+        for key in (
+            "region_ids",
+            "regions",
+            "selected_regions",
+            "location",
+            "project_id",
+            "graph_id",
+            "map_seed_id",
+            "target_catalog",
+            "scene_semantics",
+            "semantic_artifact_ref",
+        ):
             if key in raw:
                 result[key] = raw[key]
         return result

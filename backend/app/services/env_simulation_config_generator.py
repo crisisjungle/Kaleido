@@ -357,6 +357,12 @@ class EnvSimulationConfig:
     simulation_audit: Dict[str, Any] = field(default_factory=dict)
     effort_snapshot: Dict[str, Any] = field(default_factory=dict)
     scenario_planning_input: Dict[str, Any] = field(default_factory=dict)
+    event_inputs: List[Dict[str, Any]] = field(default_factory=list)
+    policy_inputs: List[Dict[str, Any]] = field(default_factory=list)
+    resolved_foundation_ref: Dict[str, Any] = field(default_factory=dict)
+    step1_suggestion_ref: Dict[str, Any] = field(default_factory=dict)
+    scenario_input_authority: str = ""
+    scenario_definition: Dict[str, Any] = field(default_factory=dict)
     agent_plan_source: str = ""
     agent_plan_contract_version: str = ""
     agent_plan: Dict[str, Any] = field(default_factory=dict)
@@ -429,6 +435,12 @@ class EnvSimulationConfig:
             "simulation_audit": self.simulation_audit,
             "effort_snapshot": self.effort_snapshot,
             "scenario_planning_input": self.scenario_planning_input,
+            "event_inputs": self.event_inputs,
+            "policy_inputs": self.policy_inputs,
+            "resolved_foundation_ref": self.resolved_foundation_ref,
+            "step1_suggestion_ref": self.step1_suggestion_ref,
+            "scenario_input_authority": self.scenario_input_authority,
+            "scenario_definition": self.scenario_definition,
             "agent_plan_source": self.agent_plan_source,
             "agent_plan_contract_version": self.agent_plan_contract_version,
             "agent_plan": self.agent_plan,
@@ -720,6 +732,13 @@ class EnvSimulationConfigGenerator:
             validated_relation_graph=dict(validated_relation_graph or {}),
             simulation_audit=dict(simulation_audit or {}),
             scenario_planning_input=planning,
+            event_inputs=list(planning.get("normalized_user_events") or []),
+            policy_inputs=list(planning.get("normalized_user_policies") or []),
+            resolved_foundation_ref=dict(
+                planning.get("resolved_foundation_ref") or planning.get("foundation_ref") or {}
+            ),
+            step1_suggestion_ref=dict(planning.get("step1_suggestion_ref") or {}),
+            scenario_input_authority=str(planning.get("input_authority") or ""),
             region_graph=[region.to_dict() for region in regions],
             subregion_graph=[subregion.to_dict() for subregion in subregions],
             transport_edges=[item.to_dict() if hasattr(item, "to_dict") else item for item in (transport_edges or [])],

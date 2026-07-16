@@ -1,0 +1,4644 @@
+{
+  "case_id": "wuhan_covid_v2",
+  "total_agents": 240,
+  "core_agents": 72,
+  "background_agents": 168,
+  "representation_note": "核心主体采用职能化身份，背景主体采用聚合身份；全部为策划表示，不对应真实个人。",
+  "system_allocations": [
+    {
+      "system_id": "detection",
+      "name": "发现监测",
+      "count": 36,
+      "core_count": 12
+    },
+    {
+      "system_id": "healthcare",
+      "name": "医疗救治",
+      "count": 54,
+      "core_count": 18
+    },
+    {
+      "system_id": "community",
+      "name": "社区治理",
+      "count": 48,
+      "core_count": 14
+    },
+    {
+      "system_id": "mobility",
+      "name": "交通流动",
+      "count": 30,
+      "core_count": 8
+    },
+    {
+      "system_id": "supply",
+      "name": "物资供应",
+      "count": 36,
+      "core_count": 10
+    },
+    {
+      "system_id": "governance",
+      "name": "治理与信息",
+      "count": 36,
+      "core_count": 10
+    }
+  ],
+  "archetypes": [
+    {
+      "id": "community_clinician",
+      "system_id": "detection",
+      "name": "社区门诊医生",
+      "capabilities": [
+        "症状识别",
+        "初步上报"
+      ],
+      "storyline_ids": [
+        "detection",
+        "community"
+      ]
+    },
+    {
+      "id": "fever_clinician",
+      "system_id": "detection",
+      "name": "发热门诊医生",
+      "capabilities": [
+        "发热分诊",
+        "病例识别"
+      ],
+      "storyline_ids": [
+        "detection",
+        "healthcare"
+      ]
+    },
+    {
+      "id": "lab_technician",
+      "system_id": "detection",
+      "name": "检验技师",
+      "capabilities": [
+        "样本检测",
+        "结果复核"
+      ],
+      "storyline_ids": [
+        "detection",
+        "healthcare"
+      ]
+    },
+    {
+      "id": "field_epidemiologist",
+      "system_id": "detection",
+      "name": "流调人员",
+      "capabilities": [
+        "接触追踪",
+        "聚集分析"
+      ],
+      "storyline_ids": [
+        "detection",
+        "mobility"
+      ]
+    },
+    {
+      "id": "emergency_nurse",
+      "system_id": "healthcare",
+      "name": "急诊护士",
+      "capabilities": [
+        "急诊分诊",
+        "感染防护"
+      ],
+      "storyline_ids": [
+        "healthcare"
+      ]
+    },
+    {
+      "id": "respiratory_physician",
+      "system_id": "healthcare",
+      "name": "呼吸科医生",
+      "capabilities": [
+        "临床研判",
+        "重症识别"
+      ],
+      "storyline_ids": [
+        "healthcare",
+        "detection"
+      ]
+    },
+    {
+      "id": "infection_control",
+      "system_id": "healthcare",
+      "name": "院感专员",
+      "capabilities": [
+        "院感监测",
+        "防护流程"
+      ],
+      "storyline_ids": [
+        "healthcare",
+        "governance"
+      ]
+    },
+    {
+      "id": "bed_transfer",
+      "system_id": "healthcare",
+      "name": "床位转运协调员",
+      "capabilities": [
+        "床位统筹",
+        "患者转运"
+      ],
+      "storyline_ids": [
+        "healthcare",
+        "mobility"
+      ]
+    },
+    {
+      "id": "grid_worker",
+      "system_id": "community",
+      "name": "社区网格员",
+      "capabilities": [
+        "入户排查",
+        "需求登记"
+      ],
+      "storyline_ids": [
+        "community",
+        "detection"
+      ]
+    },
+    {
+      "id": "property_coordinator",
+      "system_id": "community",
+      "name": "物业协调员",
+      "capabilities": [
+        "楼栋管理",
+        "出入协同"
+      ],
+      "storyline_ids": [
+        "community"
+      ]
+    },
+    {
+      "id": "community_volunteer",
+      "system_id": "community",
+      "name": "社区志愿者",
+      "capabilities": [
+        "生活配送",
+        "重点照护"
+      ],
+      "storyline_ids": [
+        "community",
+        "supply"
+      ]
+    },
+    {
+      "id": "vulnerable_group",
+      "system_id": "community",
+      "name": "重点人群代表",
+      "capabilities": [
+        "需求反馈",
+        "互助联络"
+      ],
+      "storyline_ids": [
+        "community",
+        "governance"
+      ]
+    },
+    {
+      "id": "rail_dispatcher",
+      "system_id": "mobility",
+      "name": "铁路调度员",
+      "capabilities": [
+        "客流调度",
+        "班次协同"
+      ],
+      "storyline_ids": [
+        "mobility"
+      ]
+    },
+    {
+      "id": "airport_screener",
+      "system_id": "mobility",
+      "name": "机场健康筛查员",
+      "capabilities": [
+        "健康筛查",
+        "异常移交"
+      ],
+      "storyline_ids": [
+        "mobility",
+        "detection"
+      ]
+    },
+    {
+      "id": "transport_driver",
+      "system_id": "mobility",
+      "name": "转运驾驶员",
+      "capabilities": [
+        "闭环转运",
+        "路线执行"
+      ],
+      "storyline_ids": [
+        "mobility",
+        "healthcare"
+      ]
+    },
+    {
+      "id": "traffic_controller",
+      "system_id": "mobility",
+      "name": "交通管控人员",
+      "capabilities": [
+        "节点管控",
+        "通行保障"
+      ],
+      "storyline_ids": [
+        "mobility",
+        "governance"
+      ]
+    },
+    {
+      "id": "medical_procurement",
+      "system_id": "supply",
+      "name": "医疗采购协调员",
+      "capabilities": [
+        "需求汇总",
+        "紧急采购"
+      ],
+      "storyline_ids": [
+        "supply",
+        "healthcare"
+      ]
+    },
+    {
+      "id": "warehouse_manager",
+      "system_id": "supply",
+      "name": "仓储管理员",
+      "capabilities": [
+        "库存盘点",
+        "分拨组织"
+      ],
+      "storyline_ids": [
+        "supply"
+      ]
+    },
+    {
+      "id": "logistics_dispatcher",
+      "system_id": "supply",
+      "name": "物流调度员",
+      "capabilities": [
+        "跨区调拨",
+        "线路协调"
+      ],
+      "storyline_ids": [
+        "supply",
+        "mobility"
+      ]
+    },
+    {
+      "id": "pharmacy_manager",
+      "system_id": "supply",
+      "name": "药品供应协调员",
+      "capabilities": [
+        "药品保供",
+        "处方衔接"
+      ],
+      "storyline_ids": [
+        "supply",
+        "community"
+      ]
+    },
+    {
+      "id": "cdc_duty",
+      "system_id": "governance",
+      "name": "疾控值守人员",
+      "capabilities": [
+        "信息汇总",
+        "专业研判"
+      ],
+      "storyline_ids": [
+        "governance",
+        "detection"
+      ]
+    },
+    {
+      "id": "health_commission",
+      "system_id": "governance",
+      "name": "卫生协调人员",
+      "capabilities": [
+        "医疗统筹",
+        "部门协调"
+      ],
+      "storyline_ids": [
+        "governance",
+        "healthcare"
+      ]
+    },
+    {
+      "id": "emergency_command",
+      "system_id": "governance",
+      "name": "应急指挥人员",
+      "capabilities": [
+        "跨部门指挥",
+        "资源排序"
+      ],
+      "storyline_ids": [
+        "governance",
+        "supply",
+        "mobility"
+      ]
+    },
+    {
+      "id": "hotline_media",
+      "system_id": "governance",
+      "name": "热线与公共信息人员",
+      "capabilities": [
+        "诉求反馈",
+        "信息发布"
+      ],
+      "storyline_ids": [
+        "governance",
+        "community"
+      ]
+    }
+  ],
+  "agents": [
+    {
+      "roster_id": "curated-agent-001",
+      "system_id": "detection",
+      "archetype_id": "community_clinician",
+      "anchor_id": "anchor_huanan_market",
+      "representation_level": "functional",
+      "display_sequence": 1,
+      "storyline_ids": [
+        "detection",
+        "community"
+      ],
+      "capability_refs": [
+        "症状识别",
+        "初步上报"
+      ],
+      "resource_profile": "detection_standard",
+      "lifecycle_profile": "full_story_lifecycle"
+    },
+    {
+      "roster_id": "curated-agent-002",
+      "system_id": "detection",
+      "archetype_id": "fever_clinician",
+      "anchor_id": "anchor_jianghan_clinic_ring",
+      "representation_level": "functional",
+      "display_sequence": 2,
+      "storyline_ids": [
+        "detection",
+        "healthcare"
+      ],
+      "capability_refs": [
+        "发热分诊",
+        "病例识别"
+      ],
+      "resource_profile": "detection_standard",
+      "lifecycle_profile": "full_story_lifecycle"
+    },
+    {
+      "roster_id": "curated-agent-003",
+      "system_id": "detection",
+      "archetype_id": "lab_technician",
+      "anchor_id": "anchor_early_sample_route",
+      "representation_level": "functional",
+      "display_sequence": 3,
+      "storyline_ids": [
+        "detection",
+        "healthcare"
+      ],
+      "capability_refs": [
+        "样本检测",
+        "结果复核"
+      ],
+      "resource_profile": "detection_standard",
+      "lifecycle_profile": "full_story_lifecycle"
+    },
+    {
+      "roster_id": "curated-agent-004",
+      "system_id": "detection",
+      "archetype_id": "field_epidemiologist",
+      "anchor_id": "anchor_jinyintan",
+      "representation_level": "functional",
+      "display_sequence": 4,
+      "storyline_ids": [
+        "detection",
+        "mobility"
+      ],
+      "capability_refs": [
+        "接触追踪",
+        "聚集分析"
+      ],
+      "resource_profile": "detection_standard",
+      "lifecycle_profile": "full_story_lifecycle"
+    },
+    {
+      "roster_id": "curated-agent-005",
+      "system_id": "detection",
+      "archetype_id": "community_clinician",
+      "anchor_id": "anchor_tongji_union_network",
+      "representation_level": "functional",
+      "display_sequence": 5,
+      "storyline_ids": [
+        "detection",
+        "community"
+      ],
+      "capability_refs": [
+        "症状识别",
+        "初步上报"
+      ],
+      "resource_profile": "detection_standard",
+      "lifecycle_profile": "full_story_lifecycle"
+    },
+    {
+      "roster_id": "curated-agent-006",
+      "system_id": "detection",
+      "archetype_id": "fever_clinician",
+      "anchor_id": "anchor_hospital_infection_ring",
+      "representation_level": "functional",
+      "display_sequence": 6,
+      "storyline_ids": [
+        "detection",
+        "healthcare"
+      ],
+      "capability_refs": [
+        "发热分诊",
+        "病例识别"
+      ],
+      "resource_profile": "detection_standard",
+      "lifecycle_profile": "full_story_lifecycle"
+    },
+    {
+      "roster_id": "curated-agent-007",
+      "system_id": "detection",
+      "archetype_id": "lab_technician",
+      "anchor_id": "anchor_wuhan_cdc",
+      "representation_level": "functional",
+      "display_sequence": 7,
+      "storyline_ids": [
+        "detection",
+        "healthcare"
+      ],
+      "capability_refs": [
+        "样本检测",
+        "结果复核"
+      ],
+      "resource_profile": "detection_standard",
+      "lifecycle_profile": "full_story_lifecycle"
+    },
+    {
+      "roster_id": "curated-agent-008",
+      "system_id": "detection",
+      "archetype_id": "field_epidemiologist",
+      "anchor_id": "anchor_lab_network",
+      "representation_level": "functional",
+      "display_sequence": 8,
+      "storyline_ids": [
+        "detection",
+        "mobility"
+      ],
+      "capability_refs": [
+        "接触追踪",
+        "聚集分析"
+      ],
+      "resource_profile": "detection_standard",
+      "lifecycle_profile": "full_story_lifecycle"
+    },
+    {
+      "roster_id": "curated-agent-009",
+      "system_id": "detection",
+      "archetype_id": "community_clinician",
+      "anchor_id": "anchor_reporting_network",
+      "representation_level": "functional",
+      "display_sequence": 9,
+      "storyline_ids": [
+        "detection",
+        "community"
+      ],
+      "capability_refs": [
+        "症状识别",
+        "初步上报"
+      ],
+      "resource_profile": "detection_standard",
+      "lifecycle_profile": "full_story_lifecycle"
+    },
+    {
+      "roster_id": "curated-agent-010",
+      "system_id": "detection",
+      "archetype_id": "fever_clinician",
+      "anchor_id": "anchor_tianhe_airport",
+      "representation_level": "functional",
+      "display_sequence": 10,
+      "storyline_ids": [
+        "detection",
+        "healthcare"
+      ],
+      "capability_refs": [
+        "发热分诊",
+        "病例识别"
+      ],
+      "resource_profile": "detection_standard",
+      "lifecycle_profile": "full_story_lifecycle"
+    },
+    {
+      "roster_id": "curated-agent-011",
+      "system_id": "detection",
+      "archetype_id": "lab_technician",
+      "anchor_id": "anchor_airport_screening",
+      "representation_level": "functional",
+      "display_sequence": 11,
+      "storyline_ids": [
+        "detection",
+        "healthcare"
+      ],
+      "capability_refs": [
+        "样本检测",
+        "结果复核"
+      ],
+      "resource_profile": "detection_standard",
+      "lifecycle_profile": "full_story_lifecycle"
+    },
+    {
+      "roster_id": "curated-agent-012",
+      "system_id": "detection",
+      "archetype_id": "field_epidemiologist",
+      "anchor_id": "anchor_gateway_transfer",
+      "representation_level": "functional",
+      "display_sequence": 12,
+      "storyline_ids": [
+        "detection",
+        "mobility"
+      ],
+      "capability_refs": [
+        "接触追踪",
+        "聚集分析"
+      ],
+      "resource_profile": "detection_standard",
+      "lifecycle_profile": "full_story_lifecycle"
+    },
+    {
+      "roster_id": "curated-agent-013",
+      "system_id": "detection",
+      "archetype_id": "community_clinician",
+      "anchor_id": "anchor_huanan_market",
+      "representation_level": "aggregate",
+      "display_sequence": 13,
+      "storyline_ids": [
+        "detection",
+        "community"
+      ],
+      "capability_refs": [
+        "症状识别",
+        "初步上报"
+      ],
+      "resource_profile": "detection_standard",
+      "lifecycle_profile": "staged_background"
+    },
+    {
+      "roster_id": "curated-agent-014",
+      "system_id": "detection",
+      "archetype_id": "fever_clinician",
+      "anchor_id": "anchor_jianghan_clinic_ring",
+      "representation_level": "aggregate",
+      "display_sequence": 14,
+      "storyline_ids": [
+        "detection",
+        "healthcare"
+      ],
+      "capability_refs": [
+        "发热分诊",
+        "病例识别"
+      ],
+      "resource_profile": "detection_standard",
+      "lifecycle_profile": "staged_background"
+    },
+    {
+      "roster_id": "curated-agent-015",
+      "system_id": "detection",
+      "archetype_id": "lab_technician",
+      "anchor_id": "anchor_early_sample_route",
+      "representation_level": "aggregate",
+      "display_sequence": 15,
+      "storyline_ids": [
+        "detection",
+        "healthcare"
+      ],
+      "capability_refs": [
+        "样本检测",
+        "结果复核"
+      ],
+      "resource_profile": "detection_standard",
+      "lifecycle_profile": "staged_background"
+    },
+    {
+      "roster_id": "curated-agent-016",
+      "system_id": "detection",
+      "archetype_id": "field_epidemiologist",
+      "anchor_id": "anchor_jinyintan",
+      "representation_level": "aggregate",
+      "display_sequence": 16,
+      "storyline_ids": [
+        "detection",
+        "mobility"
+      ],
+      "capability_refs": [
+        "接触追踪",
+        "聚集分析"
+      ],
+      "resource_profile": "detection_standard",
+      "lifecycle_profile": "staged_background"
+    },
+    {
+      "roster_id": "curated-agent-017",
+      "system_id": "detection",
+      "archetype_id": "community_clinician",
+      "anchor_id": "anchor_tongji_union_network",
+      "representation_level": "aggregate",
+      "display_sequence": 17,
+      "storyline_ids": [
+        "detection",
+        "community"
+      ],
+      "capability_refs": [
+        "症状识别",
+        "初步上报"
+      ],
+      "resource_profile": "detection_standard",
+      "lifecycle_profile": "staged_background"
+    },
+    {
+      "roster_id": "curated-agent-018",
+      "system_id": "detection",
+      "archetype_id": "fever_clinician",
+      "anchor_id": "anchor_hospital_infection_ring",
+      "representation_level": "aggregate",
+      "display_sequence": 18,
+      "storyline_ids": [
+        "detection",
+        "healthcare"
+      ],
+      "capability_refs": [
+        "发热分诊",
+        "病例识别"
+      ],
+      "resource_profile": "detection_standard",
+      "lifecycle_profile": "staged_background"
+    },
+    {
+      "roster_id": "curated-agent-019",
+      "system_id": "detection",
+      "archetype_id": "lab_technician",
+      "anchor_id": "anchor_wuhan_cdc",
+      "representation_level": "aggregate",
+      "display_sequence": 19,
+      "storyline_ids": [
+        "detection",
+        "healthcare"
+      ],
+      "capability_refs": [
+        "样本检测",
+        "结果复核"
+      ],
+      "resource_profile": "detection_standard",
+      "lifecycle_profile": "staged_background"
+    },
+    {
+      "roster_id": "curated-agent-020",
+      "system_id": "detection",
+      "archetype_id": "field_epidemiologist",
+      "anchor_id": "anchor_lab_network",
+      "representation_level": "aggregate",
+      "display_sequence": 20,
+      "storyline_ids": [
+        "detection",
+        "mobility"
+      ],
+      "capability_refs": [
+        "接触追踪",
+        "聚集分析"
+      ],
+      "resource_profile": "detection_standard",
+      "lifecycle_profile": "staged_background"
+    },
+    {
+      "roster_id": "curated-agent-021",
+      "system_id": "detection",
+      "archetype_id": "community_clinician",
+      "anchor_id": "anchor_reporting_network",
+      "representation_level": "aggregate",
+      "display_sequence": 21,
+      "storyline_ids": [
+        "detection",
+        "community"
+      ],
+      "capability_refs": [
+        "症状识别",
+        "初步上报"
+      ],
+      "resource_profile": "detection_standard",
+      "lifecycle_profile": "staged_background"
+    },
+    {
+      "roster_id": "curated-agent-022",
+      "system_id": "detection",
+      "archetype_id": "fever_clinician",
+      "anchor_id": "anchor_tianhe_airport",
+      "representation_level": "aggregate",
+      "display_sequence": 22,
+      "storyline_ids": [
+        "detection",
+        "healthcare"
+      ],
+      "capability_refs": [
+        "发热分诊",
+        "病例识别"
+      ],
+      "resource_profile": "detection_standard",
+      "lifecycle_profile": "staged_background"
+    },
+    {
+      "roster_id": "curated-agent-023",
+      "system_id": "detection",
+      "archetype_id": "lab_technician",
+      "anchor_id": "anchor_airport_screening",
+      "representation_level": "aggregate",
+      "display_sequence": 23,
+      "storyline_ids": [
+        "detection",
+        "healthcare"
+      ],
+      "capability_refs": [
+        "样本检测",
+        "结果复核"
+      ],
+      "resource_profile": "detection_standard",
+      "lifecycle_profile": "staged_background"
+    },
+    {
+      "roster_id": "curated-agent-024",
+      "system_id": "detection",
+      "archetype_id": "field_epidemiologist",
+      "anchor_id": "anchor_gateway_transfer",
+      "representation_level": "aggregate",
+      "display_sequence": 24,
+      "storyline_ids": [
+        "detection",
+        "mobility"
+      ],
+      "capability_refs": [
+        "接触追踪",
+        "聚集分析"
+      ],
+      "resource_profile": "detection_standard",
+      "lifecycle_profile": "staged_background"
+    },
+    {
+      "roster_id": "curated-agent-025",
+      "system_id": "detection",
+      "archetype_id": "community_clinician",
+      "anchor_id": "anchor_huanan_market",
+      "representation_level": "aggregate",
+      "display_sequence": 25,
+      "storyline_ids": [
+        "detection",
+        "community"
+      ],
+      "capability_refs": [
+        "症状识别",
+        "初步上报"
+      ],
+      "resource_profile": "detection_standard",
+      "lifecycle_profile": "staged_background"
+    },
+    {
+      "roster_id": "curated-agent-026",
+      "system_id": "detection",
+      "archetype_id": "fever_clinician",
+      "anchor_id": "anchor_jianghan_clinic_ring",
+      "representation_level": "aggregate",
+      "display_sequence": 26,
+      "storyline_ids": [
+        "detection",
+        "healthcare"
+      ],
+      "capability_refs": [
+        "发热分诊",
+        "病例识别"
+      ],
+      "resource_profile": "detection_standard",
+      "lifecycle_profile": "staged_background"
+    },
+    {
+      "roster_id": "curated-agent-027",
+      "system_id": "detection",
+      "archetype_id": "lab_technician",
+      "anchor_id": "anchor_early_sample_route",
+      "representation_level": "aggregate",
+      "display_sequence": 27,
+      "storyline_ids": [
+        "detection",
+        "healthcare"
+      ],
+      "capability_refs": [
+        "样本检测",
+        "结果复核"
+      ],
+      "resource_profile": "detection_standard",
+      "lifecycle_profile": "staged_background"
+    },
+    {
+      "roster_id": "curated-agent-028",
+      "system_id": "detection",
+      "archetype_id": "field_epidemiologist",
+      "anchor_id": "anchor_jinyintan",
+      "representation_level": "aggregate",
+      "display_sequence": 28,
+      "storyline_ids": [
+        "detection",
+        "mobility"
+      ],
+      "capability_refs": [
+        "接触追踪",
+        "聚集分析"
+      ],
+      "resource_profile": "detection_standard",
+      "lifecycle_profile": "staged_background"
+    },
+    {
+      "roster_id": "curated-agent-029",
+      "system_id": "detection",
+      "archetype_id": "community_clinician",
+      "anchor_id": "anchor_tongji_union_network",
+      "representation_level": "aggregate",
+      "display_sequence": 29,
+      "storyline_ids": [
+        "detection",
+        "community"
+      ],
+      "capability_refs": [
+        "症状识别",
+        "初步上报"
+      ],
+      "resource_profile": "detection_standard",
+      "lifecycle_profile": "staged_background"
+    },
+    {
+      "roster_id": "curated-agent-030",
+      "system_id": "detection",
+      "archetype_id": "fever_clinician",
+      "anchor_id": "anchor_hospital_infection_ring",
+      "representation_level": "aggregate",
+      "display_sequence": 30,
+      "storyline_ids": [
+        "detection",
+        "healthcare"
+      ],
+      "capability_refs": [
+        "发热分诊",
+        "病例识别"
+      ],
+      "resource_profile": "detection_standard",
+      "lifecycle_profile": "staged_background"
+    },
+    {
+      "roster_id": "curated-agent-031",
+      "system_id": "detection",
+      "archetype_id": "lab_technician",
+      "anchor_id": "anchor_wuhan_cdc",
+      "representation_level": "aggregate",
+      "display_sequence": 31,
+      "storyline_ids": [
+        "detection",
+        "healthcare"
+      ],
+      "capability_refs": [
+        "样本检测",
+        "结果复核"
+      ],
+      "resource_profile": "detection_standard",
+      "lifecycle_profile": "staged_background"
+    },
+    {
+      "roster_id": "curated-agent-032",
+      "system_id": "detection",
+      "archetype_id": "field_epidemiologist",
+      "anchor_id": "anchor_lab_network",
+      "representation_level": "aggregate",
+      "display_sequence": 32,
+      "storyline_ids": [
+        "detection",
+        "mobility"
+      ],
+      "capability_refs": [
+        "接触追踪",
+        "聚集分析"
+      ],
+      "resource_profile": "detection_standard",
+      "lifecycle_profile": "staged_background"
+    },
+    {
+      "roster_id": "curated-agent-033",
+      "system_id": "detection",
+      "archetype_id": "community_clinician",
+      "anchor_id": "anchor_reporting_network",
+      "representation_level": "aggregate",
+      "display_sequence": 33,
+      "storyline_ids": [
+        "detection",
+        "community"
+      ],
+      "capability_refs": [
+        "症状识别",
+        "初步上报"
+      ],
+      "resource_profile": "detection_standard",
+      "lifecycle_profile": "staged_background"
+    },
+    {
+      "roster_id": "curated-agent-034",
+      "system_id": "detection",
+      "archetype_id": "fever_clinician",
+      "anchor_id": "anchor_tianhe_airport",
+      "representation_level": "aggregate",
+      "display_sequence": 34,
+      "storyline_ids": [
+        "detection",
+        "healthcare"
+      ],
+      "capability_refs": [
+        "发热分诊",
+        "病例识别"
+      ],
+      "resource_profile": "detection_standard",
+      "lifecycle_profile": "staged_background"
+    },
+    {
+      "roster_id": "curated-agent-035",
+      "system_id": "detection",
+      "archetype_id": "lab_technician",
+      "anchor_id": "anchor_airport_screening",
+      "representation_level": "aggregate",
+      "display_sequence": 35,
+      "storyline_ids": [
+        "detection",
+        "healthcare"
+      ],
+      "capability_refs": [
+        "样本检测",
+        "结果复核"
+      ],
+      "resource_profile": "detection_standard",
+      "lifecycle_profile": "staged_background"
+    },
+    {
+      "roster_id": "curated-agent-036",
+      "system_id": "detection",
+      "archetype_id": "field_epidemiologist",
+      "anchor_id": "anchor_gateway_transfer",
+      "representation_level": "aggregate",
+      "display_sequence": 36,
+      "storyline_ids": [
+        "detection",
+        "mobility"
+      ],
+      "capability_refs": [
+        "接触追踪",
+        "聚集分析"
+      ],
+      "resource_profile": "detection_standard",
+      "lifecycle_profile": "staged_background"
+    },
+    {
+      "roster_id": "curated-agent-037",
+      "system_id": "healthcare",
+      "archetype_id": "emergency_nurse",
+      "anchor_id": "anchor_huanan_market",
+      "representation_level": "functional",
+      "display_sequence": 1,
+      "storyline_ids": [
+        "healthcare"
+      ],
+      "capability_refs": [
+        "急诊分诊",
+        "感染防护"
+      ],
+      "resource_profile": "healthcare_standard",
+      "lifecycle_profile": "full_story_lifecycle"
+    },
+    {
+      "roster_id": "curated-agent-038",
+      "system_id": "healthcare",
+      "archetype_id": "respiratory_physician",
+      "anchor_id": "anchor_jianghan_clinic_ring",
+      "representation_level": "functional",
+      "display_sequence": 2,
+      "storyline_ids": [
+        "healthcare",
+        "detection"
+      ],
+      "capability_refs": [
+        "临床研判",
+        "重症识别"
+      ],
+      "resource_profile": "healthcare_standard",
+      "lifecycle_profile": "full_story_lifecycle"
+    },
+    {
+      "roster_id": "curated-agent-039",
+      "system_id": "healthcare",
+      "archetype_id": "infection_control",
+      "anchor_id": "anchor_early_sample_route",
+      "representation_level": "functional",
+      "display_sequence": 3,
+      "storyline_ids": [
+        "healthcare",
+        "governance"
+      ],
+      "capability_refs": [
+        "院感监测",
+        "防护流程"
+      ],
+      "resource_profile": "healthcare_standard",
+      "lifecycle_profile": "full_story_lifecycle"
+    },
+    {
+      "roster_id": "curated-agent-040",
+      "system_id": "healthcare",
+      "archetype_id": "bed_transfer",
+      "anchor_id": "anchor_jinyintan",
+      "representation_level": "functional",
+      "display_sequence": 4,
+      "storyline_ids": [
+        "healthcare",
+        "mobility"
+      ],
+      "capability_refs": [
+        "床位统筹",
+        "患者转运"
+      ],
+      "resource_profile": "healthcare_standard",
+      "lifecycle_profile": "full_story_lifecycle"
+    },
+    {
+      "roster_id": "curated-agent-041",
+      "system_id": "healthcare",
+      "archetype_id": "emergency_nurse",
+      "anchor_id": "anchor_tongji_union_network",
+      "representation_level": "functional",
+      "display_sequence": 5,
+      "storyline_ids": [
+        "healthcare"
+      ],
+      "capability_refs": [
+        "急诊分诊",
+        "感染防护"
+      ],
+      "resource_profile": "healthcare_standard",
+      "lifecycle_profile": "full_story_lifecycle"
+    },
+    {
+      "roster_id": "curated-agent-042",
+      "system_id": "healthcare",
+      "archetype_id": "respiratory_physician",
+      "anchor_id": "anchor_hospital_infection_ring",
+      "representation_level": "functional",
+      "display_sequence": 6,
+      "storyline_ids": [
+        "healthcare",
+        "detection"
+      ],
+      "capability_refs": [
+        "临床研判",
+        "重症识别"
+      ],
+      "resource_profile": "healthcare_standard",
+      "lifecycle_profile": "full_story_lifecycle"
+    },
+    {
+      "roster_id": "curated-agent-043",
+      "system_id": "healthcare",
+      "archetype_id": "infection_control",
+      "anchor_id": "anchor_emergency_belt",
+      "representation_level": "functional",
+      "display_sequence": 7,
+      "storyline_ids": [
+        "healthcare",
+        "governance"
+      ],
+      "capability_refs": [
+        "院感监测",
+        "防护流程"
+      ],
+      "resource_profile": "healthcare_standard",
+      "lifecycle_profile": "full_story_lifecycle"
+    },
+    {
+      "roster_id": "curated-agent-044",
+      "system_id": "healthcare",
+      "archetype_id": "bed_transfer",
+      "anchor_id": "anchor_fever_clinic_network",
+      "representation_level": "functional",
+      "display_sequence": 8,
+      "storyline_ids": [
+        "healthcare",
+        "mobility"
+      ],
+      "capability_refs": [
+        "床位统筹",
+        "患者转运"
+      ],
+      "resource_profile": "healthcare_standard",
+      "lifecycle_profile": "full_story_lifecycle"
+    },
+    {
+      "roster_id": "curated-agent-045",
+      "system_id": "healthcare",
+      "archetype_id": "emergency_nurse",
+      "anchor_id": "anchor_patient_transfer_network",
+      "representation_level": "functional",
+      "display_sequence": 9,
+      "storyline_ids": [
+        "healthcare"
+      ],
+      "capability_refs": [
+        "急诊分诊",
+        "感染防护"
+      ],
+      "resource_profile": "healthcare_standard",
+      "lifecycle_profile": "full_story_lifecycle"
+    },
+    {
+      "roster_id": "curated-agent-046",
+      "system_id": "healthcare",
+      "archetype_id": "respiratory_physician",
+      "anchor_id": "anchor_huoshenshan",
+      "representation_level": "functional",
+      "display_sequence": 10,
+      "storyline_ids": [
+        "healthcare",
+        "detection"
+      ],
+      "capability_refs": [
+        "临床研判",
+        "重症识别"
+      ],
+      "resource_profile": "healthcare_standard",
+      "lifecycle_profile": "full_story_lifecycle"
+    },
+    {
+      "roster_id": "curated-agent-047",
+      "system_id": "healthcare",
+      "archetype_id": "infection_control",
+      "anchor_id": "anchor_leishenshan",
+      "representation_level": "functional",
+      "display_sequence": 11,
+      "storyline_ids": [
+        "healthcare",
+        "governance"
+      ],
+      "capability_refs": [
+        "院感监测",
+        "防护流程"
+      ],
+      "resource_profile": "healthcare_standard",
+      "lifecycle_profile": "full_story_lifecycle"
+    },
+    {
+      "roster_id": "curated-agent-048",
+      "system_id": "healthcare",
+      "archetype_id": "bed_transfer",
+      "anchor_id": "anchor_capacity_command",
+      "representation_level": "functional",
+      "display_sequence": 12,
+      "storyline_ids": [
+        "healthcare",
+        "mobility"
+      ],
+      "capability_refs": [
+        "床位统筹",
+        "患者转运"
+      ],
+      "resource_profile": "healthcare_standard",
+      "lifecycle_profile": "full_story_lifecycle"
+    },
+    {
+      "roster_id": "curated-agent-049",
+      "system_id": "healthcare",
+      "archetype_id": "emergency_nurse",
+      "anchor_id": "anchor_hongshan_gym",
+      "representation_level": "functional",
+      "display_sequence": 13,
+      "storyline_ids": [
+        "healthcare"
+      ],
+      "capability_refs": [
+        "急诊分诊",
+        "感染防护"
+      ],
+      "resource_profile": "healthcare_standard",
+      "lifecycle_profile": "full_story_lifecycle"
+    },
+    {
+      "roster_id": "curated-agent-050",
+      "system_id": "healthcare",
+      "archetype_id": "respiratory_physician",
+      "anchor_id": "anchor_wuhan_livingroom",
+      "representation_level": "functional",
+      "display_sequence": 14,
+      "storyline_ids": [
+        "healthcare",
+        "detection"
+      ],
+      "capability_refs": [
+        "临床研判",
+        "重症识别"
+      ],
+      "resource_profile": "healthcare_standard",
+      "lifecycle_profile": "full_story_lifecycle"
+    },
+    {
+      "roster_id": "curated-agent-051",
+      "system_id": "healthcare",
+      "archetype_id": "infection_control",
+      "anchor_id": "anchor_fangcang_referral",
+      "representation_level": "functional",
+      "display_sequence": 15,
+      "storyline_ids": [
+        "healthcare",
+        "governance"
+      ],
+      "capability_refs": [
+        "院感监测",
+        "防护流程"
+      ],
+      "resource_profile": "healthcare_standard",
+      "lifecycle_profile": "full_story_lifecycle"
+    },
+    {
+      "roster_id": "curated-agent-052",
+      "system_id": "healthcare",
+      "archetype_id": "bed_transfer",
+      "anchor_id": "anchor_huanan_market",
+      "representation_level": "functional",
+      "display_sequence": 16,
+      "storyline_ids": [
+        "healthcare",
+        "mobility"
+      ],
+      "capability_refs": [
+        "床位统筹",
+        "患者转运"
+      ],
+      "resource_profile": "healthcare_standard",
+      "lifecycle_profile": "full_story_lifecycle"
+    },
+    {
+      "roster_id": "curated-agent-053",
+      "system_id": "healthcare",
+      "archetype_id": "emergency_nurse",
+      "anchor_id": "anchor_jianghan_clinic_ring",
+      "representation_level": "functional",
+      "display_sequence": 17,
+      "storyline_ids": [
+        "healthcare"
+      ],
+      "capability_refs": [
+        "急诊分诊",
+        "感染防护"
+      ],
+      "resource_profile": "healthcare_standard",
+      "lifecycle_profile": "full_story_lifecycle"
+    },
+    {
+      "roster_id": "curated-agent-054",
+      "system_id": "healthcare",
+      "archetype_id": "respiratory_physician",
+      "anchor_id": "anchor_early_sample_route",
+      "representation_level": "functional",
+      "display_sequence": 18,
+      "storyline_ids": [
+        "healthcare",
+        "detection"
+      ],
+      "capability_refs": [
+        "临床研判",
+        "重症识别"
+      ],
+      "resource_profile": "healthcare_standard",
+      "lifecycle_profile": "full_story_lifecycle"
+    },
+    {
+      "roster_id": "curated-agent-055",
+      "system_id": "healthcare",
+      "archetype_id": "infection_control",
+      "anchor_id": "anchor_jinyintan",
+      "representation_level": "aggregate",
+      "display_sequence": 19,
+      "storyline_ids": [
+        "healthcare",
+        "governance"
+      ],
+      "capability_refs": [
+        "院感监测",
+        "防护流程"
+      ],
+      "resource_profile": "healthcare_standard",
+      "lifecycle_profile": "staged_background"
+    },
+    {
+      "roster_id": "curated-agent-056",
+      "system_id": "healthcare",
+      "archetype_id": "bed_transfer",
+      "anchor_id": "anchor_tongji_union_network",
+      "representation_level": "aggregate",
+      "display_sequence": 20,
+      "storyline_ids": [
+        "healthcare",
+        "mobility"
+      ],
+      "capability_refs": [
+        "床位统筹",
+        "患者转运"
+      ],
+      "resource_profile": "healthcare_standard",
+      "lifecycle_profile": "staged_background"
+    },
+    {
+      "roster_id": "curated-agent-057",
+      "system_id": "healthcare",
+      "archetype_id": "emergency_nurse",
+      "anchor_id": "anchor_hospital_infection_ring",
+      "representation_level": "aggregate",
+      "display_sequence": 21,
+      "storyline_ids": [
+        "healthcare"
+      ],
+      "capability_refs": [
+        "急诊分诊",
+        "感染防护"
+      ],
+      "resource_profile": "healthcare_standard",
+      "lifecycle_profile": "staged_background"
+    },
+    {
+      "roster_id": "curated-agent-058",
+      "system_id": "healthcare",
+      "archetype_id": "respiratory_physician",
+      "anchor_id": "anchor_emergency_belt",
+      "representation_level": "aggregate",
+      "display_sequence": 22,
+      "storyline_ids": [
+        "healthcare",
+        "detection"
+      ],
+      "capability_refs": [
+        "临床研判",
+        "重症识别"
+      ],
+      "resource_profile": "healthcare_standard",
+      "lifecycle_profile": "staged_background"
+    },
+    {
+      "roster_id": "curated-agent-059",
+      "system_id": "healthcare",
+      "archetype_id": "infection_control",
+      "anchor_id": "anchor_fever_clinic_network",
+      "representation_level": "aggregate",
+      "display_sequence": 23,
+      "storyline_ids": [
+        "healthcare",
+        "governance"
+      ],
+      "capability_refs": [
+        "院感监测",
+        "防护流程"
+      ],
+      "resource_profile": "healthcare_standard",
+      "lifecycle_profile": "staged_background"
+    },
+    {
+      "roster_id": "curated-agent-060",
+      "system_id": "healthcare",
+      "archetype_id": "bed_transfer",
+      "anchor_id": "anchor_patient_transfer_network",
+      "representation_level": "aggregate",
+      "display_sequence": 24,
+      "storyline_ids": [
+        "healthcare",
+        "mobility"
+      ],
+      "capability_refs": [
+        "床位统筹",
+        "患者转运"
+      ],
+      "resource_profile": "healthcare_standard",
+      "lifecycle_profile": "staged_background"
+    },
+    {
+      "roster_id": "curated-agent-061",
+      "system_id": "healthcare",
+      "archetype_id": "emergency_nurse",
+      "anchor_id": "anchor_huoshenshan",
+      "representation_level": "aggregate",
+      "display_sequence": 25,
+      "storyline_ids": [
+        "healthcare"
+      ],
+      "capability_refs": [
+        "急诊分诊",
+        "感染防护"
+      ],
+      "resource_profile": "healthcare_standard",
+      "lifecycle_profile": "staged_background"
+    },
+    {
+      "roster_id": "curated-agent-062",
+      "system_id": "healthcare",
+      "archetype_id": "respiratory_physician",
+      "anchor_id": "anchor_leishenshan",
+      "representation_level": "aggregate",
+      "display_sequence": 26,
+      "storyline_ids": [
+        "healthcare",
+        "detection"
+      ],
+      "capability_refs": [
+        "临床研判",
+        "重症识别"
+      ],
+      "resource_profile": "healthcare_standard",
+      "lifecycle_profile": "staged_background"
+    },
+    {
+      "roster_id": "curated-agent-063",
+      "system_id": "healthcare",
+      "archetype_id": "infection_control",
+      "anchor_id": "anchor_capacity_command",
+      "representation_level": "aggregate",
+      "display_sequence": 27,
+      "storyline_ids": [
+        "healthcare",
+        "governance"
+      ],
+      "capability_refs": [
+        "院感监测",
+        "防护流程"
+      ],
+      "resource_profile": "healthcare_standard",
+      "lifecycle_profile": "staged_background"
+    },
+    {
+      "roster_id": "curated-agent-064",
+      "system_id": "healthcare",
+      "archetype_id": "bed_transfer",
+      "anchor_id": "anchor_hongshan_gym",
+      "representation_level": "aggregate",
+      "display_sequence": 28,
+      "storyline_ids": [
+        "healthcare",
+        "mobility"
+      ],
+      "capability_refs": [
+        "床位统筹",
+        "患者转运"
+      ],
+      "resource_profile": "healthcare_standard",
+      "lifecycle_profile": "staged_background"
+    },
+    {
+      "roster_id": "curated-agent-065",
+      "system_id": "healthcare",
+      "archetype_id": "emergency_nurse",
+      "anchor_id": "anchor_wuhan_livingroom",
+      "representation_level": "aggregate",
+      "display_sequence": 29,
+      "storyline_ids": [
+        "healthcare"
+      ],
+      "capability_refs": [
+        "急诊分诊",
+        "感染防护"
+      ],
+      "resource_profile": "healthcare_standard",
+      "lifecycle_profile": "staged_background"
+    },
+    {
+      "roster_id": "curated-agent-066",
+      "system_id": "healthcare",
+      "archetype_id": "respiratory_physician",
+      "anchor_id": "anchor_fangcang_referral",
+      "representation_level": "aggregate",
+      "display_sequence": 30,
+      "storyline_ids": [
+        "healthcare",
+        "detection"
+      ],
+      "capability_refs": [
+        "临床研判",
+        "重症识别"
+      ],
+      "resource_profile": "healthcare_standard",
+      "lifecycle_profile": "staged_background"
+    },
+    {
+      "roster_id": "curated-agent-067",
+      "system_id": "healthcare",
+      "archetype_id": "infection_control",
+      "anchor_id": "anchor_huanan_market",
+      "representation_level": "aggregate",
+      "display_sequence": 31,
+      "storyline_ids": [
+        "healthcare",
+        "governance"
+      ],
+      "capability_refs": [
+        "院感监测",
+        "防护流程"
+      ],
+      "resource_profile": "healthcare_standard",
+      "lifecycle_profile": "staged_background"
+    },
+    {
+      "roster_id": "curated-agent-068",
+      "system_id": "healthcare",
+      "archetype_id": "bed_transfer",
+      "anchor_id": "anchor_jianghan_clinic_ring",
+      "representation_level": "aggregate",
+      "display_sequence": 32,
+      "storyline_ids": [
+        "healthcare",
+        "mobility"
+      ],
+      "capability_refs": [
+        "床位统筹",
+        "患者转运"
+      ],
+      "resource_profile": "healthcare_standard",
+      "lifecycle_profile": "staged_background"
+    },
+    {
+      "roster_id": "curated-agent-069",
+      "system_id": "healthcare",
+      "archetype_id": "emergency_nurse",
+      "anchor_id": "anchor_early_sample_route",
+      "representation_level": "aggregate",
+      "display_sequence": 33,
+      "storyline_ids": [
+        "healthcare"
+      ],
+      "capability_refs": [
+        "急诊分诊",
+        "感染防护"
+      ],
+      "resource_profile": "healthcare_standard",
+      "lifecycle_profile": "staged_background"
+    },
+    {
+      "roster_id": "curated-agent-070",
+      "system_id": "healthcare",
+      "archetype_id": "respiratory_physician",
+      "anchor_id": "anchor_jinyintan",
+      "representation_level": "aggregate",
+      "display_sequence": 34,
+      "storyline_ids": [
+        "healthcare",
+        "detection"
+      ],
+      "capability_refs": [
+        "临床研判",
+        "重症识别"
+      ],
+      "resource_profile": "healthcare_standard",
+      "lifecycle_profile": "staged_background"
+    },
+    {
+      "roster_id": "curated-agent-071",
+      "system_id": "healthcare",
+      "archetype_id": "infection_control",
+      "anchor_id": "anchor_tongji_union_network",
+      "representation_level": "aggregate",
+      "display_sequence": 35,
+      "storyline_ids": [
+        "healthcare",
+        "governance"
+      ],
+      "capability_refs": [
+        "院感监测",
+        "防护流程"
+      ],
+      "resource_profile": "healthcare_standard",
+      "lifecycle_profile": "staged_background"
+    },
+    {
+      "roster_id": "curated-agent-072",
+      "system_id": "healthcare",
+      "archetype_id": "bed_transfer",
+      "anchor_id": "anchor_hospital_infection_ring",
+      "representation_level": "aggregate",
+      "display_sequence": 36,
+      "storyline_ids": [
+        "healthcare",
+        "mobility"
+      ],
+      "capability_refs": [
+        "床位统筹",
+        "患者转运"
+      ],
+      "resource_profile": "healthcare_standard",
+      "lifecycle_profile": "staged_background"
+    },
+    {
+      "roster_id": "curated-agent-073",
+      "system_id": "healthcare",
+      "archetype_id": "emergency_nurse",
+      "anchor_id": "anchor_emergency_belt",
+      "representation_level": "aggregate",
+      "display_sequence": 37,
+      "storyline_ids": [
+        "healthcare"
+      ],
+      "capability_refs": [
+        "急诊分诊",
+        "感染防护"
+      ],
+      "resource_profile": "healthcare_standard",
+      "lifecycle_profile": "staged_background"
+    },
+    {
+      "roster_id": "curated-agent-074",
+      "system_id": "healthcare",
+      "archetype_id": "respiratory_physician",
+      "anchor_id": "anchor_fever_clinic_network",
+      "representation_level": "aggregate",
+      "display_sequence": 38,
+      "storyline_ids": [
+        "healthcare",
+        "detection"
+      ],
+      "capability_refs": [
+        "临床研判",
+        "重症识别"
+      ],
+      "resource_profile": "healthcare_standard",
+      "lifecycle_profile": "staged_background"
+    },
+    {
+      "roster_id": "curated-agent-075",
+      "system_id": "healthcare",
+      "archetype_id": "infection_control",
+      "anchor_id": "anchor_patient_transfer_network",
+      "representation_level": "aggregate",
+      "display_sequence": 39,
+      "storyline_ids": [
+        "healthcare",
+        "governance"
+      ],
+      "capability_refs": [
+        "院感监测",
+        "防护流程"
+      ],
+      "resource_profile": "healthcare_standard",
+      "lifecycle_profile": "staged_background"
+    },
+    {
+      "roster_id": "curated-agent-076",
+      "system_id": "healthcare",
+      "archetype_id": "bed_transfer",
+      "anchor_id": "anchor_huoshenshan",
+      "representation_level": "aggregate",
+      "display_sequence": 40,
+      "storyline_ids": [
+        "healthcare",
+        "mobility"
+      ],
+      "capability_refs": [
+        "床位统筹",
+        "患者转运"
+      ],
+      "resource_profile": "healthcare_standard",
+      "lifecycle_profile": "staged_background"
+    },
+    {
+      "roster_id": "curated-agent-077",
+      "system_id": "healthcare",
+      "archetype_id": "emergency_nurse",
+      "anchor_id": "anchor_leishenshan",
+      "representation_level": "aggregate",
+      "display_sequence": 41,
+      "storyline_ids": [
+        "healthcare"
+      ],
+      "capability_refs": [
+        "急诊分诊",
+        "感染防护"
+      ],
+      "resource_profile": "healthcare_standard",
+      "lifecycle_profile": "staged_background"
+    },
+    {
+      "roster_id": "curated-agent-078",
+      "system_id": "healthcare",
+      "archetype_id": "respiratory_physician",
+      "anchor_id": "anchor_capacity_command",
+      "representation_level": "aggregate",
+      "display_sequence": 42,
+      "storyline_ids": [
+        "healthcare",
+        "detection"
+      ],
+      "capability_refs": [
+        "临床研判",
+        "重症识别"
+      ],
+      "resource_profile": "healthcare_standard",
+      "lifecycle_profile": "staged_background"
+    },
+    {
+      "roster_id": "curated-agent-079",
+      "system_id": "healthcare",
+      "archetype_id": "infection_control",
+      "anchor_id": "anchor_hongshan_gym",
+      "representation_level": "aggregate",
+      "display_sequence": 43,
+      "storyline_ids": [
+        "healthcare",
+        "governance"
+      ],
+      "capability_refs": [
+        "院感监测",
+        "防护流程"
+      ],
+      "resource_profile": "healthcare_standard",
+      "lifecycle_profile": "staged_background"
+    },
+    {
+      "roster_id": "curated-agent-080",
+      "system_id": "healthcare",
+      "archetype_id": "bed_transfer",
+      "anchor_id": "anchor_wuhan_livingroom",
+      "representation_level": "aggregate",
+      "display_sequence": 44,
+      "storyline_ids": [
+        "healthcare",
+        "mobility"
+      ],
+      "capability_refs": [
+        "床位统筹",
+        "患者转运"
+      ],
+      "resource_profile": "healthcare_standard",
+      "lifecycle_profile": "staged_background"
+    },
+    {
+      "roster_id": "curated-agent-081",
+      "system_id": "healthcare",
+      "archetype_id": "emergency_nurse",
+      "anchor_id": "anchor_fangcang_referral",
+      "representation_level": "aggregate",
+      "display_sequence": 45,
+      "storyline_ids": [
+        "healthcare"
+      ],
+      "capability_refs": [
+        "急诊分诊",
+        "感染防护"
+      ],
+      "resource_profile": "healthcare_standard",
+      "lifecycle_profile": "staged_background"
+    },
+    {
+      "roster_id": "curated-agent-082",
+      "system_id": "healthcare",
+      "archetype_id": "respiratory_physician",
+      "anchor_id": "anchor_huanan_market",
+      "representation_level": "aggregate",
+      "display_sequence": 46,
+      "storyline_ids": [
+        "healthcare",
+        "detection"
+      ],
+      "capability_refs": [
+        "临床研判",
+        "重症识别"
+      ],
+      "resource_profile": "healthcare_standard",
+      "lifecycle_profile": "staged_background"
+    },
+    {
+      "roster_id": "curated-agent-083",
+      "system_id": "healthcare",
+      "archetype_id": "infection_control",
+      "anchor_id": "anchor_jianghan_clinic_ring",
+      "representation_level": "aggregate",
+      "display_sequence": 47,
+      "storyline_ids": [
+        "healthcare",
+        "governance"
+      ],
+      "capability_refs": [
+        "院感监测",
+        "防护流程"
+      ],
+      "resource_profile": "healthcare_standard",
+      "lifecycle_profile": "staged_background"
+    },
+    {
+      "roster_id": "curated-agent-084",
+      "system_id": "healthcare",
+      "archetype_id": "bed_transfer",
+      "anchor_id": "anchor_early_sample_route",
+      "representation_level": "aggregate",
+      "display_sequence": 48,
+      "storyline_ids": [
+        "healthcare",
+        "mobility"
+      ],
+      "capability_refs": [
+        "床位统筹",
+        "患者转运"
+      ],
+      "resource_profile": "healthcare_standard",
+      "lifecycle_profile": "staged_background"
+    },
+    {
+      "roster_id": "curated-agent-085",
+      "system_id": "healthcare",
+      "archetype_id": "emergency_nurse",
+      "anchor_id": "anchor_jinyintan",
+      "representation_level": "aggregate",
+      "display_sequence": 49,
+      "storyline_ids": [
+        "healthcare"
+      ],
+      "capability_refs": [
+        "急诊分诊",
+        "感染防护"
+      ],
+      "resource_profile": "healthcare_standard",
+      "lifecycle_profile": "staged_background"
+    },
+    {
+      "roster_id": "curated-agent-086",
+      "system_id": "healthcare",
+      "archetype_id": "respiratory_physician",
+      "anchor_id": "anchor_tongji_union_network",
+      "representation_level": "aggregate",
+      "display_sequence": 50,
+      "storyline_ids": [
+        "healthcare",
+        "detection"
+      ],
+      "capability_refs": [
+        "临床研判",
+        "重症识别"
+      ],
+      "resource_profile": "healthcare_standard",
+      "lifecycle_profile": "staged_background"
+    },
+    {
+      "roster_id": "curated-agent-087",
+      "system_id": "healthcare",
+      "archetype_id": "infection_control",
+      "anchor_id": "anchor_hospital_infection_ring",
+      "representation_level": "aggregate",
+      "display_sequence": 51,
+      "storyline_ids": [
+        "healthcare",
+        "governance"
+      ],
+      "capability_refs": [
+        "院感监测",
+        "防护流程"
+      ],
+      "resource_profile": "healthcare_standard",
+      "lifecycle_profile": "staged_background"
+    },
+    {
+      "roster_id": "curated-agent-088",
+      "system_id": "healthcare",
+      "archetype_id": "bed_transfer",
+      "anchor_id": "anchor_emergency_belt",
+      "representation_level": "aggregate",
+      "display_sequence": 52,
+      "storyline_ids": [
+        "healthcare",
+        "mobility"
+      ],
+      "capability_refs": [
+        "床位统筹",
+        "患者转运"
+      ],
+      "resource_profile": "healthcare_standard",
+      "lifecycle_profile": "staged_background"
+    },
+    {
+      "roster_id": "curated-agent-089",
+      "system_id": "healthcare",
+      "archetype_id": "emergency_nurse",
+      "anchor_id": "anchor_fever_clinic_network",
+      "representation_level": "aggregate",
+      "display_sequence": 53,
+      "storyline_ids": [
+        "healthcare"
+      ],
+      "capability_refs": [
+        "急诊分诊",
+        "感染防护"
+      ],
+      "resource_profile": "healthcare_standard",
+      "lifecycle_profile": "staged_background"
+    },
+    {
+      "roster_id": "curated-agent-090",
+      "system_id": "healthcare",
+      "archetype_id": "respiratory_physician",
+      "anchor_id": "anchor_patient_transfer_network",
+      "representation_level": "aggregate",
+      "display_sequence": 54,
+      "storyline_ids": [
+        "healthcare",
+        "detection"
+      ],
+      "capability_refs": [
+        "临床研判",
+        "重症识别"
+      ],
+      "resource_profile": "healthcare_standard",
+      "lifecycle_profile": "staged_background"
+    },
+    {
+      "roster_id": "curated-agent-091",
+      "system_id": "community",
+      "archetype_id": "grid_worker",
+      "anchor_id": "anchor_hongshan_gym",
+      "representation_level": "functional",
+      "display_sequence": 1,
+      "storyline_ids": [
+        "community",
+        "detection"
+      ],
+      "capability_refs": [
+        "入户排查",
+        "需求登记"
+      ],
+      "resource_profile": "community_standard",
+      "lifecycle_profile": "full_story_lifecycle"
+    },
+    {
+      "roster_id": "curated-agent-092",
+      "system_id": "community",
+      "archetype_id": "property_coordinator",
+      "anchor_id": "anchor_wuhan_livingroom",
+      "representation_level": "functional",
+      "display_sequence": 2,
+      "storyline_ids": [
+        "community"
+      ],
+      "capability_refs": [
+        "楼栋管理",
+        "出入协同"
+      ],
+      "resource_profile": "community_standard",
+      "lifecycle_profile": "full_story_lifecycle"
+    },
+    {
+      "roster_id": "curated-agent-093",
+      "system_id": "community",
+      "archetype_id": "community_volunteer",
+      "anchor_id": "anchor_fangcang_referral",
+      "representation_level": "functional",
+      "display_sequence": 3,
+      "storyline_ids": [
+        "community",
+        "supply"
+      ],
+      "capability_refs": [
+        "生活配送",
+        "重点照护"
+      ],
+      "resource_profile": "community_standard",
+      "lifecycle_profile": "full_story_lifecycle"
+    },
+    {
+      "roster_id": "curated-agent-094",
+      "system_id": "community",
+      "archetype_id": "vulnerable_group",
+      "anchor_id": "anchor_baibuting",
+      "representation_level": "functional",
+      "display_sequence": 4,
+      "storyline_ids": [
+        "community",
+        "governance"
+      ],
+      "capability_refs": [
+        "需求反馈",
+        "互助联络"
+      ],
+      "resource_profile": "community_standard",
+      "lifecycle_profile": "full_story_lifecycle"
+    },
+    {
+      "roster_id": "curated-agent-095",
+      "system_id": "community",
+      "archetype_id": "grid_worker",
+      "anchor_id": "anchor_wuchang_grid",
+      "representation_level": "functional",
+      "display_sequence": 5,
+      "storyline_ids": [
+        "community",
+        "detection"
+      ],
+      "capability_refs": [
+        "入户排查",
+        "需求登记"
+      ],
+      "resource_profile": "community_standard",
+      "lifecycle_profile": "full_story_lifecycle"
+    },
+    {
+      "roster_id": "curated-agent-096",
+      "system_id": "community",
+      "archetype_id": "property_coordinator",
+      "anchor_id": "anchor_vulnerable_care",
+      "representation_level": "functional",
+      "display_sequence": 6,
+      "storyline_ids": [
+        "community"
+      ],
+      "capability_refs": [
+        "楼栋管理",
+        "出入协同"
+      ],
+      "resource_profile": "community_standard",
+      "lifecycle_profile": "full_story_lifecycle"
+    },
+    {
+      "roster_id": "curated-agent-097",
+      "system_id": "community",
+      "archetype_id": "community_volunteer",
+      "anchor_id": "anchor_dongxihu_warehouse",
+      "representation_level": "functional",
+      "display_sequence": 7,
+      "storyline_ids": [
+        "community",
+        "supply"
+      ],
+      "capability_refs": [
+        "生活配送",
+        "重点照护"
+      ],
+      "resource_profile": "community_standard",
+      "lifecycle_profile": "full_story_lifecycle"
+    },
+    {
+      "roster_id": "curated-agent-098",
+      "system_id": "community",
+      "archetype_id": "vulnerable_group",
+      "anchor_id": "anchor_baishazhou_supply",
+      "representation_level": "functional",
+      "display_sequence": 8,
+      "storyline_ids": [
+        "community",
+        "governance"
+      ],
+      "capability_refs": [
+        "需求反馈",
+        "互助联络"
+      ],
+      "resource_profile": "community_standard",
+      "lifecycle_profile": "full_story_lifecycle"
+    },
+    {
+      "roster_id": "curated-agent-099",
+      "system_id": "community",
+      "archetype_id": "grid_worker",
+      "anchor_id": "anchor_pharmacy_supply",
+      "representation_level": "functional",
+      "display_sequence": 9,
+      "storyline_ids": [
+        "community",
+        "detection"
+      ],
+      "capability_refs": [
+        "入户排查",
+        "需求登记"
+      ],
+      "resource_profile": "community_standard",
+      "lifecycle_profile": "full_story_lifecycle"
+    },
+    {
+      "roster_id": "curated-agent-100",
+      "system_id": "community",
+      "archetype_id": "property_coordinator",
+      "anchor_id": "anchor_health_verification",
+      "representation_level": "functional",
+      "display_sequence": 10,
+      "storyline_ids": [
+        "community"
+      ],
+      "capability_refs": [
+        "楼栋管理",
+        "出入协同"
+      ],
+      "resource_profile": "community_standard",
+      "lifecycle_profile": "full_story_lifecycle"
+    },
+    {
+      "roster_id": "curated-agent-101",
+      "system_id": "community",
+      "archetype_id": "community_volunteer",
+      "anchor_id": "anchor_transit_restart",
+      "representation_level": "functional",
+      "display_sequence": 11,
+      "storyline_ids": [
+        "community",
+        "supply"
+      ],
+      "capability_refs": [
+        "生活配送",
+        "重点照护"
+      ],
+      "resource_profile": "community_standard",
+      "lifecycle_profile": "full_story_lifecycle"
+    },
+    {
+      "roster_id": "curated-agent-102",
+      "system_id": "community",
+      "archetype_id": "vulnerable_group",
+      "anchor_id": "anchor_city_reopening",
+      "representation_level": "functional",
+      "display_sequence": 12,
+      "storyline_ids": [
+        "community",
+        "governance"
+      ],
+      "capability_refs": [
+        "需求反馈",
+        "互助联络"
+      ],
+      "resource_profile": "community_standard",
+      "lifecycle_profile": "full_story_lifecycle"
+    },
+    {
+      "roster_id": "curated-agent-103",
+      "system_id": "community",
+      "archetype_id": "grid_worker",
+      "anchor_id": "anchor_hongshan_gym",
+      "representation_level": "functional",
+      "display_sequence": 13,
+      "storyline_ids": [
+        "community",
+        "detection"
+      ],
+      "capability_refs": [
+        "入户排查",
+        "需求登记"
+      ],
+      "resource_profile": "community_standard",
+      "lifecycle_profile": "full_story_lifecycle"
+    },
+    {
+      "roster_id": "curated-agent-104",
+      "system_id": "community",
+      "archetype_id": "property_coordinator",
+      "anchor_id": "anchor_wuhan_livingroom",
+      "representation_level": "functional",
+      "display_sequence": 14,
+      "storyline_ids": [
+        "community"
+      ],
+      "capability_refs": [
+        "楼栋管理",
+        "出入协同"
+      ],
+      "resource_profile": "community_standard",
+      "lifecycle_profile": "full_story_lifecycle"
+    },
+    {
+      "roster_id": "curated-agent-105",
+      "system_id": "community",
+      "archetype_id": "community_volunteer",
+      "anchor_id": "anchor_fangcang_referral",
+      "representation_level": "aggregate",
+      "display_sequence": 15,
+      "storyline_ids": [
+        "community",
+        "supply"
+      ],
+      "capability_refs": [
+        "生活配送",
+        "重点照护"
+      ],
+      "resource_profile": "community_standard",
+      "lifecycle_profile": "staged_background"
+    },
+    {
+      "roster_id": "curated-agent-106",
+      "system_id": "community",
+      "archetype_id": "vulnerable_group",
+      "anchor_id": "anchor_baibuting",
+      "representation_level": "aggregate",
+      "display_sequence": 16,
+      "storyline_ids": [
+        "community",
+        "governance"
+      ],
+      "capability_refs": [
+        "需求反馈",
+        "互助联络"
+      ],
+      "resource_profile": "community_standard",
+      "lifecycle_profile": "staged_background"
+    },
+    {
+      "roster_id": "curated-agent-107",
+      "system_id": "community",
+      "archetype_id": "grid_worker",
+      "anchor_id": "anchor_wuchang_grid",
+      "representation_level": "aggregate",
+      "display_sequence": 17,
+      "storyline_ids": [
+        "community",
+        "detection"
+      ],
+      "capability_refs": [
+        "入户排查",
+        "需求登记"
+      ],
+      "resource_profile": "community_standard",
+      "lifecycle_profile": "staged_background"
+    },
+    {
+      "roster_id": "curated-agent-108",
+      "system_id": "community",
+      "archetype_id": "property_coordinator",
+      "anchor_id": "anchor_vulnerable_care",
+      "representation_level": "aggregate",
+      "display_sequence": 18,
+      "storyline_ids": [
+        "community"
+      ],
+      "capability_refs": [
+        "楼栋管理",
+        "出入协同"
+      ],
+      "resource_profile": "community_standard",
+      "lifecycle_profile": "staged_background"
+    },
+    {
+      "roster_id": "curated-agent-109",
+      "system_id": "community",
+      "archetype_id": "community_volunteer",
+      "anchor_id": "anchor_dongxihu_warehouse",
+      "representation_level": "aggregate",
+      "display_sequence": 19,
+      "storyline_ids": [
+        "community",
+        "supply"
+      ],
+      "capability_refs": [
+        "生活配送",
+        "重点照护"
+      ],
+      "resource_profile": "community_standard",
+      "lifecycle_profile": "staged_background"
+    },
+    {
+      "roster_id": "curated-agent-110",
+      "system_id": "community",
+      "archetype_id": "vulnerable_group",
+      "anchor_id": "anchor_baishazhou_supply",
+      "representation_level": "aggregate",
+      "display_sequence": 20,
+      "storyline_ids": [
+        "community",
+        "governance"
+      ],
+      "capability_refs": [
+        "需求反馈",
+        "互助联络"
+      ],
+      "resource_profile": "community_standard",
+      "lifecycle_profile": "staged_background"
+    },
+    {
+      "roster_id": "curated-agent-111",
+      "system_id": "community",
+      "archetype_id": "grid_worker",
+      "anchor_id": "anchor_pharmacy_supply",
+      "representation_level": "aggregate",
+      "display_sequence": 21,
+      "storyline_ids": [
+        "community",
+        "detection"
+      ],
+      "capability_refs": [
+        "入户排查",
+        "需求登记"
+      ],
+      "resource_profile": "community_standard",
+      "lifecycle_profile": "staged_background"
+    },
+    {
+      "roster_id": "curated-agent-112",
+      "system_id": "community",
+      "archetype_id": "property_coordinator",
+      "anchor_id": "anchor_health_verification",
+      "representation_level": "aggregate",
+      "display_sequence": 22,
+      "storyline_ids": [
+        "community"
+      ],
+      "capability_refs": [
+        "楼栋管理",
+        "出入协同"
+      ],
+      "resource_profile": "community_standard",
+      "lifecycle_profile": "staged_background"
+    },
+    {
+      "roster_id": "curated-agent-113",
+      "system_id": "community",
+      "archetype_id": "community_volunteer",
+      "anchor_id": "anchor_transit_restart",
+      "representation_level": "aggregate",
+      "display_sequence": 23,
+      "storyline_ids": [
+        "community",
+        "supply"
+      ],
+      "capability_refs": [
+        "生活配送",
+        "重点照护"
+      ],
+      "resource_profile": "community_standard",
+      "lifecycle_profile": "staged_background"
+    },
+    {
+      "roster_id": "curated-agent-114",
+      "system_id": "community",
+      "archetype_id": "vulnerable_group",
+      "anchor_id": "anchor_city_reopening",
+      "representation_level": "aggregate",
+      "display_sequence": 24,
+      "storyline_ids": [
+        "community",
+        "governance"
+      ],
+      "capability_refs": [
+        "需求反馈",
+        "互助联络"
+      ],
+      "resource_profile": "community_standard",
+      "lifecycle_profile": "staged_background"
+    },
+    {
+      "roster_id": "curated-agent-115",
+      "system_id": "community",
+      "archetype_id": "grid_worker",
+      "anchor_id": "anchor_hongshan_gym",
+      "representation_level": "aggregate",
+      "display_sequence": 25,
+      "storyline_ids": [
+        "community",
+        "detection"
+      ],
+      "capability_refs": [
+        "入户排查",
+        "需求登记"
+      ],
+      "resource_profile": "community_standard",
+      "lifecycle_profile": "staged_background"
+    },
+    {
+      "roster_id": "curated-agent-116",
+      "system_id": "community",
+      "archetype_id": "property_coordinator",
+      "anchor_id": "anchor_wuhan_livingroom",
+      "representation_level": "aggregate",
+      "display_sequence": 26,
+      "storyline_ids": [
+        "community"
+      ],
+      "capability_refs": [
+        "楼栋管理",
+        "出入协同"
+      ],
+      "resource_profile": "community_standard",
+      "lifecycle_profile": "staged_background"
+    },
+    {
+      "roster_id": "curated-agent-117",
+      "system_id": "community",
+      "archetype_id": "community_volunteer",
+      "anchor_id": "anchor_fangcang_referral",
+      "representation_level": "aggregate",
+      "display_sequence": 27,
+      "storyline_ids": [
+        "community",
+        "supply"
+      ],
+      "capability_refs": [
+        "生活配送",
+        "重点照护"
+      ],
+      "resource_profile": "community_standard",
+      "lifecycle_profile": "staged_background"
+    },
+    {
+      "roster_id": "curated-agent-118",
+      "system_id": "community",
+      "archetype_id": "vulnerable_group",
+      "anchor_id": "anchor_baibuting",
+      "representation_level": "aggregate",
+      "display_sequence": 28,
+      "storyline_ids": [
+        "community",
+        "governance"
+      ],
+      "capability_refs": [
+        "需求反馈",
+        "互助联络"
+      ],
+      "resource_profile": "community_standard",
+      "lifecycle_profile": "staged_background"
+    },
+    {
+      "roster_id": "curated-agent-119",
+      "system_id": "community",
+      "archetype_id": "grid_worker",
+      "anchor_id": "anchor_wuchang_grid",
+      "representation_level": "aggregate",
+      "display_sequence": 29,
+      "storyline_ids": [
+        "community",
+        "detection"
+      ],
+      "capability_refs": [
+        "入户排查",
+        "需求登记"
+      ],
+      "resource_profile": "community_standard",
+      "lifecycle_profile": "staged_background"
+    },
+    {
+      "roster_id": "curated-agent-120",
+      "system_id": "community",
+      "archetype_id": "property_coordinator",
+      "anchor_id": "anchor_vulnerable_care",
+      "representation_level": "aggregate",
+      "display_sequence": 30,
+      "storyline_ids": [
+        "community"
+      ],
+      "capability_refs": [
+        "楼栋管理",
+        "出入协同"
+      ],
+      "resource_profile": "community_standard",
+      "lifecycle_profile": "staged_background"
+    },
+    {
+      "roster_id": "curated-agent-121",
+      "system_id": "community",
+      "archetype_id": "community_volunteer",
+      "anchor_id": "anchor_dongxihu_warehouse",
+      "representation_level": "aggregate",
+      "display_sequence": 31,
+      "storyline_ids": [
+        "community",
+        "supply"
+      ],
+      "capability_refs": [
+        "生活配送",
+        "重点照护"
+      ],
+      "resource_profile": "community_standard",
+      "lifecycle_profile": "staged_background"
+    },
+    {
+      "roster_id": "curated-agent-122",
+      "system_id": "community",
+      "archetype_id": "vulnerable_group",
+      "anchor_id": "anchor_baishazhou_supply",
+      "representation_level": "aggregate",
+      "display_sequence": 32,
+      "storyline_ids": [
+        "community",
+        "governance"
+      ],
+      "capability_refs": [
+        "需求反馈",
+        "互助联络"
+      ],
+      "resource_profile": "community_standard",
+      "lifecycle_profile": "staged_background"
+    },
+    {
+      "roster_id": "curated-agent-123",
+      "system_id": "community",
+      "archetype_id": "grid_worker",
+      "anchor_id": "anchor_pharmacy_supply",
+      "representation_level": "aggregate",
+      "display_sequence": 33,
+      "storyline_ids": [
+        "community",
+        "detection"
+      ],
+      "capability_refs": [
+        "入户排查",
+        "需求登记"
+      ],
+      "resource_profile": "community_standard",
+      "lifecycle_profile": "staged_background"
+    },
+    {
+      "roster_id": "curated-agent-124",
+      "system_id": "community",
+      "archetype_id": "property_coordinator",
+      "anchor_id": "anchor_health_verification",
+      "representation_level": "aggregate",
+      "display_sequence": 34,
+      "storyline_ids": [
+        "community"
+      ],
+      "capability_refs": [
+        "楼栋管理",
+        "出入协同"
+      ],
+      "resource_profile": "community_standard",
+      "lifecycle_profile": "staged_background"
+    },
+    {
+      "roster_id": "curated-agent-125",
+      "system_id": "community",
+      "archetype_id": "community_volunteer",
+      "anchor_id": "anchor_transit_restart",
+      "representation_level": "aggregate",
+      "display_sequence": 35,
+      "storyline_ids": [
+        "community",
+        "supply"
+      ],
+      "capability_refs": [
+        "生活配送",
+        "重点照护"
+      ],
+      "resource_profile": "community_standard",
+      "lifecycle_profile": "staged_background"
+    },
+    {
+      "roster_id": "curated-agent-126",
+      "system_id": "community",
+      "archetype_id": "vulnerable_group",
+      "anchor_id": "anchor_city_reopening",
+      "representation_level": "aggregate",
+      "display_sequence": 36,
+      "storyline_ids": [
+        "community",
+        "governance"
+      ],
+      "capability_refs": [
+        "需求反馈",
+        "互助联络"
+      ],
+      "resource_profile": "community_standard",
+      "lifecycle_profile": "staged_background"
+    },
+    {
+      "roster_id": "curated-agent-127",
+      "system_id": "community",
+      "archetype_id": "grid_worker",
+      "anchor_id": "anchor_hongshan_gym",
+      "representation_level": "aggregate",
+      "display_sequence": 37,
+      "storyline_ids": [
+        "community",
+        "detection"
+      ],
+      "capability_refs": [
+        "入户排查",
+        "需求登记"
+      ],
+      "resource_profile": "community_standard",
+      "lifecycle_profile": "staged_background"
+    },
+    {
+      "roster_id": "curated-agent-128",
+      "system_id": "community",
+      "archetype_id": "property_coordinator",
+      "anchor_id": "anchor_wuhan_livingroom",
+      "representation_level": "aggregate",
+      "display_sequence": 38,
+      "storyline_ids": [
+        "community"
+      ],
+      "capability_refs": [
+        "楼栋管理",
+        "出入协同"
+      ],
+      "resource_profile": "community_standard",
+      "lifecycle_profile": "staged_background"
+    },
+    {
+      "roster_id": "curated-agent-129",
+      "system_id": "community",
+      "archetype_id": "community_volunteer",
+      "anchor_id": "anchor_fangcang_referral",
+      "representation_level": "aggregate",
+      "display_sequence": 39,
+      "storyline_ids": [
+        "community",
+        "supply"
+      ],
+      "capability_refs": [
+        "生活配送",
+        "重点照护"
+      ],
+      "resource_profile": "community_standard",
+      "lifecycle_profile": "staged_background"
+    },
+    {
+      "roster_id": "curated-agent-130",
+      "system_id": "community",
+      "archetype_id": "vulnerable_group",
+      "anchor_id": "anchor_baibuting",
+      "representation_level": "aggregate",
+      "display_sequence": 40,
+      "storyline_ids": [
+        "community",
+        "governance"
+      ],
+      "capability_refs": [
+        "需求反馈",
+        "互助联络"
+      ],
+      "resource_profile": "community_standard",
+      "lifecycle_profile": "staged_background"
+    },
+    {
+      "roster_id": "curated-agent-131",
+      "system_id": "community",
+      "archetype_id": "grid_worker",
+      "anchor_id": "anchor_wuchang_grid",
+      "representation_level": "aggregate",
+      "display_sequence": 41,
+      "storyline_ids": [
+        "community",
+        "detection"
+      ],
+      "capability_refs": [
+        "入户排查",
+        "需求登记"
+      ],
+      "resource_profile": "community_standard",
+      "lifecycle_profile": "staged_background"
+    },
+    {
+      "roster_id": "curated-agent-132",
+      "system_id": "community",
+      "archetype_id": "property_coordinator",
+      "anchor_id": "anchor_vulnerable_care",
+      "representation_level": "aggregate",
+      "display_sequence": 42,
+      "storyline_ids": [
+        "community"
+      ],
+      "capability_refs": [
+        "楼栋管理",
+        "出入协同"
+      ],
+      "resource_profile": "community_standard",
+      "lifecycle_profile": "staged_background"
+    },
+    {
+      "roster_id": "curated-agent-133",
+      "system_id": "community",
+      "archetype_id": "community_volunteer",
+      "anchor_id": "anchor_dongxihu_warehouse",
+      "representation_level": "aggregate",
+      "display_sequence": 43,
+      "storyline_ids": [
+        "community",
+        "supply"
+      ],
+      "capability_refs": [
+        "生活配送",
+        "重点照护"
+      ],
+      "resource_profile": "community_standard",
+      "lifecycle_profile": "staged_background"
+    },
+    {
+      "roster_id": "curated-agent-134",
+      "system_id": "community",
+      "archetype_id": "vulnerable_group",
+      "anchor_id": "anchor_baishazhou_supply",
+      "representation_level": "aggregate",
+      "display_sequence": 44,
+      "storyline_ids": [
+        "community",
+        "governance"
+      ],
+      "capability_refs": [
+        "需求反馈",
+        "互助联络"
+      ],
+      "resource_profile": "community_standard",
+      "lifecycle_profile": "staged_background"
+    },
+    {
+      "roster_id": "curated-agent-135",
+      "system_id": "community",
+      "archetype_id": "grid_worker",
+      "anchor_id": "anchor_pharmacy_supply",
+      "representation_level": "aggregate",
+      "display_sequence": 45,
+      "storyline_ids": [
+        "community",
+        "detection"
+      ],
+      "capability_refs": [
+        "入户排查",
+        "需求登记"
+      ],
+      "resource_profile": "community_standard",
+      "lifecycle_profile": "staged_background"
+    },
+    {
+      "roster_id": "curated-agent-136",
+      "system_id": "community",
+      "archetype_id": "property_coordinator",
+      "anchor_id": "anchor_health_verification",
+      "representation_level": "aggregate",
+      "display_sequence": 46,
+      "storyline_ids": [
+        "community"
+      ],
+      "capability_refs": [
+        "楼栋管理",
+        "出入协同"
+      ],
+      "resource_profile": "community_standard",
+      "lifecycle_profile": "staged_background"
+    },
+    {
+      "roster_id": "curated-agent-137",
+      "system_id": "community",
+      "archetype_id": "community_volunteer",
+      "anchor_id": "anchor_transit_restart",
+      "representation_level": "aggregate",
+      "display_sequence": 47,
+      "storyline_ids": [
+        "community",
+        "supply"
+      ],
+      "capability_refs": [
+        "生活配送",
+        "重点照护"
+      ],
+      "resource_profile": "community_standard",
+      "lifecycle_profile": "staged_background"
+    },
+    {
+      "roster_id": "curated-agent-138",
+      "system_id": "community",
+      "archetype_id": "vulnerable_group",
+      "anchor_id": "anchor_city_reopening",
+      "representation_level": "aggregate",
+      "display_sequence": 48,
+      "storyline_ids": [
+        "community",
+        "governance"
+      ],
+      "capability_refs": [
+        "需求反馈",
+        "互助联络"
+      ],
+      "resource_profile": "community_standard",
+      "lifecycle_profile": "staged_background"
+    },
+    {
+      "roster_id": "curated-agent-139",
+      "system_id": "mobility",
+      "archetype_id": "rail_dispatcher",
+      "anchor_id": "anchor_hankou_station",
+      "representation_level": "functional",
+      "display_sequence": 1,
+      "storyline_ids": [
+        "mobility"
+      ],
+      "capability_refs": [
+        "客流调度",
+        "班次协同"
+      ],
+      "resource_profile": "mobility_standard",
+      "lifecycle_profile": "full_story_lifecycle"
+    },
+    {
+      "roster_id": "curated-agent-140",
+      "system_id": "mobility",
+      "archetype_id": "airport_screener",
+      "anchor_id": "anchor_wuchang_station",
+      "representation_level": "functional",
+      "display_sequence": 2,
+      "storyline_ids": [
+        "mobility",
+        "detection"
+      ],
+      "capability_refs": [
+        "健康筛查",
+        "异常移交"
+      ],
+      "resource_profile": "mobility_standard",
+      "lifecycle_profile": "full_story_lifecycle"
+    },
+    {
+      "roster_id": "curated-agent-141",
+      "system_id": "mobility",
+      "archetype_id": "transport_driver",
+      "anchor_id": "anchor_wuhan_station",
+      "representation_level": "functional",
+      "display_sequence": 3,
+      "storyline_ids": [
+        "mobility",
+        "healthcare"
+      ],
+      "capability_refs": [
+        "闭环转运",
+        "路线执行"
+      ],
+      "resource_profile": "mobility_standard",
+      "lifecycle_profile": "full_story_lifecycle"
+    },
+    {
+      "roster_id": "curated-agent-142",
+      "system_id": "mobility",
+      "archetype_id": "traffic_controller",
+      "anchor_id": "anchor_tianhe_airport",
+      "representation_level": "functional",
+      "display_sequence": 4,
+      "storyline_ids": [
+        "mobility",
+        "governance"
+      ],
+      "capability_refs": [
+        "节点管控",
+        "通行保障"
+      ],
+      "resource_profile": "mobility_standard",
+      "lifecycle_profile": "full_story_lifecycle"
+    },
+    {
+      "roster_id": "curated-agent-143",
+      "system_id": "mobility",
+      "archetype_id": "rail_dispatcher",
+      "anchor_id": "anchor_airport_screening",
+      "representation_level": "functional",
+      "display_sequence": 5,
+      "storyline_ids": [
+        "mobility"
+      ],
+      "capability_refs": [
+        "客流调度",
+        "班次协同"
+      ],
+      "resource_profile": "mobility_standard",
+      "lifecycle_profile": "full_story_lifecycle"
+    },
+    {
+      "roster_id": "curated-agent-144",
+      "system_id": "mobility",
+      "archetype_id": "airport_screener",
+      "anchor_id": "anchor_gateway_transfer",
+      "representation_level": "functional",
+      "display_sequence": 6,
+      "storyline_ids": [
+        "mobility",
+        "detection"
+      ],
+      "capability_refs": [
+        "健康筛查",
+        "异常移交"
+      ],
+      "resource_profile": "mobility_standard",
+      "lifecycle_profile": "full_story_lifecycle"
+    },
+    {
+      "roster_id": "curated-agent-145",
+      "system_id": "mobility",
+      "archetype_id": "transport_driver",
+      "anchor_id": "anchor_health_verification",
+      "representation_level": "functional",
+      "display_sequence": 7,
+      "storyline_ids": [
+        "mobility",
+        "healthcare"
+      ],
+      "capability_refs": [
+        "闭环转运",
+        "路线执行"
+      ],
+      "resource_profile": "mobility_standard",
+      "lifecycle_profile": "full_story_lifecycle"
+    },
+    {
+      "roster_id": "curated-agent-146",
+      "system_id": "mobility",
+      "archetype_id": "traffic_controller",
+      "anchor_id": "anchor_transit_restart",
+      "representation_level": "functional",
+      "display_sequence": 8,
+      "storyline_ids": [
+        "mobility",
+        "governance"
+      ],
+      "capability_refs": [
+        "节点管控",
+        "通行保障"
+      ],
+      "resource_profile": "mobility_standard",
+      "lifecycle_profile": "full_story_lifecycle"
+    },
+    {
+      "roster_id": "curated-agent-147",
+      "system_id": "mobility",
+      "archetype_id": "rail_dispatcher",
+      "anchor_id": "anchor_city_reopening",
+      "representation_level": "aggregate",
+      "display_sequence": 9,
+      "storyline_ids": [
+        "mobility"
+      ],
+      "capability_refs": [
+        "客流调度",
+        "班次协同"
+      ],
+      "resource_profile": "mobility_standard",
+      "lifecycle_profile": "staged_background"
+    },
+    {
+      "roster_id": "curated-agent-148",
+      "system_id": "mobility",
+      "archetype_id": "airport_screener",
+      "anchor_id": "anchor_hankou_station",
+      "representation_level": "aggregate",
+      "display_sequence": 10,
+      "storyline_ids": [
+        "mobility",
+        "detection"
+      ],
+      "capability_refs": [
+        "健康筛查",
+        "异常移交"
+      ],
+      "resource_profile": "mobility_standard",
+      "lifecycle_profile": "staged_background"
+    },
+    {
+      "roster_id": "curated-agent-149",
+      "system_id": "mobility",
+      "archetype_id": "transport_driver",
+      "anchor_id": "anchor_wuchang_station",
+      "representation_level": "aggregate",
+      "display_sequence": 11,
+      "storyline_ids": [
+        "mobility",
+        "healthcare"
+      ],
+      "capability_refs": [
+        "闭环转运",
+        "路线执行"
+      ],
+      "resource_profile": "mobility_standard",
+      "lifecycle_profile": "staged_background"
+    },
+    {
+      "roster_id": "curated-agent-150",
+      "system_id": "mobility",
+      "archetype_id": "traffic_controller",
+      "anchor_id": "anchor_wuhan_station",
+      "representation_level": "aggregate",
+      "display_sequence": 12,
+      "storyline_ids": [
+        "mobility",
+        "governance"
+      ],
+      "capability_refs": [
+        "节点管控",
+        "通行保障"
+      ],
+      "resource_profile": "mobility_standard",
+      "lifecycle_profile": "staged_background"
+    },
+    {
+      "roster_id": "curated-agent-151",
+      "system_id": "mobility",
+      "archetype_id": "rail_dispatcher",
+      "anchor_id": "anchor_tianhe_airport",
+      "representation_level": "aggregate",
+      "display_sequence": 13,
+      "storyline_ids": [
+        "mobility"
+      ],
+      "capability_refs": [
+        "客流调度",
+        "班次协同"
+      ],
+      "resource_profile": "mobility_standard",
+      "lifecycle_profile": "staged_background"
+    },
+    {
+      "roster_id": "curated-agent-152",
+      "system_id": "mobility",
+      "archetype_id": "airport_screener",
+      "anchor_id": "anchor_airport_screening",
+      "representation_level": "aggregate",
+      "display_sequence": 14,
+      "storyline_ids": [
+        "mobility",
+        "detection"
+      ],
+      "capability_refs": [
+        "健康筛查",
+        "异常移交"
+      ],
+      "resource_profile": "mobility_standard",
+      "lifecycle_profile": "staged_background"
+    },
+    {
+      "roster_id": "curated-agent-153",
+      "system_id": "mobility",
+      "archetype_id": "transport_driver",
+      "anchor_id": "anchor_gateway_transfer",
+      "representation_level": "aggregate",
+      "display_sequence": 15,
+      "storyline_ids": [
+        "mobility",
+        "healthcare"
+      ],
+      "capability_refs": [
+        "闭环转运",
+        "路线执行"
+      ],
+      "resource_profile": "mobility_standard",
+      "lifecycle_profile": "staged_background"
+    },
+    {
+      "roster_id": "curated-agent-154",
+      "system_id": "mobility",
+      "archetype_id": "traffic_controller",
+      "anchor_id": "anchor_health_verification",
+      "representation_level": "aggregate",
+      "display_sequence": 16,
+      "storyline_ids": [
+        "mobility",
+        "governance"
+      ],
+      "capability_refs": [
+        "节点管控",
+        "通行保障"
+      ],
+      "resource_profile": "mobility_standard",
+      "lifecycle_profile": "staged_background"
+    },
+    {
+      "roster_id": "curated-agent-155",
+      "system_id": "mobility",
+      "archetype_id": "rail_dispatcher",
+      "anchor_id": "anchor_transit_restart",
+      "representation_level": "aggregate",
+      "display_sequence": 17,
+      "storyline_ids": [
+        "mobility"
+      ],
+      "capability_refs": [
+        "客流调度",
+        "班次协同"
+      ],
+      "resource_profile": "mobility_standard",
+      "lifecycle_profile": "staged_background"
+    },
+    {
+      "roster_id": "curated-agent-156",
+      "system_id": "mobility",
+      "archetype_id": "airport_screener",
+      "anchor_id": "anchor_city_reopening",
+      "representation_level": "aggregate",
+      "display_sequence": 18,
+      "storyline_ids": [
+        "mobility",
+        "detection"
+      ],
+      "capability_refs": [
+        "健康筛查",
+        "异常移交"
+      ],
+      "resource_profile": "mobility_standard",
+      "lifecycle_profile": "staged_background"
+    },
+    {
+      "roster_id": "curated-agent-157",
+      "system_id": "mobility",
+      "archetype_id": "transport_driver",
+      "anchor_id": "anchor_hankou_station",
+      "representation_level": "aggregate",
+      "display_sequence": 19,
+      "storyline_ids": [
+        "mobility",
+        "healthcare"
+      ],
+      "capability_refs": [
+        "闭环转运",
+        "路线执行"
+      ],
+      "resource_profile": "mobility_standard",
+      "lifecycle_profile": "staged_background"
+    },
+    {
+      "roster_id": "curated-agent-158",
+      "system_id": "mobility",
+      "archetype_id": "traffic_controller",
+      "anchor_id": "anchor_wuchang_station",
+      "representation_level": "aggregate",
+      "display_sequence": 20,
+      "storyline_ids": [
+        "mobility",
+        "governance"
+      ],
+      "capability_refs": [
+        "节点管控",
+        "通行保障"
+      ],
+      "resource_profile": "mobility_standard",
+      "lifecycle_profile": "staged_background"
+    },
+    {
+      "roster_id": "curated-agent-159",
+      "system_id": "mobility",
+      "archetype_id": "rail_dispatcher",
+      "anchor_id": "anchor_wuhan_station",
+      "representation_level": "aggregate",
+      "display_sequence": 21,
+      "storyline_ids": [
+        "mobility"
+      ],
+      "capability_refs": [
+        "客流调度",
+        "班次协同"
+      ],
+      "resource_profile": "mobility_standard",
+      "lifecycle_profile": "staged_background"
+    },
+    {
+      "roster_id": "curated-agent-160",
+      "system_id": "mobility",
+      "archetype_id": "airport_screener",
+      "anchor_id": "anchor_tianhe_airport",
+      "representation_level": "aggregate",
+      "display_sequence": 22,
+      "storyline_ids": [
+        "mobility",
+        "detection"
+      ],
+      "capability_refs": [
+        "健康筛查",
+        "异常移交"
+      ],
+      "resource_profile": "mobility_standard",
+      "lifecycle_profile": "staged_background"
+    },
+    {
+      "roster_id": "curated-agent-161",
+      "system_id": "mobility",
+      "archetype_id": "transport_driver",
+      "anchor_id": "anchor_airport_screening",
+      "representation_level": "aggregate",
+      "display_sequence": 23,
+      "storyline_ids": [
+        "mobility",
+        "healthcare"
+      ],
+      "capability_refs": [
+        "闭环转运",
+        "路线执行"
+      ],
+      "resource_profile": "mobility_standard",
+      "lifecycle_profile": "staged_background"
+    },
+    {
+      "roster_id": "curated-agent-162",
+      "system_id": "mobility",
+      "archetype_id": "traffic_controller",
+      "anchor_id": "anchor_gateway_transfer",
+      "representation_level": "aggregate",
+      "display_sequence": 24,
+      "storyline_ids": [
+        "mobility",
+        "governance"
+      ],
+      "capability_refs": [
+        "节点管控",
+        "通行保障"
+      ],
+      "resource_profile": "mobility_standard",
+      "lifecycle_profile": "staged_background"
+    },
+    {
+      "roster_id": "curated-agent-163",
+      "system_id": "mobility",
+      "archetype_id": "rail_dispatcher",
+      "anchor_id": "anchor_health_verification",
+      "representation_level": "aggregate",
+      "display_sequence": 25,
+      "storyline_ids": [
+        "mobility"
+      ],
+      "capability_refs": [
+        "客流调度",
+        "班次协同"
+      ],
+      "resource_profile": "mobility_standard",
+      "lifecycle_profile": "staged_background"
+    },
+    {
+      "roster_id": "curated-agent-164",
+      "system_id": "mobility",
+      "archetype_id": "airport_screener",
+      "anchor_id": "anchor_transit_restart",
+      "representation_level": "aggregate",
+      "display_sequence": 26,
+      "storyline_ids": [
+        "mobility",
+        "detection"
+      ],
+      "capability_refs": [
+        "健康筛查",
+        "异常移交"
+      ],
+      "resource_profile": "mobility_standard",
+      "lifecycle_profile": "staged_background"
+    },
+    {
+      "roster_id": "curated-agent-165",
+      "system_id": "mobility",
+      "archetype_id": "transport_driver",
+      "anchor_id": "anchor_city_reopening",
+      "representation_level": "aggregate",
+      "display_sequence": 27,
+      "storyline_ids": [
+        "mobility",
+        "healthcare"
+      ],
+      "capability_refs": [
+        "闭环转运",
+        "路线执行"
+      ],
+      "resource_profile": "mobility_standard",
+      "lifecycle_profile": "staged_background"
+    },
+    {
+      "roster_id": "curated-agent-166",
+      "system_id": "mobility",
+      "archetype_id": "traffic_controller",
+      "anchor_id": "anchor_hankou_station",
+      "representation_level": "aggregate",
+      "display_sequence": 28,
+      "storyline_ids": [
+        "mobility",
+        "governance"
+      ],
+      "capability_refs": [
+        "节点管控",
+        "通行保障"
+      ],
+      "resource_profile": "mobility_standard",
+      "lifecycle_profile": "staged_background"
+    },
+    {
+      "roster_id": "curated-agent-167",
+      "system_id": "mobility",
+      "archetype_id": "rail_dispatcher",
+      "anchor_id": "anchor_wuchang_station",
+      "representation_level": "aggregate",
+      "display_sequence": 29,
+      "storyline_ids": [
+        "mobility"
+      ],
+      "capability_refs": [
+        "客流调度",
+        "班次协同"
+      ],
+      "resource_profile": "mobility_standard",
+      "lifecycle_profile": "staged_background"
+    },
+    {
+      "roster_id": "curated-agent-168",
+      "system_id": "mobility",
+      "archetype_id": "airport_screener",
+      "anchor_id": "anchor_wuhan_station",
+      "representation_level": "aggregate",
+      "display_sequence": 30,
+      "storyline_ids": [
+        "mobility",
+        "detection"
+      ],
+      "capability_refs": [
+        "健康筛查",
+        "异常移交"
+      ],
+      "resource_profile": "mobility_standard",
+      "lifecycle_profile": "staged_background"
+    },
+    {
+      "roster_id": "curated-agent-169",
+      "system_id": "supply",
+      "archetype_id": "medical_procurement",
+      "anchor_id": "anchor_huoshenshan",
+      "representation_level": "functional",
+      "display_sequence": 1,
+      "storyline_ids": [
+        "supply",
+        "healthcare"
+      ],
+      "capability_refs": [
+        "需求汇总",
+        "紧急采购"
+      ],
+      "resource_profile": "supply_standard",
+      "lifecycle_profile": "full_story_lifecycle"
+    },
+    {
+      "roster_id": "curated-agent-170",
+      "system_id": "supply",
+      "archetype_id": "warehouse_manager",
+      "anchor_id": "anchor_leishenshan",
+      "representation_level": "functional",
+      "display_sequence": 2,
+      "storyline_ids": [
+        "supply"
+      ],
+      "capability_refs": [
+        "库存盘点",
+        "分拨组织"
+      ],
+      "resource_profile": "supply_standard",
+      "lifecycle_profile": "full_story_lifecycle"
+    },
+    {
+      "roster_id": "curated-agent-171",
+      "system_id": "supply",
+      "archetype_id": "logistics_dispatcher",
+      "anchor_id": "anchor_capacity_command",
+      "representation_level": "functional",
+      "display_sequence": 3,
+      "storyline_ids": [
+        "supply",
+        "mobility"
+      ],
+      "capability_refs": [
+        "跨区调拨",
+        "线路协调"
+      ],
+      "resource_profile": "supply_standard",
+      "lifecycle_profile": "full_story_lifecycle"
+    },
+    {
+      "roster_id": "curated-agent-172",
+      "system_id": "supply",
+      "archetype_id": "pharmacy_manager",
+      "anchor_id": "anchor_dongxihu_warehouse",
+      "representation_level": "functional",
+      "display_sequence": 4,
+      "storyline_ids": [
+        "supply",
+        "community"
+      ],
+      "capability_refs": [
+        "药品保供",
+        "处方衔接"
+      ],
+      "resource_profile": "supply_standard",
+      "lifecycle_profile": "full_story_lifecycle"
+    },
+    {
+      "roster_id": "curated-agent-173",
+      "system_id": "supply",
+      "archetype_id": "medical_procurement",
+      "anchor_id": "anchor_baishazhou_supply",
+      "representation_level": "functional",
+      "display_sequence": 5,
+      "storyline_ids": [
+        "supply",
+        "healthcare"
+      ],
+      "capability_refs": [
+        "需求汇总",
+        "紧急采购"
+      ],
+      "resource_profile": "supply_standard",
+      "lifecycle_profile": "full_story_lifecycle"
+    },
+    {
+      "roster_id": "curated-agent-174",
+      "system_id": "supply",
+      "archetype_id": "warehouse_manager",
+      "anchor_id": "anchor_pharmacy_supply",
+      "representation_level": "functional",
+      "display_sequence": 6,
+      "storyline_ids": [
+        "supply"
+      ],
+      "capability_refs": [
+        "库存盘点",
+        "分拨组织"
+      ],
+      "resource_profile": "supply_standard",
+      "lifecycle_profile": "full_story_lifecycle"
+    },
+    {
+      "roster_id": "curated-agent-175",
+      "system_id": "supply",
+      "archetype_id": "logistics_dispatcher",
+      "anchor_id": "anchor_huoshenshan",
+      "representation_level": "functional",
+      "display_sequence": 7,
+      "storyline_ids": [
+        "supply",
+        "mobility"
+      ],
+      "capability_refs": [
+        "跨区调拨",
+        "线路协调"
+      ],
+      "resource_profile": "supply_standard",
+      "lifecycle_profile": "full_story_lifecycle"
+    },
+    {
+      "roster_id": "curated-agent-176",
+      "system_id": "supply",
+      "archetype_id": "pharmacy_manager",
+      "anchor_id": "anchor_leishenshan",
+      "representation_level": "functional",
+      "display_sequence": 8,
+      "storyline_ids": [
+        "supply",
+        "community"
+      ],
+      "capability_refs": [
+        "药品保供",
+        "处方衔接"
+      ],
+      "resource_profile": "supply_standard",
+      "lifecycle_profile": "full_story_lifecycle"
+    },
+    {
+      "roster_id": "curated-agent-177",
+      "system_id": "supply",
+      "archetype_id": "medical_procurement",
+      "anchor_id": "anchor_capacity_command",
+      "representation_level": "functional",
+      "display_sequence": 9,
+      "storyline_ids": [
+        "supply",
+        "healthcare"
+      ],
+      "capability_refs": [
+        "需求汇总",
+        "紧急采购"
+      ],
+      "resource_profile": "supply_standard",
+      "lifecycle_profile": "full_story_lifecycle"
+    },
+    {
+      "roster_id": "curated-agent-178",
+      "system_id": "supply",
+      "archetype_id": "warehouse_manager",
+      "anchor_id": "anchor_dongxihu_warehouse",
+      "representation_level": "functional",
+      "display_sequence": 10,
+      "storyline_ids": [
+        "supply"
+      ],
+      "capability_refs": [
+        "库存盘点",
+        "分拨组织"
+      ],
+      "resource_profile": "supply_standard",
+      "lifecycle_profile": "full_story_lifecycle"
+    },
+    {
+      "roster_id": "curated-agent-179",
+      "system_id": "supply",
+      "archetype_id": "logistics_dispatcher",
+      "anchor_id": "anchor_baishazhou_supply",
+      "representation_level": "aggregate",
+      "display_sequence": 11,
+      "storyline_ids": [
+        "supply",
+        "mobility"
+      ],
+      "capability_refs": [
+        "跨区调拨",
+        "线路协调"
+      ],
+      "resource_profile": "supply_standard",
+      "lifecycle_profile": "staged_background"
+    },
+    {
+      "roster_id": "curated-agent-180",
+      "system_id": "supply",
+      "archetype_id": "pharmacy_manager",
+      "anchor_id": "anchor_pharmacy_supply",
+      "representation_level": "aggregate",
+      "display_sequence": 12,
+      "storyline_ids": [
+        "supply",
+        "community"
+      ],
+      "capability_refs": [
+        "药品保供",
+        "处方衔接"
+      ],
+      "resource_profile": "supply_standard",
+      "lifecycle_profile": "staged_background"
+    },
+    {
+      "roster_id": "curated-agent-181",
+      "system_id": "supply",
+      "archetype_id": "medical_procurement",
+      "anchor_id": "anchor_huoshenshan",
+      "representation_level": "aggregate",
+      "display_sequence": 13,
+      "storyline_ids": [
+        "supply",
+        "healthcare"
+      ],
+      "capability_refs": [
+        "需求汇总",
+        "紧急采购"
+      ],
+      "resource_profile": "supply_standard",
+      "lifecycle_profile": "staged_background"
+    },
+    {
+      "roster_id": "curated-agent-182",
+      "system_id": "supply",
+      "archetype_id": "warehouse_manager",
+      "anchor_id": "anchor_leishenshan",
+      "representation_level": "aggregate",
+      "display_sequence": 14,
+      "storyline_ids": [
+        "supply"
+      ],
+      "capability_refs": [
+        "库存盘点",
+        "分拨组织"
+      ],
+      "resource_profile": "supply_standard",
+      "lifecycle_profile": "staged_background"
+    },
+    {
+      "roster_id": "curated-agent-183",
+      "system_id": "supply",
+      "archetype_id": "logistics_dispatcher",
+      "anchor_id": "anchor_capacity_command",
+      "representation_level": "aggregate",
+      "display_sequence": 15,
+      "storyline_ids": [
+        "supply",
+        "mobility"
+      ],
+      "capability_refs": [
+        "跨区调拨",
+        "线路协调"
+      ],
+      "resource_profile": "supply_standard",
+      "lifecycle_profile": "staged_background"
+    },
+    {
+      "roster_id": "curated-agent-184",
+      "system_id": "supply",
+      "archetype_id": "pharmacy_manager",
+      "anchor_id": "anchor_dongxihu_warehouse",
+      "representation_level": "aggregate",
+      "display_sequence": 16,
+      "storyline_ids": [
+        "supply",
+        "community"
+      ],
+      "capability_refs": [
+        "药品保供",
+        "处方衔接"
+      ],
+      "resource_profile": "supply_standard",
+      "lifecycle_profile": "staged_background"
+    },
+    {
+      "roster_id": "curated-agent-185",
+      "system_id": "supply",
+      "archetype_id": "medical_procurement",
+      "anchor_id": "anchor_baishazhou_supply",
+      "representation_level": "aggregate",
+      "display_sequence": 17,
+      "storyline_ids": [
+        "supply",
+        "healthcare"
+      ],
+      "capability_refs": [
+        "需求汇总",
+        "紧急采购"
+      ],
+      "resource_profile": "supply_standard",
+      "lifecycle_profile": "staged_background"
+    },
+    {
+      "roster_id": "curated-agent-186",
+      "system_id": "supply",
+      "archetype_id": "warehouse_manager",
+      "anchor_id": "anchor_pharmacy_supply",
+      "representation_level": "aggregate",
+      "display_sequence": 18,
+      "storyline_ids": [
+        "supply"
+      ],
+      "capability_refs": [
+        "库存盘点",
+        "分拨组织"
+      ],
+      "resource_profile": "supply_standard",
+      "lifecycle_profile": "staged_background"
+    },
+    {
+      "roster_id": "curated-agent-187",
+      "system_id": "supply",
+      "archetype_id": "logistics_dispatcher",
+      "anchor_id": "anchor_huoshenshan",
+      "representation_level": "aggregate",
+      "display_sequence": 19,
+      "storyline_ids": [
+        "supply",
+        "mobility"
+      ],
+      "capability_refs": [
+        "跨区调拨",
+        "线路协调"
+      ],
+      "resource_profile": "supply_standard",
+      "lifecycle_profile": "staged_background"
+    },
+    {
+      "roster_id": "curated-agent-188",
+      "system_id": "supply",
+      "archetype_id": "pharmacy_manager",
+      "anchor_id": "anchor_leishenshan",
+      "representation_level": "aggregate",
+      "display_sequence": 20,
+      "storyline_ids": [
+        "supply",
+        "community"
+      ],
+      "capability_refs": [
+        "药品保供",
+        "处方衔接"
+      ],
+      "resource_profile": "supply_standard",
+      "lifecycle_profile": "staged_background"
+    },
+    {
+      "roster_id": "curated-agent-189",
+      "system_id": "supply",
+      "archetype_id": "medical_procurement",
+      "anchor_id": "anchor_capacity_command",
+      "representation_level": "aggregate",
+      "display_sequence": 21,
+      "storyline_ids": [
+        "supply",
+        "healthcare"
+      ],
+      "capability_refs": [
+        "需求汇总",
+        "紧急采购"
+      ],
+      "resource_profile": "supply_standard",
+      "lifecycle_profile": "staged_background"
+    },
+    {
+      "roster_id": "curated-agent-190",
+      "system_id": "supply",
+      "archetype_id": "warehouse_manager",
+      "anchor_id": "anchor_dongxihu_warehouse",
+      "representation_level": "aggregate",
+      "display_sequence": 22,
+      "storyline_ids": [
+        "supply"
+      ],
+      "capability_refs": [
+        "库存盘点",
+        "分拨组织"
+      ],
+      "resource_profile": "supply_standard",
+      "lifecycle_profile": "staged_background"
+    },
+    {
+      "roster_id": "curated-agent-191",
+      "system_id": "supply",
+      "archetype_id": "logistics_dispatcher",
+      "anchor_id": "anchor_baishazhou_supply",
+      "representation_level": "aggregate",
+      "display_sequence": 23,
+      "storyline_ids": [
+        "supply",
+        "mobility"
+      ],
+      "capability_refs": [
+        "跨区调拨",
+        "线路协调"
+      ],
+      "resource_profile": "supply_standard",
+      "lifecycle_profile": "staged_background"
+    },
+    {
+      "roster_id": "curated-agent-192",
+      "system_id": "supply",
+      "archetype_id": "pharmacy_manager",
+      "anchor_id": "anchor_pharmacy_supply",
+      "representation_level": "aggregate",
+      "display_sequence": 24,
+      "storyline_ids": [
+        "supply",
+        "community"
+      ],
+      "capability_refs": [
+        "药品保供",
+        "处方衔接"
+      ],
+      "resource_profile": "supply_standard",
+      "lifecycle_profile": "staged_background"
+    },
+    {
+      "roster_id": "curated-agent-193",
+      "system_id": "supply",
+      "archetype_id": "medical_procurement",
+      "anchor_id": "anchor_huoshenshan",
+      "representation_level": "aggregate",
+      "display_sequence": 25,
+      "storyline_ids": [
+        "supply",
+        "healthcare"
+      ],
+      "capability_refs": [
+        "需求汇总",
+        "紧急采购"
+      ],
+      "resource_profile": "supply_standard",
+      "lifecycle_profile": "staged_background"
+    },
+    {
+      "roster_id": "curated-agent-194",
+      "system_id": "supply",
+      "archetype_id": "warehouse_manager",
+      "anchor_id": "anchor_leishenshan",
+      "representation_level": "aggregate",
+      "display_sequence": 26,
+      "storyline_ids": [
+        "supply"
+      ],
+      "capability_refs": [
+        "库存盘点",
+        "分拨组织"
+      ],
+      "resource_profile": "supply_standard",
+      "lifecycle_profile": "staged_background"
+    },
+    {
+      "roster_id": "curated-agent-195",
+      "system_id": "supply",
+      "archetype_id": "logistics_dispatcher",
+      "anchor_id": "anchor_capacity_command",
+      "representation_level": "aggregate",
+      "display_sequence": 27,
+      "storyline_ids": [
+        "supply",
+        "mobility"
+      ],
+      "capability_refs": [
+        "跨区调拨",
+        "线路协调"
+      ],
+      "resource_profile": "supply_standard",
+      "lifecycle_profile": "staged_background"
+    },
+    {
+      "roster_id": "curated-agent-196",
+      "system_id": "supply",
+      "archetype_id": "pharmacy_manager",
+      "anchor_id": "anchor_dongxihu_warehouse",
+      "representation_level": "aggregate",
+      "display_sequence": 28,
+      "storyline_ids": [
+        "supply",
+        "community"
+      ],
+      "capability_refs": [
+        "药品保供",
+        "处方衔接"
+      ],
+      "resource_profile": "supply_standard",
+      "lifecycle_profile": "staged_background"
+    },
+    {
+      "roster_id": "curated-agent-197",
+      "system_id": "supply",
+      "archetype_id": "medical_procurement",
+      "anchor_id": "anchor_baishazhou_supply",
+      "representation_level": "aggregate",
+      "display_sequence": 29,
+      "storyline_ids": [
+        "supply",
+        "healthcare"
+      ],
+      "capability_refs": [
+        "需求汇总",
+        "紧急采购"
+      ],
+      "resource_profile": "supply_standard",
+      "lifecycle_profile": "staged_background"
+    },
+    {
+      "roster_id": "curated-agent-198",
+      "system_id": "supply",
+      "archetype_id": "warehouse_manager",
+      "anchor_id": "anchor_pharmacy_supply",
+      "representation_level": "aggregate",
+      "display_sequence": 30,
+      "storyline_ids": [
+        "supply"
+      ],
+      "capability_refs": [
+        "库存盘点",
+        "分拨组织"
+      ],
+      "resource_profile": "supply_standard",
+      "lifecycle_profile": "staged_background"
+    },
+    {
+      "roster_id": "curated-agent-199",
+      "system_id": "supply",
+      "archetype_id": "logistics_dispatcher",
+      "anchor_id": "anchor_huoshenshan",
+      "representation_level": "aggregate",
+      "display_sequence": 31,
+      "storyline_ids": [
+        "supply",
+        "mobility"
+      ],
+      "capability_refs": [
+        "跨区调拨",
+        "线路协调"
+      ],
+      "resource_profile": "supply_standard",
+      "lifecycle_profile": "staged_background"
+    },
+    {
+      "roster_id": "curated-agent-200",
+      "system_id": "supply",
+      "archetype_id": "pharmacy_manager",
+      "anchor_id": "anchor_leishenshan",
+      "representation_level": "aggregate",
+      "display_sequence": 32,
+      "storyline_ids": [
+        "supply",
+        "community"
+      ],
+      "capability_refs": [
+        "药品保供",
+        "处方衔接"
+      ],
+      "resource_profile": "supply_standard",
+      "lifecycle_profile": "staged_background"
+    },
+    {
+      "roster_id": "curated-agent-201",
+      "system_id": "supply",
+      "archetype_id": "medical_procurement",
+      "anchor_id": "anchor_capacity_command",
+      "representation_level": "aggregate",
+      "display_sequence": 33,
+      "storyline_ids": [
+        "supply",
+        "healthcare"
+      ],
+      "capability_refs": [
+        "需求汇总",
+        "紧急采购"
+      ],
+      "resource_profile": "supply_standard",
+      "lifecycle_profile": "staged_background"
+    },
+    {
+      "roster_id": "curated-agent-202",
+      "system_id": "supply",
+      "archetype_id": "warehouse_manager",
+      "anchor_id": "anchor_dongxihu_warehouse",
+      "representation_level": "aggregate",
+      "display_sequence": 34,
+      "storyline_ids": [
+        "supply"
+      ],
+      "capability_refs": [
+        "库存盘点",
+        "分拨组织"
+      ],
+      "resource_profile": "supply_standard",
+      "lifecycle_profile": "staged_background"
+    },
+    {
+      "roster_id": "curated-agent-203",
+      "system_id": "supply",
+      "archetype_id": "logistics_dispatcher",
+      "anchor_id": "anchor_baishazhou_supply",
+      "representation_level": "aggregate",
+      "display_sequence": 35,
+      "storyline_ids": [
+        "supply",
+        "mobility"
+      ],
+      "capability_refs": [
+        "跨区调拨",
+        "线路协调"
+      ],
+      "resource_profile": "supply_standard",
+      "lifecycle_profile": "staged_background"
+    },
+    {
+      "roster_id": "curated-agent-204",
+      "system_id": "supply",
+      "archetype_id": "pharmacy_manager",
+      "anchor_id": "anchor_pharmacy_supply",
+      "representation_level": "aggregate",
+      "display_sequence": 36,
+      "storyline_ids": [
+        "supply",
+        "community"
+      ],
+      "capability_refs": [
+        "药品保供",
+        "处方衔接"
+      ],
+      "resource_profile": "supply_standard",
+      "lifecycle_profile": "staged_background"
+    },
+    {
+      "roster_id": "curated-agent-205",
+      "system_id": "governance",
+      "archetype_id": "cdc_duty",
+      "anchor_id": "anchor_wuhan_cdc",
+      "representation_level": "functional",
+      "display_sequence": 1,
+      "storyline_ids": [
+        "governance",
+        "detection"
+      ],
+      "capability_refs": [
+        "信息汇总",
+        "专业研判"
+      ],
+      "resource_profile": "governance_standard",
+      "lifecycle_profile": "full_story_lifecycle"
+    },
+    {
+      "roster_id": "curated-agent-206",
+      "system_id": "governance",
+      "archetype_id": "health_commission",
+      "anchor_id": "anchor_lab_network",
+      "representation_level": "functional",
+      "display_sequence": 2,
+      "storyline_ids": [
+        "governance",
+        "healthcare"
+      ],
+      "capability_refs": [
+        "医疗统筹",
+        "部门协调"
+      ],
+      "resource_profile": "governance_standard",
+      "lifecycle_profile": "full_story_lifecycle"
+    },
+    {
+      "roster_id": "curated-agent-207",
+      "system_id": "governance",
+      "archetype_id": "emergency_command",
+      "anchor_id": "anchor_reporting_network",
+      "representation_level": "functional",
+      "display_sequence": 3,
+      "storyline_ids": [
+        "governance",
+        "supply",
+        "mobility"
+      ],
+      "capability_refs": [
+        "跨部门指挥",
+        "资源排序"
+      ],
+      "resource_profile": "governance_standard",
+      "lifecycle_profile": "full_story_lifecycle"
+    },
+    {
+      "roster_id": "curated-agent-208",
+      "system_id": "governance",
+      "archetype_id": "hotline_media",
+      "anchor_id": "anchor_command_center",
+      "representation_level": "functional",
+      "display_sequence": 4,
+      "storyline_ids": [
+        "governance",
+        "community"
+      ],
+      "capability_refs": [
+        "诉求反馈",
+        "信息发布"
+      ],
+      "resource_profile": "governance_standard",
+      "lifecycle_profile": "full_story_lifecycle"
+    },
+    {
+      "roster_id": "curated-agent-209",
+      "system_id": "governance",
+      "archetype_id": "cdc_duty",
+      "anchor_id": "anchor_hotline_network",
+      "representation_level": "functional",
+      "display_sequence": 5,
+      "storyline_ids": [
+        "governance",
+        "detection"
+      ],
+      "capability_refs": [
+        "信息汇总",
+        "专业研判"
+      ],
+      "resource_profile": "governance_standard",
+      "lifecycle_profile": "full_story_lifecycle"
+    },
+    {
+      "roster_id": "curated-agent-210",
+      "system_id": "governance",
+      "archetype_id": "health_commission",
+      "anchor_id": "anchor_public_information",
+      "representation_level": "functional",
+      "display_sequence": 6,
+      "storyline_ids": [
+        "governance",
+        "healthcare"
+      ],
+      "capability_refs": [
+        "医疗统筹",
+        "部门协调"
+      ],
+      "resource_profile": "governance_standard",
+      "lifecycle_profile": "full_story_lifecycle"
+    },
+    {
+      "roster_id": "curated-agent-211",
+      "system_id": "governance",
+      "archetype_id": "emergency_command",
+      "anchor_id": "anchor_health_verification",
+      "representation_level": "functional",
+      "display_sequence": 7,
+      "storyline_ids": [
+        "governance",
+        "supply",
+        "mobility"
+      ],
+      "capability_refs": [
+        "跨部门指挥",
+        "资源排序"
+      ],
+      "resource_profile": "governance_standard",
+      "lifecycle_profile": "full_story_lifecycle"
+    },
+    {
+      "roster_id": "curated-agent-212",
+      "system_id": "governance",
+      "archetype_id": "hotline_media",
+      "anchor_id": "anchor_transit_restart",
+      "representation_level": "functional",
+      "display_sequence": 8,
+      "storyline_ids": [
+        "governance",
+        "community"
+      ],
+      "capability_refs": [
+        "诉求反馈",
+        "信息发布"
+      ],
+      "resource_profile": "governance_standard",
+      "lifecycle_profile": "full_story_lifecycle"
+    },
+    {
+      "roster_id": "curated-agent-213",
+      "system_id": "governance",
+      "archetype_id": "cdc_duty",
+      "anchor_id": "anchor_city_reopening",
+      "representation_level": "functional",
+      "display_sequence": 9,
+      "storyline_ids": [
+        "governance",
+        "detection"
+      ],
+      "capability_refs": [
+        "信息汇总",
+        "专业研判"
+      ],
+      "resource_profile": "governance_standard",
+      "lifecycle_profile": "full_story_lifecycle"
+    },
+    {
+      "roster_id": "curated-agent-214",
+      "system_id": "governance",
+      "archetype_id": "health_commission",
+      "anchor_id": "anchor_wuhan_cdc",
+      "representation_level": "functional",
+      "display_sequence": 10,
+      "storyline_ids": [
+        "governance",
+        "healthcare"
+      ],
+      "capability_refs": [
+        "医疗统筹",
+        "部门协调"
+      ],
+      "resource_profile": "governance_standard",
+      "lifecycle_profile": "full_story_lifecycle"
+    },
+    {
+      "roster_id": "curated-agent-215",
+      "system_id": "governance",
+      "archetype_id": "emergency_command",
+      "anchor_id": "anchor_lab_network",
+      "representation_level": "aggregate",
+      "display_sequence": 11,
+      "storyline_ids": [
+        "governance",
+        "supply",
+        "mobility"
+      ],
+      "capability_refs": [
+        "跨部门指挥",
+        "资源排序"
+      ],
+      "resource_profile": "governance_standard",
+      "lifecycle_profile": "staged_background"
+    },
+    {
+      "roster_id": "curated-agent-216",
+      "system_id": "governance",
+      "archetype_id": "hotline_media",
+      "anchor_id": "anchor_reporting_network",
+      "representation_level": "aggregate",
+      "display_sequence": 12,
+      "storyline_ids": [
+        "governance",
+        "community"
+      ],
+      "capability_refs": [
+        "诉求反馈",
+        "信息发布"
+      ],
+      "resource_profile": "governance_standard",
+      "lifecycle_profile": "staged_background"
+    },
+    {
+      "roster_id": "curated-agent-217",
+      "system_id": "governance",
+      "archetype_id": "cdc_duty",
+      "anchor_id": "anchor_command_center",
+      "representation_level": "aggregate",
+      "display_sequence": 13,
+      "storyline_ids": [
+        "governance",
+        "detection"
+      ],
+      "capability_refs": [
+        "信息汇总",
+        "专业研判"
+      ],
+      "resource_profile": "governance_standard",
+      "lifecycle_profile": "staged_background"
+    },
+    {
+      "roster_id": "curated-agent-218",
+      "system_id": "governance",
+      "archetype_id": "health_commission",
+      "anchor_id": "anchor_hotline_network",
+      "representation_level": "aggregate",
+      "display_sequence": 14,
+      "storyline_ids": [
+        "governance",
+        "healthcare"
+      ],
+      "capability_refs": [
+        "医疗统筹",
+        "部门协调"
+      ],
+      "resource_profile": "governance_standard",
+      "lifecycle_profile": "staged_background"
+    },
+    {
+      "roster_id": "curated-agent-219",
+      "system_id": "governance",
+      "archetype_id": "emergency_command",
+      "anchor_id": "anchor_public_information",
+      "representation_level": "aggregate",
+      "display_sequence": 15,
+      "storyline_ids": [
+        "governance",
+        "supply",
+        "mobility"
+      ],
+      "capability_refs": [
+        "跨部门指挥",
+        "资源排序"
+      ],
+      "resource_profile": "governance_standard",
+      "lifecycle_profile": "staged_background"
+    },
+    {
+      "roster_id": "curated-agent-220",
+      "system_id": "governance",
+      "archetype_id": "hotline_media",
+      "anchor_id": "anchor_health_verification",
+      "representation_level": "aggregate",
+      "display_sequence": 16,
+      "storyline_ids": [
+        "governance",
+        "community"
+      ],
+      "capability_refs": [
+        "诉求反馈",
+        "信息发布"
+      ],
+      "resource_profile": "governance_standard",
+      "lifecycle_profile": "staged_background"
+    },
+    {
+      "roster_id": "curated-agent-221",
+      "system_id": "governance",
+      "archetype_id": "cdc_duty",
+      "anchor_id": "anchor_transit_restart",
+      "representation_level": "aggregate",
+      "display_sequence": 17,
+      "storyline_ids": [
+        "governance",
+        "detection"
+      ],
+      "capability_refs": [
+        "信息汇总",
+        "专业研判"
+      ],
+      "resource_profile": "governance_standard",
+      "lifecycle_profile": "staged_background"
+    },
+    {
+      "roster_id": "curated-agent-222",
+      "system_id": "governance",
+      "archetype_id": "health_commission",
+      "anchor_id": "anchor_city_reopening",
+      "representation_level": "aggregate",
+      "display_sequence": 18,
+      "storyline_ids": [
+        "governance",
+        "healthcare"
+      ],
+      "capability_refs": [
+        "医疗统筹",
+        "部门协调"
+      ],
+      "resource_profile": "governance_standard",
+      "lifecycle_profile": "staged_background"
+    },
+    {
+      "roster_id": "curated-agent-223",
+      "system_id": "governance",
+      "archetype_id": "emergency_command",
+      "anchor_id": "anchor_wuhan_cdc",
+      "representation_level": "aggregate",
+      "display_sequence": 19,
+      "storyline_ids": [
+        "governance",
+        "supply",
+        "mobility"
+      ],
+      "capability_refs": [
+        "跨部门指挥",
+        "资源排序"
+      ],
+      "resource_profile": "governance_standard",
+      "lifecycle_profile": "staged_background"
+    },
+    {
+      "roster_id": "curated-agent-224",
+      "system_id": "governance",
+      "archetype_id": "hotline_media",
+      "anchor_id": "anchor_lab_network",
+      "representation_level": "aggregate",
+      "display_sequence": 20,
+      "storyline_ids": [
+        "governance",
+        "community"
+      ],
+      "capability_refs": [
+        "诉求反馈",
+        "信息发布"
+      ],
+      "resource_profile": "governance_standard",
+      "lifecycle_profile": "staged_background"
+    },
+    {
+      "roster_id": "curated-agent-225",
+      "system_id": "governance",
+      "archetype_id": "cdc_duty",
+      "anchor_id": "anchor_reporting_network",
+      "representation_level": "aggregate",
+      "display_sequence": 21,
+      "storyline_ids": [
+        "governance",
+        "detection"
+      ],
+      "capability_refs": [
+        "信息汇总",
+        "专业研判"
+      ],
+      "resource_profile": "governance_standard",
+      "lifecycle_profile": "staged_background"
+    },
+    {
+      "roster_id": "curated-agent-226",
+      "system_id": "governance",
+      "archetype_id": "health_commission",
+      "anchor_id": "anchor_command_center",
+      "representation_level": "aggregate",
+      "display_sequence": 22,
+      "storyline_ids": [
+        "governance",
+        "healthcare"
+      ],
+      "capability_refs": [
+        "医疗统筹",
+        "部门协调"
+      ],
+      "resource_profile": "governance_standard",
+      "lifecycle_profile": "staged_background"
+    },
+    {
+      "roster_id": "curated-agent-227",
+      "system_id": "governance",
+      "archetype_id": "emergency_command",
+      "anchor_id": "anchor_hotline_network",
+      "representation_level": "aggregate",
+      "display_sequence": 23,
+      "storyline_ids": [
+        "governance",
+        "supply",
+        "mobility"
+      ],
+      "capability_refs": [
+        "跨部门指挥",
+        "资源排序"
+      ],
+      "resource_profile": "governance_standard",
+      "lifecycle_profile": "staged_background"
+    },
+    {
+      "roster_id": "curated-agent-228",
+      "system_id": "governance",
+      "archetype_id": "hotline_media",
+      "anchor_id": "anchor_public_information",
+      "representation_level": "aggregate",
+      "display_sequence": 24,
+      "storyline_ids": [
+        "governance",
+        "community"
+      ],
+      "capability_refs": [
+        "诉求反馈",
+        "信息发布"
+      ],
+      "resource_profile": "governance_standard",
+      "lifecycle_profile": "staged_background"
+    },
+    {
+      "roster_id": "curated-agent-229",
+      "system_id": "governance",
+      "archetype_id": "cdc_duty",
+      "anchor_id": "anchor_health_verification",
+      "representation_level": "aggregate",
+      "display_sequence": 25,
+      "storyline_ids": [
+        "governance",
+        "detection"
+      ],
+      "capability_refs": [
+        "信息汇总",
+        "专业研判"
+      ],
+      "resource_profile": "governance_standard",
+      "lifecycle_profile": "staged_background"
+    },
+    {
+      "roster_id": "curated-agent-230",
+      "system_id": "governance",
+      "archetype_id": "health_commission",
+      "anchor_id": "anchor_transit_restart",
+      "representation_level": "aggregate",
+      "display_sequence": 26,
+      "storyline_ids": [
+        "governance",
+        "healthcare"
+      ],
+      "capability_refs": [
+        "医疗统筹",
+        "部门协调"
+      ],
+      "resource_profile": "governance_standard",
+      "lifecycle_profile": "staged_background"
+    },
+    {
+      "roster_id": "curated-agent-231",
+      "system_id": "governance",
+      "archetype_id": "emergency_command",
+      "anchor_id": "anchor_city_reopening",
+      "representation_level": "aggregate",
+      "display_sequence": 27,
+      "storyline_ids": [
+        "governance",
+        "supply",
+        "mobility"
+      ],
+      "capability_refs": [
+        "跨部门指挥",
+        "资源排序"
+      ],
+      "resource_profile": "governance_standard",
+      "lifecycle_profile": "staged_background"
+    },
+    {
+      "roster_id": "curated-agent-232",
+      "system_id": "governance",
+      "archetype_id": "hotline_media",
+      "anchor_id": "anchor_wuhan_cdc",
+      "representation_level": "aggregate",
+      "display_sequence": 28,
+      "storyline_ids": [
+        "governance",
+        "community"
+      ],
+      "capability_refs": [
+        "诉求反馈",
+        "信息发布"
+      ],
+      "resource_profile": "governance_standard",
+      "lifecycle_profile": "staged_background"
+    },
+    {
+      "roster_id": "curated-agent-233",
+      "system_id": "governance",
+      "archetype_id": "cdc_duty",
+      "anchor_id": "anchor_lab_network",
+      "representation_level": "aggregate",
+      "display_sequence": 29,
+      "storyline_ids": [
+        "governance",
+        "detection"
+      ],
+      "capability_refs": [
+        "信息汇总",
+        "专业研判"
+      ],
+      "resource_profile": "governance_standard",
+      "lifecycle_profile": "staged_background"
+    },
+    {
+      "roster_id": "curated-agent-234",
+      "system_id": "governance",
+      "archetype_id": "health_commission",
+      "anchor_id": "anchor_reporting_network",
+      "representation_level": "aggregate",
+      "display_sequence": 30,
+      "storyline_ids": [
+        "governance",
+        "healthcare"
+      ],
+      "capability_refs": [
+        "医疗统筹",
+        "部门协调"
+      ],
+      "resource_profile": "governance_standard",
+      "lifecycle_profile": "staged_background"
+    },
+    {
+      "roster_id": "curated-agent-235",
+      "system_id": "governance",
+      "archetype_id": "emergency_command",
+      "anchor_id": "anchor_command_center",
+      "representation_level": "aggregate",
+      "display_sequence": 31,
+      "storyline_ids": [
+        "governance",
+        "supply",
+        "mobility"
+      ],
+      "capability_refs": [
+        "跨部门指挥",
+        "资源排序"
+      ],
+      "resource_profile": "governance_standard",
+      "lifecycle_profile": "staged_background"
+    },
+    {
+      "roster_id": "curated-agent-236",
+      "system_id": "governance",
+      "archetype_id": "hotline_media",
+      "anchor_id": "anchor_hotline_network",
+      "representation_level": "aggregate",
+      "display_sequence": 32,
+      "storyline_ids": [
+        "governance",
+        "community"
+      ],
+      "capability_refs": [
+        "诉求反馈",
+        "信息发布"
+      ],
+      "resource_profile": "governance_standard",
+      "lifecycle_profile": "staged_background"
+    },
+    {
+      "roster_id": "curated-agent-237",
+      "system_id": "governance",
+      "archetype_id": "cdc_duty",
+      "anchor_id": "anchor_public_information",
+      "representation_level": "aggregate",
+      "display_sequence": 33,
+      "storyline_ids": [
+        "governance",
+        "detection"
+      ],
+      "capability_refs": [
+        "信息汇总",
+        "专业研判"
+      ],
+      "resource_profile": "governance_standard",
+      "lifecycle_profile": "staged_background"
+    },
+    {
+      "roster_id": "curated-agent-238",
+      "system_id": "governance",
+      "archetype_id": "health_commission",
+      "anchor_id": "anchor_health_verification",
+      "representation_level": "aggregate",
+      "display_sequence": 34,
+      "storyline_ids": [
+        "governance",
+        "healthcare"
+      ],
+      "capability_refs": [
+        "医疗统筹",
+        "部门协调"
+      ],
+      "resource_profile": "governance_standard",
+      "lifecycle_profile": "staged_background"
+    },
+    {
+      "roster_id": "curated-agent-239",
+      "system_id": "governance",
+      "archetype_id": "emergency_command",
+      "anchor_id": "anchor_transit_restart",
+      "representation_level": "aggregate",
+      "display_sequence": 35,
+      "storyline_ids": [
+        "governance",
+        "supply",
+        "mobility"
+      ],
+      "capability_refs": [
+        "跨部门指挥",
+        "资源排序"
+      ],
+      "resource_profile": "governance_standard",
+      "lifecycle_profile": "staged_background"
+    },
+    {
+      "roster_id": "curated-agent-240",
+      "system_id": "governance",
+      "archetype_id": "hotline_media",
+      "anchor_id": "anchor_city_reopening",
+      "representation_level": "aggregate",
+      "display_sequence": 36,
+      "storyline_ids": [
+        "governance",
+        "community"
+      ],
+      "capability_refs": [
+        "诉求反馈",
+        "信息发布"
+      ],
+      "resource_profile": "governance_standard",
+      "lifecycle_profile": "staged_background"
+    }
+  ]
+}

@@ -171,7 +171,9 @@ const step3Source = readSource('../src/components/KaleidoStep3.vue')
 const graphPanelSource = readSource('../src/components/GraphPanel.vue')
 const step1GraphSource = readSource('../src/components/Step1GraphBuild.vue')
 const workflowActionBarSource = readSource('../src/components/ui/WorkflowActionBar.vue')
+const workflowShellSource = readSource('../src/components/KaleidoWorkflowShell.vue')
 const mainViewSource = readSource('../src/views/MainView.vue')
+const sceneSeedBridgeSource = readSource('../src/store/sceneSeedBridge.js')
 const historyViewSource = readSource('../src/views/HistoryView.vue')
 const analysisViewSource = readSource('../src/views/AnalysisView.vue')
 const step4ReportSource = readSource('../src/components/Step4Report.vue')
@@ -236,6 +238,19 @@ assert.match(step4ReportSource, /\.report-body\s*\{[^}]*font-size:\s*var\(--k-te
 assert.match(step4ReportSource, /function dedupeReportMarkdown\([\s\S]*text === expectedTitle[\s\S]*text === previousHeading/, '正式报告必须去重页眉标题和紧邻章节标题的重复正文')
 assert.match(step4ReportSource, /renderMarkdown\(displayMarkdown\.value\)/, '正式报告必须渲染去重后的正文')
 assert.match(analysisViewSource, /\.source-badge\s*\{[^}]*border:\s*1px solid var\(--k-color-border-strong\)[^}]*background:\s*transparent/s, 'Step 4 来源标签必须使用弱化描边样式')
+assert.match(workflowShellSource, /<WorkflowStepMenu\b/, '共享顶栏必须保留四步选择器，支持跨步骤跳转')
+assert.doesNotMatch(sceneComposerSource, /第\s*1\s*步\s*·\s*背景定义/, 'Step 1 的普通与策划型分支都不得重复展示步骤眉题')
+assert.ok(
+  sceneComposerSource.indexOf('class="advanced-toggle setup-advanced-toggle"') > sceneComposerSource.indexOf('class="setup-actions"'),
+  'Step 1 研究边界入口必须位于底部操作区',
+)
+assert.doesNotMatch(analysisViewSource, /推演分析\s*·\s*第四步|打开正式报告/, 'Step 4 不得恢复重复步骤眉题或过长的报告按钮文案')
+assert.match(analysisViewSource, /grid-template-areas:[\s\S]*'main report'[\s\S]*'metrics metrics'/, 'Step 4 标题、报告入口和指标必须使用稳定的两行布局')
+assert.match(analysisViewSource, /\.hero-summary\s*\{[^}]*overflow:\s*visible[^}]*white-space:\s*normal/s, 'Step 4 副标题必须完整换行展示')
+assert.match(analysisViewSource, /\.report-delivery-body\s*\{[^}]*overflow-y:\s*auto/s, '正式报告正文必须拥有独立纵向滚动容器')
+assert.match(step4ReportSource, /\.report-panel\s*\{[^}]*padding:\s*20px var\(--k-space-4, 16px\) 28px/s, '正式报告标题与正文必须对齐交付页边距')
+assert.match(step4ReportSource, /@media print[\s\S]*\.workflow-shell__body[\s\S]*overflow:\s*visible !important/s, '打印样式必须解除应用壳层高度和溢出裁切')
+assert.match(step4ReportSource, /document\.title\s*=\s*title\.value[\s\S]*afterprint/, '打印页眉标题必须使用当前报告标题并在打印后恢复')
 
 assert.doesNotMatch(
   step2Source,
@@ -372,27 +387,24 @@ assert.doesNotMatch(
 )
 assert.match(
   analysisViewSource,
-  /v-for="item in mechanismsTab\.scenario_model\.state_variables"/,
-  'Step 4 必须展示全部场景状态变量，不能静默截断最后一项',
+  /v-for="item in riskOutcomesTab\.risk_outcomes"/,
+  'Step 4 风险结果必须逐项展示风险假设与运行结果的对照',
 )
 assert.doesNotMatch(
   analysisViewSource,
-  /state_variables[^\n]*\.slice\(0,\s*5\)/,
-  'Step 4 场景状态变量不得恢复五项硬截断',
+  /risk_outcomes[^\n]*\.slice\(/,
+  'Step 4 风险结果不得静默截断',
 )
-for (const nonEmptyGuard of [
-  'mechanismsTab.scenario_model?.state_variables?.length',
-  'mechanismsTab.mechanism_graph?.edges?.length',
-  'mechanismsTab.relation_samples?.length',
-  'mechanismsTab.round_reasoning?.length',
-  'mechanismsTab.simulation_audit?.quality_flags?.length',
-]) {
-  assert.match(
-    analysisViewSource,
-    new RegExp(`v-if="${nonEmptyGuard.replace(/[?.]/g, '\\$&')}"\\s+class="mechanism-section"`),
-    `Step 4 机制分段必须按真实数据决定是否显示：${nonEmptyGuard}`,
-  )
-}
+assert.match(
+  analysisViewSource,
+  /riskOutcomesTab\.analysis_boundary/,
+  'Step 4 风险结果必须展示假设与运行结果的解释边界',
+)
+assert.doesNotMatch(
+  analysisViewSource,
+  /<h2>风险与机制链<\/h2>/,
+  'Step 4 风险结果不得退回机制工件陈列页',
+)
 assert.doesNotMatch(
   analysisViewSource,
   /safeVisibleText\(region\.region_name,\s*['"]未知区域['"]\)/,
@@ -419,14 +431,49 @@ assert.doesNotMatch(
   'Step 2 不得在业务界面汇报内部确认或生成状态',
 )
 assert.match(
-  mainViewSource,
-  /hasPersistedSemanticInput[\s\S]*normalizedEventInputs:[\s\S]*semanticInput\.events[\s\S]*normalizedPolicyInputs:[\s\S]*semanticInput\.policies/,
+  sceneSeedBridgeSource,
+  /mergeProjectSceneSeedContext[\s\S]*normalizedEventInputs:[\s\S]*semanticInput\.events[\s\S]*normalizedPolicyInputs:[\s\S]*semanticInput\.policies/,
   'Step 2 必须优先使用项目持久化语义工件，而不是页面恢复状态',
+)
+assert.match(
+  mainViewSource,
+  /mergeProjectSceneSeedContext\(project, recoveryContext\)/,
+  '图谱构建入口必须通过共享桥接层恢复 Step 1 建议',
+)
+assert.match(
+  simulationViewSource,
+  /mergeProjectSceneSeedContext\(projRes\.data, sceneSeedContext\.value\)/,
+  '直接打开模拟入口也必须通过共享桥接层恢复 Step 1 建议',
 )
 assert.match(
   step2Source,
   /sourceInputId:[\s\S]*input_id: variable\.sourceInputId \|\| variable\.id/,
   '事件卡和政策卡应使用独立本地 ID，同时提交原始语义输入 ID',
+)
+assert.match(
+  step2Source,
+  /normalizeRegionRecordsFromGraph[\s\S]*rawRegionId[\s\S]*region_id: rawRegionId \|\| regionKey/,
+  'Step 2 区域下拉框必须提交图谱真实 ID，不得提交仅供前端匹配的归一化键',
+)
+assert.match(
+  step2Source,
+  /function variableTargetScopeLine[\s\S]*作用区域：\$\{regionLabels\.join\('、'\)\}[\s\S]*真实对象：\$\{entityLabels\.join\('、'\)\}/,
+  'Step 2 锁定输入与时间计划必须显示可读的真实作用区域和对象',
+)
+assert.doesNotMatch(
+  step2Source,
+  /`目标区域 \$\{event\.targetRegionId\}`/,
+  'Step 2 不得把目标区域内部 ID 直接渲染到正式结果',
+)
+assert.match(
+  step2Source,
+  /场景准备完成，未形成通过证据校验的风险对象。/,
+  'Step 2 零风险结果必须明确表示证据校验后未形成对象',
+)
+assert.match(
+  step2Source,
+  /riskObjects\.value\.length === 0[\s\S]*isReviewPhase\.value \? '未形成' : '待生成'/,
+  'Step 2 已生成配置的零风险标签不得继续显示为待生成',
 )
 assert.doesNotMatch(
   step3Source,

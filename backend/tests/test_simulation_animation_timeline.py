@@ -1,9 +1,11 @@
 import json
 import re
+from pathlib import Path
 from types import SimpleNamespace
 
 from app.services import simulation_animation_service as animation_module
 from app.services.simulation_animation_service import (
+    PREVIOUS_TIMELINE_CONTRACT_VERSION,
     TIMELINE_CONTRACT_VERSION,
     SimulationAnimationService,
 )
@@ -147,12 +149,50 @@ def test_timeline_projects_real_ledgers_in_deterministic_causal_phase_order():
     assert timeline["edge_reference_contract"] == "split-path-related.v1"
     assert timeline["source_mode"] == "observed_ledgers"
     assert timeline["cursor"] == 4
+    assert timeline["epoch_id"].startswith("epoch::")
+    assert timeline["timeline_id"].startswith("timeline::")
+    assert timeline["clock"] == {
+        "unit": "ms",
+        "origin_ms": 0,
+        "canonical_rate": 1.0,
+        "duration_ms": 5000,
+        "committed_end_ms": 5000,
+        "default_round_duration_ms": 5000,
+        "empty_round_duration_ms": 900,
+    }
+    assert timeline["head"] == {
+        "cursor": 4,
+        "round": 2,
+        "checkpoint_round": 2,
+        "checkpoint_id": timeline["rounds"][0]["checkpoint_id"],
+        "global_end_ms": 5000,
+        "event_count": 4,
+    }
+    assert timeline["rounds"][0] == {
+        "round": 2,
+        "checkpoint_id": timeline["rounds"][0]["checkpoint_id"],
+        "event_ids": [event["id"] for event in timeline["events"]],
+        "event_count": 4,
+        "start_sequence": 1,
+        "end_sequence": 4,
+        "start_cursor": 0,
+        "end_cursor": 4,
+        "start_ms": 0,
+        "end_ms": 5000,
+        "duration_ms": 5000,
+    }
     assert [event["sequence"] for event in timeline["events"]] == [1, 2, 3, 4]
     assert [event["kind"] for event in timeline["events"]] == [
         "spread_applied",
         "agent_interaction",
         "dynamic_edge_created",
         "relationship_event",
+    ]
+    assert [event["timing"]["duration_ms"] for event in timeline["events"]] == [
+        1500,
+        1300,
+        1300,
+        1300,
     ]
 
     spread, interaction, dynamic, relationship = timeline["events"]
@@ -174,6 +214,11 @@ def test_timeline_projects_real_ledgers_in_deterministic_causal_phase_order():
 
     for event in timeline["events"]:
         assert event["timing"]["start_ms"] >= 0
+        assert event["timing"]["local_start_ms"] == event["timing"]["start_ms"]
+        assert event["timing"]["global_start_ms"] >= event["timing"]["local_start_ms"]
+        assert event["timing"]["global_end_ms"] == (
+            event["timing"]["global_start_ms"] + event["timing"]["duration_ms"]
+        )
         assert event["timing"]["duration_ms"] > 0
         assert event["grounding"]["mode"] == "observed"
         assert event["grounding"]["fallback"] is False
@@ -181,6 +226,16 @@ def test_timeline_projects_real_ledgers_in_deterministic_causal_phase_order():
         assert re.search(r"[\u3400-\u9fff]", event["display"]["summary_zh"])
         assert not re.search(r"[A-Za-z_]{3,}", event["display"]["title_zh"])
         assert not re.search(r"[A-Za-z_]{3,}", event["display"]["summary_zh"])
+
+    event_by_id = {event["id"]: event for event in timeline["events"]}
+    for event in timeline["events"]:
+        for parent_id in event["parent_event_ids"]:
+            assert event["timing"]["global_start_ms"] >= (
+                event_by_id[parent_id]["timing"]["global_end_ms"]
+            )
+    assert max(
+        event["timing"]["global_end_ms"] for event in timeline["events"]
+    ) >= 4000
 
 
 def test_timeline_uses_explicit_legacy_fallback_only_without_primary_ledgers():
@@ -259,15 +314,19 @@ def test_legacy_animation_prefers_available_ledger_and_supports_cursor_window(tm
     window = service._filter_timeline_after_cursor(normalized, 1)
     assert window["timeline"]["cursor"] == 1
     assert window["timeline"]["events"] == []
-    assert window["timeline"]["window"] == {
-        "after_cursor": 1,
-        "after_round": None,
-        "returned_count": 0,
-        "returned_frame_count": 0,
-        "has_more": False,
-        "frames_included": False,
-        "layout_included": False,
-    }
+    assert window["timeline"]["window"]["mode"] == "delta"
+    assert window["timeline"]["window"]["after_cursor"] == 1
+    assert window["timeline"]["window"]["after_round"] is None
+    assert window["timeline"]["window"]["ack_cursor"] == 1
+    assert window["timeline"]["window"]["next_cursor"] == 1
+    assert window["timeline"]["window"]["head_cursor"] == 1
+    assert window["timeline"]["window"]["returned_count"] == 0
+    assert window["timeline"]["window"]["returned_frame_count"] == 0
+    assert window["timeline"]["window"]["returned_round_count"] == 0
+    assert window["timeline"]["window"]["has_more"] is False
+    assert window["timeline"]["window"]["reset_required"] is False
+    assert window["timeline"]["window"]["frames_included"] is False
+    assert window["timeline"]["window"]["layout_included"] is False
     assert "frames" not in window
     assert "layout" not in window
 
@@ -951,10 +1010,198 @@ def test_cursor_order_is_append_stable_across_completed_rounds():
     )
 
     assert first["cursor"] == 1
+    assert first["timeline_id"] == second["timeline_id"]
+    assert first["epoch_id"] == second["epoch_id"]
     assert first["events"][0]["id"] == second["events"][0]["id"]
     assert first["events"][0]["sequence"] == second["events"][0]["sequence"] == 1
+    assert first["events"][0]["timing"] == second["events"][0]["timing"]
+    assert first["rounds"] == second["rounds"][:2]
     assert second["cursor"] == 2
     assert second["events"][1]["sequence"] == 2
+    assert second["rounds"][2]["start_ms"] == first["head"]["global_end_ms"]
+
+
+def test_global_clock_keeps_cross_round_parent_before_child():
+    service = _service()
+    nodes, edges = _layout()
+    timeline = service._build_timeline(
+        spread_events=[],
+        dynamic_edge_events=[],
+        agent_interactions=[
+            {
+                "event_id": "parent-action",
+                "round": 1,
+                "source_agent_id": 9,
+                "target_agent_id": 2,
+                "edge_id": "dynamic::9::2::coordination",
+            }
+        ],
+        relationship_events=[
+            {
+                "relationship_event_id": "child-relationship",
+                "round_number": 2,
+                "source_agent_id": 9,
+                "target_agent_id": 2,
+                "parent_event_ids": ["parent-action"],
+            }
+        ],
+        risk_events=[],
+        frames=[],
+        layout_nodes=nodes,
+        layout_edges=edges,
+        completed_rounds={1, 2},
+    )
+
+    parent, child = timeline["events"]
+    assert child["parent_event_ids"] == [parent["id"]]
+    assert parent["timing"]["global_end_ms"] <= child["timing"]["global_start_ms"]
+    assert child["timing"]["global_start_ms"] == (
+        timeline["rounds"][2]["start_ms"] + child["timing"]["local_start_ms"]
+    )
+
+
+def test_normalization_upgrades_v2_timing_to_v3_without_removing_local_fields(
+    tmp_path,
+):
+    service = _service()
+    nodes, edges = _layout()
+    payload = {
+        "meta": {"total_rounds": 1},
+        "layout": {"nodes": nodes, "edges": edges},
+        "frames": [
+            {"round": 0, "node_states": [], "edge_states": []},
+            {"round": 1, "node_states": [], "edge_states": []},
+        ],
+        "timeline": {
+            "contract_version": PREVIOUS_TIMELINE_CONTRACT_VERSION,
+            "timeline_id": "timeline::legacy",
+            "cursor": 1,
+            "events": [
+                {
+                    "id": "legacy-event",
+                    "sequence": 1,
+                    "round": 1,
+                    "phase": "agent_response",
+                    "kind": "agent_interaction",
+                    "parent_event_ids": [],
+                    "edge_ids": [],
+                    "timing": {
+                        "start_ms": 520,
+                        "duration_ms": 560,
+                    },
+                    "grounding": {"fallback": False},
+                }
+            ],
+        },
+    }
+
+    normalized = service._normalize_animation_payload(payload)
+    timeline = normalized["timeline"]
+    event = timeline["events"][0]
+
+    assert timeline["contract_version"] == TIMELINE_CONTRACT_VERSION
+    assert timeline["compatible_contract_versions"] == [
+        PREVIOUS_TIMELINE_CONTRACT_VERSION
+    ]
+    assert timeline["timeline_id"] != "timeline::legacy"
+    assert [segment["round"] for segment in timeline["rounds"]] == [0, 1]
+    assert event["timing"]["start_ms"] == 520
+    assert event["timing"]["local_start_ms"] == 520
+    assert event["timing"]["duration_ms"] == 1300
+    assert event["timing"]["global_start_ms"] == 2200
+    assert event["timing"]["global_end_ms"] == 3500
+
+    (tmp_path / "round_state_matrix.jsonl").write_text(
+        json.dumps({"round": 1, "agents": []}, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+    live_service = _service(tmp_path)
+    live_service.state = SimpleNamespace(
+        artifact_mode="live",
+        is_replay_only=False,
+    )
+    live_event = live_service._normalize_animation_payload(payload)["timeline"][
+        "events"
+    ][0]
+    assert live_event["timing"]["start_ms"] == 520
+    assert live_event["timing"]["local_start_ms"] == 520
+    assert live_event["timing"]["global_start_ms"] == 2200
+    assert live_event["timing"]["global_end_ms"] == 3500
+
+
+def test_wuhan_fixture_upgrades_to_readable_v3_clock_without_causal_regression():
+    fixture_path = (
+        Path(__file__).resolve().parents[1]
+        / "uploads/golden_runs/wuhan_covid_v1/animation/animation.json"
+    )
+    payload = json.loads(fixture_path.read_text(encoding="utf-8"))
+    service = SimulationAnimationService.__new__(SimulationAnimationService)
+    service.simulation_id = str(
+        (payload.get("meta") or {}).get("simulation_id") or "golden::wuhan_covid_v1"
+    )
+
+    timeline = service._normalize_animation_payload(payload)["timeline"]
+    event_by_id = {event["id"]: event for event in timeline["events"]}
+    modeled_round_count = max(1, len(timeline["rounds"]) - 1)
+    ten_round_equivalent_ms = (
+        timeline["clock"]["duration_ms"] * 10 / modeled_round_count
+    )
+
+    assert len(timeline["events"]) == 696
+    assert len(timeline["rounds"]) == 37
+    assert 45_000 <= ten_round_equivalent_ms <= 60_000
+    assert min(
+        event["timing"]["duration_ms"] for event in timeline["events"]
+    ) >= 1200
+    assert max(
+        event["timing"]["duration_ms"] for event in timeline["events"]
+    ) <= 1600
+    for event in timeline["events"]:
+        for parent_id in event.get("parent_event_ids") or []:
+            parent = event_by_id[parent_id]
+            assert parent["timing"]["global_end_ms"] <= (
+                event["timing"]["global_start_ms"]
+            )
+
+    tail_ratios = []
+    for segment in timeline["rounds"]:
+        if int(segment["round"]) <= 0 or not segment["event_ids"]:
+            continue
+        event_tail_ms = max(
+            event_by_id[event_id]["timing"]["global_end_ms"]
+            for event_id in segment["event_ids"]
+        )
+        tail_ratios.append(
+            (event_tail_ms - segment["start_ms"]) / segment["duration_ms"]
+        )
+    assert tail_ratios
+    assert sorted(tail_ratios)[len(tail_ratios) // 2] >= 0.8
+
+
+def test_timeline_identity_mismatch_requests_snapshot_reset_without_mixing_events():
+    service = _service()
+    timeline = _build_observed_timeline(service)
+    payload = {
+        "meta": {"simulation_id": service.simulation_id},
+        "layout": {"nodes": [], "edges": []},
+        "frames": [],
+        "timeline": timeline,
+    }
+
+    reset = service._filter_timeline_after_cursor(
+        payload,
+        after_cursor=2,
+        timeline_id="timeline::another-epoch",
+    )
+
+    assert reset["timeline"]["events"] == []
+    assert reset["timeline"]["rounds"] == []
+    assert reset["timeline"]["window"]["mode"] == "reset"
+    assert reset["timeline"]["window"]["reset_required"] is True
+    assert reset["timeline"]["window"]["reset_reason"] == "timeline_changed"
+    assert reset["timeline"]["window"]["next_cursor"] == timeline["cursor"]
+    assert "frames" not in reset
+    assert "layout" not in reset
 
 
 def test_agent_identity_no_longer_creates_fake_batch_reveal_rounds():
@@ -1151,15 +1398,22 @@ def test_live_animation_commits_frames_and_layout_atomically_across_eventless_ro
     assert delta["timeline"]["events"] == []
     assert [frame["round"] for frame in delta["frames"]] == [2]
     assert delta["frames"][0]["timeline_event_ids"] == []
-    assert delta["timeline"]["window"] == {
-        "after_cursor": 1,
-        "after_round": 1,
-        "returned_count": 0,
-        "returned_frame_count": 1,
-        "has_more": False,
-        "frames_included": True,
-        "layout_included": True,
-    }
+    assert delta["timeline"]["window"]["after_cursor"] == 1
+    assert delta["timeline"]["window"]["after_round"] == 1
+    assert delta["timeline"]["window"]["next_cursor"] == 1
+    assert delta["timeline"]["window"]["head_cursor"] == 1
+    assert delta["timeline"]["window"]["head_round"] == 2
+    assert delta["timeline"]["window"]["returned_count"] == 0
+    assert delta["timeline"]["window"]["returned_frame_count"] == 1
+    assert delta["timeline"]["window"]["returned_round_count"] == 1
+    assert delta["timeline"]["window"]["has_more"] is False
+    assert delta["timeline"]["window"]["reset_required"] is False
+    assert delta["timeline"]["window"]["frames_included"] is True
+    assert delta["timeline"]["window"]["layout_included"] is True
+    assert [segment["round"] for segment in delta["timeline"]["rounds"]] == [2]
+    assert delta["timeline"]["rounds"][0]["event_count"] == 0
+    assert delta["timeline"]["rounds"][0]["start_cursor"] == 1
+    assert delta["timeline"]["rounds"][0]["end_cursor"] == 1
     assert {"agent::99", "agent::100"}.issubset(
         {node["id"] for node in delta["layout"]["nodes"]}
     )
@@ -1220,8 +1474,9 @@ def test_animation_endpoint_keeps_full_default_and_forwards_cursor_alias(monkeyp
             self,
             after_cursor="not-provided",
             after_round="not-provided",
+            timeline_id="not-provided",
         ):
-            calls.append((after_cursor, after_round))
+            calls.append((after_cursor, after_round, timeline_id))
             return {
                 "meta": {"simulation_id": self.simulation_id},
                 "frames": [],
@@ -1248,6 +1503,9 @@ def test_animation_endpoint_keeps_full_default_and_forwards_cursor_alias(monkeyp
     combined_window_response = client.get(
         "/api/simulation/sim_cursor/animation?after_cursor=8&after_round=5"
     )
+    identity_window_response = client.get(
+        "/api/simulation/sim_cursor/animation?after_cursor=8&timeline_id=timeline::active"
+    )
     invalid_response = client.get(
         "/api/simulation/sim_cursor/animation?after_cursor=not-a-number"
     )
@@ -1265,13 +1523,15 @@ def test_animation_endpoint_keeps_full_default_and_forwards_cursor_alias(monkeyp
     assert window_response.status_code == 200
     assert round_window_response.status_code == 200
     assert combined_window_response.status_code == 200
+    assert identity_window_response.status_code == 200
     assert invalid_response.status_code == 400
     assert negative_cursor_response.status_code == 400
     assert invalid_round_response.status_code == 400
     assert negative_round_response.status_code == 400
     assert calls == [
-        ("not-provided", "not-provided"),
-        (7, None),
-        (None, 4),
-        (8, 5),
+        ("not-provided", "not-provided", "not-provided"),
+        (7, None, "not-provided"),
+        (None, 4, "not-provided"),
+        (8, 5, "not-provided"),
+        (8, None, "timeline::active"),
     ]

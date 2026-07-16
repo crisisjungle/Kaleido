@@ -1,0 +1,53 @@
+{
+  "type": "FeatureCollection",
+  "name": "武汉疫情城市系统空间锚点",
+  "features": [
+    {"type":"Feature","id":"anchor_huanan_market","properties":{"name":"华南海鲜市场早期病例聚集锚点","macro_id":"early_cluster","anchor_type":"早期病例聚集地","provenance":"observed/public_source","source_refs":["source_who_origins_annex"],"boundary_note":"仅表示早期病例聚集，不表示疫情起源"},"geometry":{"type":"Point","coordinates":[114.2734,30.6195]}},
+    {"type":"Feature","id":"anchor_jianghan_clinic_ring","properties":{"name":"江汉基层门诊发现网络","macro_id":"early_cluster","anchor_type":"区级聚合空间","provenance":"curated_projection","source_refs":[]},"geometry":{"type":"Point","coordinates":[114.2701,30.6012]}},
+    {"type":"Feature","id":"anchor_early_sample_route","properties":{"name":"早期采样送检路径","macro_id":"early_cluster","anchor_type":"功能网络","provenance":"curated_projection","source_refs":[]},"geometry":{"type":"Point","coordinates":[114.2918,30.6127]}},
+
+    {"type":"Feature","id":"anchor_jinyintan","properties":{"name":"金银潭医院","macro_id":"clinical_sentinel","anchor_type":"定点救治机构","provenance":"observed/public_source","source_refs":["source_who_origins_annex"]},"geometry":{"type":"Point","coordinates":[114.2869,30.6738]}},
+    {"type":"Feature","id":"anchor_tongji_union_network","properties":{"name":"同济协和临床协作网络","macro_id":"clinical_sentinel","anchor_type":"医疗协作网络","provenance":"curated_projection","source_refs":[]},"geometry":{"type":"Point","coordinates":[114.2605,30.5816]}},
+    {"type":"Feature","id":"anchor_hospital_infection_ring","properties":{"name":"医院院感监测协作带","macro_id":"clinical_sentinel","anchor_type":"功能网络","provenance":"curated_projection","source_refs":[]},"geometry":{"type":"Point","coordinates":[114.3136,30.5764]}},
+
+    {"type":"Feature","id":"anchor_wuhan_cdc","properties":{"name":"武汉市疾控中心协作锚点","macro_id":"public_health","anchor_type":"疾控机构","provenance":"observed/public_source","source_refs":["source_who_origins_annex"]},"geometry":{"type":"Point","coordinates":[114.3286,30.5489]}},
+    {"type":"Feature","id":"anchor_lab_network","properties":{"name":"市区两级检验网络","macro_id":"public_health","anchor_type":"检测功能网络","provenance":"curated_projection","source_refs":[]},"geometry":{"type":"Point","coordinates":[114.3506,30.5528]}},
+    {"type":"Feature","id":"anchor_reporting_network","properties":{"name":"疫情信息上报链路","macro_id":"public_health","anchor_type":"信息功能网络","provenance":"curated_projection","source_refs":[]},"geometry":{"type":"Point","coordinates":[114.3194,30.5657]}},
+
+    {"type":"Feature","id":"anchor_emergency_belt","properties":{"name":"汉口急诊救治带","macro_id":"emergency_care","anchor_type":"区级聚合空间","provenance":"curated_projection","source_refs":[]},"geometry":{"type":"Point","coordinates":[114.3008,30.6044]}},
+    {"type":"Feature","id":"anchor_fever_clinic_network","properties":{"name":"发热门诊分诊网络","macro_id":"emergency_care","anchor_type":"医疗功能网络","provenance":"curated_projection","source_refs":[]},"geometry":{"type":"Point","coordinates":[114.3341,30.5955]}},
+    {"type":"Feature","id":"anchor_patient_transfer_network","properties":{"name":"患者闭环转运网络","macro_id":"emergency_care","anchor_type":"转运功能网络","provenance":"curated_projection","source_refs":[]},"geometry":{"type":"Point","coordinates":[114.3107,30.5714]}},
+
+    {"type":"Feature","id":"anchor_huoshenshan","properties":{"name":"火神山医院","macro_id":"capacity_expansion","anchor_type":"应急医疗设施","provenance":"observed/public_source","source_refs":["source_huoshenshan"]},"geometry":{"type":"Point","coordinates":[114.0839,30.5285]}},
+    {"type":"Feature","id":"anchor_leishenshan","properties":{"name":"雷神山医院","macro_id":"capacity_expansion","anchor_type":"应急医疗设施","provenance":"observed/public_source","source_refs":["source_leishenshan"]},"geometry":{"type":"Point","coordinates":[114.2788,30.4381]}},
+    {"type":"Feature","id":"anchor_capacity_command","properties":{"name":"定点床位统筹网络","macro_id":"capacity_expansion","anchor_type":"容量功能网络","provenance":"curated_projection","source_refs":[]},"geometry":{"type":"Point","coordinates":[114.1814,30.5002]}},
+
+    {"type":"Feature","id":"anchor_hongshan_gym","properties":{"name":"洪山体育馆方舱锚点","macro_id":"fangcang_network","anchor_type":"方舱医疗设施","provenance":"observed/public_source","source_refs":["source_fangcang"]},"geometry":{"type":"Point","coordinates":[114.3385,30.5371]}},
+    {"type":"Feature","id":"anchor_wuhan_livingroom","properties":{"name":"武汉客厅方舱锚点","macro_id":"fangcang_network","anchor_type":"方舱医疗设施","provenance":"observed/public_source","source_refs":["source_fangcang"]},"geometry":{"type":"Point","coordinates":[114.2698,30.6539]}},
+    {"type":"Feature","id":"anchor_fangcang_referral","properties":{"name":"方舱分级转诊网络","macro_id":"fangcang_network","anchor_type":"分级收治网络","provenance":"curated_projection","source_refs":[]},"geometry":{"type":"Point","coordinates":[114.2873,30.5604]}},
+
+    {"type":"Feature","id":"anchor_hankou_station","properties":{"name":"汉口站","macro_id":"rail_mobility","anchor_type":"铁路枢纽","provenance":"observed/public_source","source_refs":["source_wuhan_mobility","source_transport_restart_nodes"]},"geometry":{"type":"Point","coordinates":[114.2551,30.6188]}},
+    {"type":"Feature","id":"anchor_wuchang_station","properties":{"name":"武昌站","macro_id":"rail_mobility","anchor_type":"铁路枢纽","provenance":"observed/public_source","source_refs":["source_wuhan_mobility","source_transport_restart_nodes"]},"geometry":{"type":"Point","coordinates":[114.3168,30.5285]}},
+    {"type":"Feature","id":"anchor_wuhan_station","properties":{"name":"武汉站","macro_id":"rail_mobility","anchor_type":"铁路枢纽","provenance":"observed/public_source","source_refs":["source_wuhan_mobility","source_transport_restart_nodes"]},"geometry":{"type":"Point","coordinates":[114.4244,30.6090]}},
+
+    {"type":"Feature","id":"anchor_tianhe_airport","properties":{"name":"武汉天河机场","macro_id":"airport_gateway","anchor_type":"航空枢纽","provenance":"observed/public_source","source_refs":["source_wuhan_mobility","source_transport_restart_nodes"]},"geometry":{"type":"Point","coordinates":[114.2081,30.7838]}},
+    {"type":"Feature","id":"anchor_airport_screening","properties":{"name":"机场健康筛查网络","macro_id":"airport_gateway","anchor_type":"筛查功能网络","provenance":"curated_projection","source_refs":[]},"geometry":{"type":"Point","coordinates":[114.2261,30.7694]}},
+    {"type":"Feature","id":"anchor_gateway_transfer","properties":{"name":"门户闭环转运网络","macro_id":"airport_gateway","anchor_type":"转运功能网络","provenance":"curated_projection","source_refs":[]},"geometry":{"type":"Point","coordinates":[114.1925,30.7567]}},
+
+    {"type":"Feature","id":"anchor_baibuting","properties":{"name":"百步亭社区协作锚点","macro_id":"community_grid","anchor_type":"社区锚点","provenance":"curated_projection","source_refs":[]},"geometry":{"type":"Point","coordinates":[114.3372,30.6509]}},
+    {"type":"Feature","id":"anchor_wuchang_grid","properties":{"name":"武昌社区网格网络","macro_id":"community_grid","anchor_type":"区级聚合空间","provenance":"curated_projection","source_refs":[]},"geometry":{"type":"Point","coordinates":[114.3162,30.5488]}},
+    {"type":"Feature","id":"anchor_vulnerable_care","properties":{"name":"重点人群照护网络","macro_id":"community_grid","anchor_type":"照护功能网络","provenance":"curated_projection","source_refs":[]},"geometry":{"type":"Point","coordinates":[114.2865,30.5706]}},
+
+    {"type":"Feature","id":"anchor_dongxihu_warehouse","properties":{"name":"东西湖仓储分拨网络","macro_id":"supply_network","anchor_type":"区级聚合空间","provenance":"curated_projection","source_refs":[]},"geometry":{"type":"Point","coordinates":[114.1368,30.6315]}},
+    {"type":"Feature","id":"anchor_baishazhou_supply","properties":{"name":"白沙洲生活物资供应网络","macro_id":"supply_network","anchor_type":"生活保障网络","provenance":"curated_projection","source_refs":[]},"geometry":{"type":"Point","coordinates":[114.2766,30.4678]}},
+    {"type":"Feature","id":"anchor_pharmacy_supply","properties":{"name":"药品保供与处方衔接网络","macro_id":"supply_network","anchor_type":"药品供应网络","provenance":"curated_projection","source_refs":[]},"geometry":{"type":"Point","coordinates":[114.2135,30.5811]}},
+
+    {"type":"Feature","id":"anchor_command_center","properties":{"name":"市级应急指挥协同锚点","macro_id":"command_network","anchor_type":"指挥功能网络","provenance":"curated_projection","source_refs":[]},"geometry":{"type":"Point","coordinates":[114.3054,30.5931]}},
+    {"type":"Feature","id":"anchor_hotline_network","properties":{"name":"公共热线诉求反馈网络","macro_id":"command_network","anchor_type":"信息功能网络","provenance":"curated_projection","source_refs":[]},"geometry":{"type":"Point","coordinates":[114.2836,30.5897]}},
+    {"type":"Feature","id":"anchor_public_information","properties":{"name":"公共信息发布与媒体协作网络","macro_id":"command_network","anchor_type":"信息功能网络","provenance":"curated_projection","source_refs":[]},"geometry":{"type":"Point","coordinates":[114.3269,30.5854]}},
+
+    {"type":"Feature","id":"anchor_health_verification","properties":{"name":"健康核验服务网络","macro_id":"recovery_network","anchor_type":"恢复功能网络","provenance":"curated_projection","source_refs":[]},"geometry":{"type":"Point","coordinates":[114.3493,30.6072]}},
+    {"type":"Feature","id":"anchor_transit_restart","properties":{"name":"公共交通恢复准备网络","macro_id":"recovery_network","anchor_type":"交通恢复网络","provenance":"curated_projection","source_refs":[]},"geometry":{"type":"Point","coordinates":[114.3705,30.5902]}},
+    {"type":"Feature","id":"anchor_city_reopening","properties":{"name":"4月8日城市重启锚点","macro_id":"recovery_network","anchor_type":"历史事件锚点","provenance":"observed/public_source","source_refs":["source_reopening","source_wuhan_mobility"]},"geometry":{"type":"Point","coordinates":[114.3216,30.6226]}}
+  ]
+}

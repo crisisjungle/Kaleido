@@ -100,6 +100,8 @@ def test_wind_signal_paraphrases_share_controlled_weather_mechanisms(phrase):
 
     keys = set(artifact.events[0].atomic_keys)
     assert {"typhoon", "strong_wind", "traffic_pressure", "storm_surge"}.issubset(keys)
+    assert artifact.authority == "draft"
+    assert artifact.events[0].source_origin == "step1_suggestion"
 
 
 @pytest.mark.parametrize(
@@ -142,6 +144,32 @@ def test_wind_signal_and_shutdown_policy_produce_distinct_authority_demands():
     assert planning.contract_version == "scenario_planning.v2"
     assert "education_emergency_execution" in demand_keys
     assert "workplace_shutdown_execution" in demand_keys
+    assert semantic.authority == "authoritative"
+    assert planning.input_authority == "authoritative"
+
+
+def test_scenario_configuration_does_not_revive_deleted_step1_policy():
+    normalizer = SemanticInputNormalizer(use_llm=False)
+    scene = normalizer.normalize_scene(
+        payload={
+            "location": "香港",
+            "initial_variables": [
+                {"input_id": "event_1", "type": "disaster", "name": "台风", "description": "台风增强"},
+                {"input_id": "policy_1", "type": "policy", "name": "停课", "description": "学校停课"},
+            ],
+        }
+    )
+    assert scene.policies
+
+    scenario = normalizer.normalize_scenario(
+        foundation={"location": "香港", "region_ids": []},
+        event_inputs=[{"input_id": "event_1", "name": "台风", "description": "台风增强"}],
+        policy_inputs=[],
+        previous_artifact_ref=scene.ref().model_dump(mode="json"),
+    )
+
+    assert scenario.authority == "authoritative"
+    assert scenario.policies == []
 
 
 def test_compound_scene_input_preserves_weather_event_when_llm_returns_only_policy():

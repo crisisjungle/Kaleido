@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Dict, List, Literal, Optional
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 SEMANTIC_INPUT_CONTRACT_VERSION = "semantic-input.v1"
@@ -74,6 +74,7 @@ class SemanticArtifactRef(StrictModel):
     revision: int = Field(ge=1)
     contract_version: str = SEMANTIC_INPUT_CONTRACT_VERSION
     content_hash: str
+    authority: Literal["draft", "authoritative"] = "draft"
 
 
 class SemanticTime(StrictModel):
@@ -179,6 +180,7 @@ class SemanticInputArtifact(StrictModel):
     artifact_id: str
     revision: int = Field(default=1, ge=1)
     input_kind: InputKind
+    authority: Optional[Literal["draft", "authoritative"]] = None
     source_hash: str
     scene: SceneSemantics = Field(default_factory=SceneSemantics)
     events: List[SemanticEvent] = Field(default_factory=list)
@@ -189,12 +191,23 @@ class SemanticInputArtifact(StrictModel):
     created_at: str = Field(default_factory=lambda: datetime.now().isoformat())
     content_hash: str = ""
 
+    @model_validator(mode="after")
+    def resolve_authority(self) -> "SemanticInputArtifact":
+        if self.authority is None:
+            self.authority = (
+                "authoritative"
+                if self.input_kind in {"scenario_configuration", "runtime_intervention"}
+                else "draft"
+            )
+        return self
+
     def ref(self) -> SemanticArtifactRef:
         return SemanticArtifactRef(
             artifact_id=self.artifact_id,
             revision=self.revision,
             contract_version=self.contract_version,
             content_hash=self.content_hash,
+            authority=self.authority or "draft",
         )
 
 

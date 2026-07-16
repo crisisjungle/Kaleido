@@ -16,8 +16,8 @@
         </button>
 
         <WorkflowStepMenu :current-step="step" :current-name="stepName" />
-        <span class="workflow-shell__divider" aria-hidden="true"></span>
-        <span class="workflow-shell__status" :class="`is-${statusTone}`">
+        <span v-if="statusText" class="workflow-shell__divider" aria-hidden="true"></span>
+        <span v-if="statusText" class="workflow-shell__status" :class="`is-${statusTone}`">
           <span class="workflow-shell__status-dot" aria-hidden="true"></span>
           {{ statusText }}
         </span>

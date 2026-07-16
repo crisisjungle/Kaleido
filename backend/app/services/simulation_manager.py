@@ -53,6 +53,7 @@ from .risk_artifact_store import write_risk_artifacts
 from .risk_definition_builder import RiskDefinitionBuilder
 from .risk_runtime_tracker import RiskRuntimeTracker
 from .scenario_planning.agent_planner import AgentPlannerV2
+from .workflow_artifacts import project_scenario_definition
 from .zep_entity_reader import EntityNode, FilteredEntities, ZepEntityReader
 
 logger = get_logger("envfish.simulation")
@@ -157,8 +158,12 @@ class SimulationState:
     primary_risk_object_id: str = ""
     source_mode: str = "graph"
     map_seed_id: Optional[str] = None
+    base_map_seed_id: Optional[str] = None
     effort_snapshot: Dict[str, Any] = field(default_factory=dict)
     semantic_artifact_ref: Dict[str, Any] = field(default_factory=dict)
+    step1_suggestion_ref: Dict[str, Any] = field(default_factory=dict)
+    resolved_foundation_ref: Dict[str, Any] = field(default_factory=dict)
+    scenario_input_authority: str = ""
     planning_input_id: str = ""
     planning_content_hash: str = ""
     agent_plan_source: str = ""
@@ -211,8 +216,12 @@ class SimulationState:
             "primary_risk_object_id": self.primary_risk_object_id,
             "source_mode": self.source_mode,
             "map_seed_id": self.map_seed_id,
+            "base_map_seed_id": self.base_map_seed_id,
             "effort_snapshot": self.effort_snapshot,
             "semantic_artifact_ref": self.semantic_artifact_ref,
+            "step1_suggestion_ref": self.step1_suggestion_ref,
+            "resolved_foundation_ref": self.resolved_foundation_ref,
+            "scenario_input_authority": self.scenario_input_authority,
             "planning_input_id": self.planning_input_id,
             "planning_content_hash": self.planning_content_hash,
             "agent_plan_source": self.agent_plan_source,
@@ -260,7 +269,11 @@ class SimulationState:
             "primary_risk_object_id": self.primary_risk_object_id,
             "source_mode": self.source_mode,
             "map_seed_id": self.map_seed_id,
+            "base_map_seed_id": self.base_map_seed_id,
             "effort_snapshot": self.effort_snapshot,
+            "step1_suggestion_ref": self.step1_suggestion_ref,
+            "resolved_foundation_ref": self.resolved_foundation_ref,
+            "scenario_input_authority": self.scenario_input_authority,
             "planning_input_id": self.planning_input_id,
             "planning_content_hash": self.planning_content_hash,
             "agent_plan_source": self.agent_plan_source,
@@ -370,6 +383,7 @@ class SimulationManager:
             primary_risk_object_id=data.get("primary_risk_object_id", ""),
             source_mode=data.get("source_mode", "graph"),
             map_seed_id=data.get("map_seed_id"),
+            base_map_seed_id=data.get("base_map_seed_id") or data.get("map_seed_id"),
             effort_snapshot=normalize_effort_snapshot(
                 data.get("effort_snapshot")
                 or build_effort_snapshot(
@@ -379,6 +393,9 @@ class SimulationManager:
                 )
             ),
             semantic_artifact_ref=dict(data.get("semantic_artifact_ref") or {}),
+            step1_suggestion_ref=dict(data.get("step1_suggestion_ref") or {}),
+            resolved_foundation_ref=dict(data.get("resolved_foundation_ref") or {}),
+            scenario_input_authority=str(data.get("scenario_input_authority") or ""),
             planning_input_id=data.get("planning_input_id", ""),
             planning_content_hash=data.get("planning_content_hash", ""),
             agent_plan_source=data.get("agent_plan_source", ""),
@@ -463,8 +480,10 @@ class SimulationManager:
             diffusion_provider=diffusion_provider or "auto",
             source_mode=source_mode or "graph",
             map_seed_id=map_seed_id,
+            base_map_seed_id=map_seed_id,
             effort_snapshot=normalize_effort_snapshot(effort_snapshot),
             semantic_artifact_ref=dict(semantic_artifact_ref or {}),
+            step1_suggestion_ref=dict(semantic_artifact_ref or {}),
             artifact_mode=str(artifact_mode or "live"),
             artifact_root=str(artifact_root or ""),
             golden_case_id=str(golden_case_id or ""),
@@ -1017,6 +1036,19 @@ class SimulationManager:
             config.scenario_state_schema = dict(authoritative_scenario_state_schema)
             config.effort_snapshot = dict(state.effort_snapshot or {})
             config.scenario_planning_input = dict(scenario_planning_input or {})
+            config.event_inputs = list((scenario_planning_input or {}).get("normalized_user_events") or [])
+            config.policy_inputs = list((scenario_planning_input or {}).get("normalized_user_policies") or [])
+            config.resolved_foundation_ref = dict(
+                (scenario_planning_input or {}).get("resolved_foundation_ref")
+                or (scenario_planning_input or {}).get("foundation_ref")
+                or {}
+            )
+            config.step1_suggestion_ref = dict(
+                (scenario_planning_input or {}).get("step1_suggestion_ref") or {}
+            )
+            config.scenario_input_authority = str(
+                (scenario_planning_input or {}).get("input_authority") or ""
+            )
             config.agent_plan_source = str(agent_plan_source or "")
             config.agent_plan_contract_version = str(
                 agent_plan_artifact.get("contract_version") or ""
@@ -1060,6 +1092,19 @@ class SimulationManager:
                     "max_neighbor_spread": authoritative_transport_profile.get("max_neighbor_spread", 2),
                 }
 
+            config.scenario_definition = project_scenario_definition(
+                scenario_planning_input,
+                config.to_dict(),
+            )
+            dump_json(
+                os.path.join(sim_dir, "scenario_definition.json"),
+                config.scenario_definition,
+            )
+            dump_json(
+                os.path.join(sim_dir, "background_foundation.json"),
+                config.scenario_definition.get("foundation_ref") or {},
+            )
+
             if progress_callback:
                 progress_callback("generating_config", 70, "正在保存推演配置", current=2, total=3)
 
@@ -1081,6 +1126,9 @@ class SimulationManager:
             state.diffusion_template = config.diffusion_template or state.diffusion_template
             state.planning_input_id = str((scenario_planning_input or {}).get("planning_input_id") or "")
             state.planning_content_hash = str((scenario_planning_input or {}).get("content_hash") or "")
+            state.resolved_foundation_ref = dict(config.resolved_foundation_ref or {})
+            state.step1_suggestion_ref = dict(config.step1_suggestion_ref or {})
+            state.scenario_input_authority = str(config.scenario_input_authority or "")
             state.agent_plan_source = str(agent_plan_source or "")
             state.status = SimulationStatus.READY
             state.error = None
@@ -1240,7 +1288,12 @@ class SimulationManager:
         config_path = os.path.join(sim_dir, "simulation_config.json")
         if not os.path.exists(config_path):
             return None
-        return read_json_file(config_path, default=None)
+        config = read_json_file(config_path, default=None)
+        if isinstance(config, dict) and not config.get("scenario_definition"):
+            planning_input = config.get("scenario_planning_input")
+            if isinstance(planning_input, dict) and planning_input:
+                config["scenario_definition"] = project_scenario_definition(planning_input, config)
+        return config
 
     def get_run_instructions(self, simulation_id: str) -> Dict[str, str]:
         state = self._load_simulation_state(simulation_id)

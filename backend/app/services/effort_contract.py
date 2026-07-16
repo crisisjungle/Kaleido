@@ -317,7 +317,7 @@ _LEVEL_ALIASES = {
     "extrahigh": "extra_high",
 }
 _SNAPSHOT_ID_RE = re.compile(r"^effort_[a-zA-Z0-9_-]{6,80}$")
-_VALID_SOURCES = {"user", "default", "legacy_migration", "legacy_frozen"}
+_VALID_SOURCES = {"user", "default", "legacy_migration", "legacy_frozen", "curated_fixture"}
 _PROFILE_FIELDS = (
     "effort_level",
     "effort_label",

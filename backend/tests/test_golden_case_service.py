@@ -154,6 +154,12 @@ def test_wuhan_fixture_builds_complete_deterministic_step2_contract(monkeypatch,
     policy_plan = json.loads((simulation_root / "policy_plan.json").read_text(encoding="utf-8"))
     role_demands = json.loads((simulation_root / "role_demands.json").read_text(encoding="utf-8"))
     agent_request = json.loads((simulation_root / "agent_planning_request.json").read_text(encoding="utf-8"))
+    facility_query_plan = json.loads(
+        (simulation_root / "facility_query_plan.json").read_text(encoding="utf-8")
+    )
+    spatial_snapshot = json.loads(
+        (simulation_root / "spatial_refinement_snapshot.json").read_text(encoding="utf-8")
+    )
 
     assert manifest["artifact_contract_version"] == WUHAN_ARTIFACT_CONTRACT_VERSION
     assert config["simulation_architecture"] == "llm_mechanism_v1"
@@ -190,6 +196,31 @@ def test_wuhan_fixture_builds_complete_deterministic_step2_contract(monkeypatch,
     assert config["agent_plan_source"] == "legacy_adapter"
     assert agent_request["agent_plan_source"] == "legacy_adapter"
     assert agent_request["scenario_planning_ref"]["content_hash"] == planning["content_hash"]
+    assert manifest["simulation"]["facility_query_plan"] == str(
+        simulation_root / "facility_query_plan.json"
+    )
+    assert manifest["simulation"]["spatial_refinement_snapshot"] == str(
+        simulation_root / "spatial_refinement_snapshot.json"
+    )
+    assert facility_query_plan["contract_version"] == "facility_query_plan.v1"
+    assert spatial_snapshot["contract_version"] == "spatial_refinement_snapshot.v1"
+    assert agent_request["facility_query_plan_ref"] == {
+        key: facility_query_plan[key]
+        for key in ("contract_version", "plan_id", "content_hash")
+    }
+    assert agent_request["spatial_refinement_snapshot_ref"] == {
+        key: spatial_snapshot[key]
+        for key in ("contract_version", "snapshot_id", "content_hash")
+    }
+    assert agent_request["spatial_evidence_summary"]["required_r3_count"] > 0
+    assert agent_request["spatial_evidence_summary"]["covered_r3_count"] == 0
+    assert spatial_snapshot["selected_r3_features"] == []
+    assert spatial_snapshot["r4_model_units"] == []
+    assert {item["evidence_grade"] for item in spatial_snapshot["source_versions"]} == {"S"}
+    assert any(
+        item.get("status") == "insufficient_evidence"
+        for item in spatial_snapshot["request_coverage"]
+    )
     assert state["planning_input_id"] == planning["planning_input_id"]
     assert state["planning_content_hash"] == planning["content_hash"]
     assert state["effort_snapshot"] == effort_snapshot

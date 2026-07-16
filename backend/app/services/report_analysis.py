@@ -24,6 +24,7 @@ from .report_agent import ReportManager, ReportStatus
 from .simulation_manager import SimulationManager
 from .simulation_runner import SimulationRunner
 from .semantic_input import SemanticArtifactStore, SemanticInputNormalizer
+from .workflow_artifacts import ANALYSIS_BUNDLE_CONTRACT_VERSION, project_analysis_bundle
 
 logger = get_logger("envfish.report_analysis")
 
@@ -236,12 +237,18 @@ class ReportAnalysisService:
         self.max_round = self._get_max_round()
 
     def _simulation_dir(self) -> Optional[str]:
-        if not self.simulation_id:
+        simulation_id = _normalize_text(getattr(self, "simulation_id", ""))
+        if not simulation_id:
             return None
-        resolved_dir = self.simulation_manager.resolve_artifact_dir(self.simulation_id, create_if_missing=False)
+        manager = getattr(self, "simulation_manager", None)
+        resolved_dir = (
+            manager.resolve_artifact_dir(simulation_id, create_if_missing=False)
+            if manager is not None
+            else None
+        )
         if resolved_dir and os.path.exists(resolved_dir):
             return resolved_dir
-        sim_dir = os.path.join(SimulationRunner.RUN_STATE_DIR, self.simulation_id)
+        sim_dir = os.path.join(SimulationRunner.RUN_STATE_DIR, simulation_id)
         if os.path.exists(sim_dir):
             return sim_dir
         return None
@@ -284,6 +291,17 @@ class ReportAnalysisService:
         except Exception as exc:
             logger.warning(f"读取模拟JSONL工件失败: simulation_id={self.simulation_id}, file={filename}, error={exc}")
             return default
+
+    def _curated_analysis_bundle(self) -> Dict[str, Any]:
+        """Return the frozen editorial analysis when the case explicitly owns it."""
+        payload = self._read_simulation_json("analysis_bundle.json", {}) or {}
+        if not isinstance(payload, dict):
+            return {}
+        if _normalize_text(payload.get("generation_mode")) != "curated_target_state":
+            return {}
+        if _normalize_text(payload.get("contract_version")) != ANALYSIS_BUNDLE_CONTRACT_VERSION:
+            return {}
+        return payload
 
     def _load_mechanism_artifacts(self) -> Dict[str, Any]:
         scenario_model = self._read_simulation_json("scenario_model.json", {}) or {}
@@ -1591,6 +1609,443 @@ class ReportAnalysisService:
             },
         }
 
+    def _build_risk_outcomes_tab(self) -> Dict[str, Any]:
+        curated_bundle = self._curated_analysis_bundle()
+        if curated_bundle:
+            curated_outcomes = []
+            for item in curated_bundle.get("risk_outcomes") or []:
+                if not isinstance(item, dict):
+                    continue
+                peak = _safe_float(item.get("peak_score")) or 0
+                ending = _safe_float(item.get("ending_score")) or 0
+                curated_outcomes.append({
+                    **item,
+                    "outcome_status": "mitigated" if ending < peak else "unverified",
+                    "status_label": "已缓解" if ending < peak else "持续监测",
+                    "current_tension": ending,
+                    "peak_tension": peak,
+                    "affected_regions": list(item.get("affected_regions") or []),
+                    "affected_subjects": list(item.get("affected_subjects") or []),
+                    "mechanism_chain": _normalize_text(item.get("lifecycle")),
+                })
+            return {
+                "tab": "risk-outcomes",
+                "contract_version": ANALYSIS_BUNDLE_CONTRACT_VERSION,
+                "available": bool(curated_outcomes),
+                "risk_outcomes": curated_outcomes,
+                "status_counts": {
+                    "mitigated": sum(1 for item in curated_outcomes if item.get("outcome_status") == "mitigated"),
+                    "unverified": sum(1 for item in curated_outcomes if item.get("outcome_status") == "unverified"),
+                },
+                "primary_risk_id": curated_outcomes[0].get("risk_id") if curated_outcomes else "",
+                "latest_round": self._get_default_round(),
+                "analysis_boundary": "风险结果来自已冻结主线账本；只描述生命周期与状态变化，不把时间关联表述为确定因果。",
+                "analysis_bundle": curated_bundle,
+            }
+        definitions = self._preferred_risk_definitions()
+        legacy_objects = self._preferred_risk_objects()
+        runtime_bundle = self._preferred_risk_runtime_state()
+        runtime_states = [
+            item for item in (runtime_bundle.get("risk_states") or [])
+            if isinstance(item, dict)
+        ]
+        runtime_by_id = {
+            _normalize_text(item.get("risk_id") or item.get("risk_object_id")): item
+            for item in runtime_states
+            if _normalize_text(item.get("risk_id") or item.get("risk_object_id"))
+        }
+        primary_runtime_id = _normalize_text(runtime_bundle.get("primary_active_risk_id"))
+        events = self._preferred_risk_events()
+        events_by_id: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+        for item in events:
+            risk_id = _normalize_text(item.get("risk_id") or item.get("risk_object_id"))
+            if not risk_id and primary_runtime_id:
+                risk_id = primary_runtime_id
+            if risk_id:
+                events_by_id[risk_id].append(item)
+
+        legacy_by_id = {
+            _normalize_text(item.get("risk_id") or item.get("risk_object_id")): item
+            for item in legacy_objects
+            if isinstance(item, dict)
+        }
+        known_definition_ids = set()
+        outcomes: List[Dict[str, Any]] = []
+
+        def classify(runtime: Dict[str, Any], *, emerged: bool = False) -> tuple[str, str]:
+            status = _normalize_text(runtime.get("status") or runtime.get("lifecycle_status")).lower()
+            trend = _normalize_text(runtime.get("trend")).lower()
+            trace = [
+                float(value) for value in (runtime.get("tension_trace") or [])
+                if isinstance(value, (int, float))
+            ]
+            if emerged:
+                return "emerged", "运行中新出现"
+            if status in {"closed", "retired"}:
+                return "closed", "已关闭"
+            if status == "resolved":
+                return "mitigated", "得到缓解"
+            if not runtime or status == "dormant":
+                return "unverified", "未被验证"
+            if trend in {"falling", "declining", "decreasing", "down"} or (
+                len(trace) >= 2 and trace[-1] <= trace[0] - 3
+            ):
+                return "mitigated", "得到缓解"
+            if trend in {"rising", "increasing", "up"} or (
+                len(trace) >= 2 and trace[-1] >= trace[0] + 3
+            ):
+                return "increasing", "持续增强"
+            if status in {"critical", "elevated", "active", "watch"}:
+                return "appeared", "已出现"
+            return "unverified", "未被验证"
+
+        def normalize_outcome(
+            risk_id: str,
+            definition: Dict[str, Any],
+            runtime: Dict[str, Any],
+            *,
+            emerged: bool = False,
+            index: int = 0,
+        ) -> Dict[str, Any]:
+            legacy = legacy_by_id.get(risk_id) or (legacy_objects[index] if index < len(legacy_objects) else {})
+            related_events = events_by_id.get(risk_id) or []
+            outcome_status, outcome_label = classify(runtime, emerged=emerged)
+            trace = runtime.get("tension_trace") if isinstance(runtime.get("tension_trace"), list) else []
+            current_tension = runtime.get("runtime_tension")
+            if current_tension is None:
+                current_tension = runtime.get("severity_score")
+            if current_tension is None:
+                current_tension = definition.get("severity_score") or legacy.get("severity_score") or 0
+            region_scope = list(dict.fromkeys([
+                *[str(value) for value in (definition.get("region_scope") or []) if value],
+                *[str(value) for value in (definition.get("primary_regions") or []) if value],
+                *[str(value) for value in (legacy.get("region_scope") or []) if value],
+                *[str(value) for item in related_events for value in (item.get("region_scope") or []) if value],
+            ]))
+            affected_subjects = list(dict.fromkeys([
+                *[str(value) for value in (definition.get("source_actor_names") or []) if value],
+                *[str(value) for value in (definition.get("affected_subjects") or []) if value],
+                *[str(item.get("name") or item.get("label_zh") or "") for item in (legacy.get("affected_clusters") or []) if isinstance(item, dict)],
+            ]))
+            title = _normalize_text(
+                definition.get("title")
+                or definition.get("label_zh")
+                or legacy.get("title")
+            ) or ("运行中新风险" if emerged else f"风险对象 {index + 1}")
+            summary = _normalize_text(
+                definition.get("summary")
+                or definition.get("description")
+                or legacy.get("summary")
+                or legacy.get("why_now")
+            )
+            return {
+                "risk_id": risk_id,
+                "title": title,
+                "summary": summary,
+                "outcome_status": outcome_status,
+                "outcome_label_zh": outcome_label,
+                "lifecycle_status": _normalize_text(runtime.get("status") or definition.get("lifecycle_status")) or (
+                    "运行中" if runtime else "未进入运行状态"
+                ),
+                "current_tension": round(float(current_tension or 0), 1),
+                "trend": _normalize_text(runtime.get("trend")) or (
+                    "rising" if len(trace) >= 2 and trace[-1] > trace[0]
+                    else "falling" if len(trace) >= 2 and trace[-1] < trace[0]
+                    else "stable"
+                ),
+                "tension_trace": trace,
+                "affected_regions": region_scope,
+                "affected_subjects": [item for item in affected_subjects if item],
+                "mechanism_node_ids": list(definition.get("mechanism_node_ids") or []),
+                "mechanism_edge_ids": list(definition.get("mechanism_edge_ids") or []),
+                "risk_events": related_events[-12:],
+                "risk_event_count": len(related_events),
+                "evidence_count": len(definition.get("evidence") or legacy.get("evidence") or []) + len(related_events),
+                "boundary_zh": (
+                    "该风险在当前运行记录中尚未形成可验证状态。"
+                    if outcome_status == "unverified"
+                    else "状态来自风险定义、逐轮风险状态与风险事件的同一标识关联，不代表对未运行分支的因果判断。"
+                ),
+            }
+
+        for index, definition in enumerate(definitions):
+            risk_id = _normalize_text(definition.get("risk_id") or definition.get("risk_object_id"))
+            if not risk_id:
+                risk_id = f"risk-definition-{index + 1}"
+            known_definition_ids.add(risk_id)
+            outcomes.append(normalize_outcome(risk_id, definition, runtime_by_id.get(risk_id) or {}, index=index))
+
+        for index, runtime in enumerate(runtime_states):
+            risk_id = _normalize_text(runtime.get("risk_id") or runtime.get("risk_object_id"))
+            if not risk_id or risk_id in known_definition_ids:
+                continue
+            outcomes.append(normalize_outcome(risk_id, {}, runtime, emerged=True, index=len(definitions) + index))
+
+        if not definitions and not runtime_states:
+            for index, legacy in enumerate(legacy_objects):
+                risk_id = _normalize_text(legacy.get("risk_object_id")) or f"legacy-risk-{index + 1}"
+                outcomes.append(normalize_outcome(risk_id, legacy, {}, index=index))
+
+        priority = {"emerged": 0, "increasing": 1, "appeared": 2, "mitigated": 3, "unverified": 4, "closed": 5}
+        outcomes.sort(key=lambda item: (priority.get(item.get("outcome_status"), 9), -float(item.get("current_tension") or 0)))
+        status_counts: Dict[str, int] = defaultdict(int)
+        for item in outcomes:
+            status_counts[item["outcome_status"]] += 1
+
+        analysis_bundle = project_analysis_bundle(
+            risk_outcomes=outcomes,
+            uncertainty_boundaries=["没有对照分支时，本页只描述运行中观测到的风险变化，不将时间关联表述为确定因果。"],
+        )
+        return {
+            "tab": "risk-outcomes",
+            "contract_version": ANALYSIS_BUNDLE_CONTRACT_VERSION,
+            "available": bool(outcomes),
+            "risk_outcomes": outcomes,
+            "status_counts": dict(status_counts),
+            "primary_risk_id": primary_runtime_id,
+            "latest_round": runtime_bundle.get("round") or self._get_default_round(),
+            "analysis_boundary": "本页逐项对照 Step 2 风险假设与运行记录；未出现不等于风险不存在，运行中新对象也不会反向改写原始假设。",
+            "analysis_bundle": analysis_bundle,
+        }
+
+    def _build_intervention_tab(self) -> Dict[str, Any]:
+        curated_bundle = self._curated_analysis_bundle()
+        if curated_bundle:
+            observations = []
+            for index, item in enumerate(curated_bundle.get("intervention_observations") or []):
+                if not isinstance(item, dict):
+                    continue
+                state_effect_delta = {
+                    _normalize_text(change.get("dimension_name") or change.get("dimension_id")): change.get("delta")
+                    for change in (item.get("state_changes") or [])
+                    if isinstance(change, dict) and _normalize_text(change.get("dimension_name") or change.get("dimension_id"))
+                }
+                observations.append({
+                    "id": _normalize_text(item.get("intervention_id")) or f"policy-{index + 1}",
+                    "round": item.get("start_round") or 0,
+                    "label": _normalize_text(item.get("title")) or "政策介入",
+                    "status": "executed",
+                    "status_label": "已纳入主线",
+                    "summary": _normalize_text(item.get("intent")) or "该介入已写入冻结主线账本。",
+                    "executor_count": 0,
+                    "target_region_count": 0,
+                    "state_effect_delta": state_effect_delta,
+                    "side_effects": [],
+                    "blocking_reasons": [],
+                    "before_round": item.get("before_round"),
+                    "after_round": item.get("after_round"),
+                    "observation_boundary": _normalize_text(item.get("observation_boundary")),
+                })
+            return {
+                "tab": "intervention",
+                "policy_events": observations,
+                "interventions": [],
+                "summary": {
+                    "policy_event_count": len(observations),
+                    "executed_count": len(observations),
+                    "blocked_count": 0,
+                    "intervention_count": 0,
+                },
+                "causality_boundary": "这里只比较冻结主线中政策介入前后的状态变化，不宣称未经反事实验证的因果效果。",
+            }
+        policy_events = self._read_simulation_jsonl("policy_execution_ledger.jsonl", []) or []
+        intervention_events = self._read_simulation_jsonl("intervention_log.jsonl", []) or []
+        if not intervention_events:
+            intervention_events = self.artifacts.get("interventions") or []
+
+        normalized_policies: List[Dict[str, Any]] = []
+        for index, item in enumerate(policy_events):
+            if not isinstance(item, dict):
+                continue
+            status = _normalize_text(item.get("execution_status")) or "recorded"
+            normalized_policies.append({
+                "id": _normalize_text(item.get("policy_execution_id")) or f"policy-{index + 1}",
+                "round": item.get("round_number") or item.get("round") or 0,
+                "label": _normalize_text(item.get("policy_label_zh")) or "政策措施",
+                "status": status,
+                "status_label": "已执行" if status == "executed" else "未生效" if status == "blocked" else "已记录",
+                "summary": _normalize_text(item.get("summary_zh")) or "该政策执行记录已写入运行账本。",
+                "executor_count": len(item.get("executor_agent_ids") or []),
+                "target_region_count": len(item.get("target_region_ids") or []),
+                "state_effect_delta": item.get("state_effect_delta") if isinstance(item.get("state_effect_delta"), dict) else {},
+                "side_effects": [
+                    _normalize_text(value)
+                    for value in (item.get("side_effects_zh") or [])
+                    if _normalize_text(value)
+                ],
+                "blocking_reasons": [
+                    _normalize_text(value)
+                    for value in (item.get("blocking_reasons_zh") or [])
+                    if _normalize_text(value)
+                ],
+            })
+
+        normalized_interventions: List[Dict[str, Any]] = []
+        for index, item in enumerate(intervention_events):
+            if not isinstance(item, dict):
+                continue
+            normalized_interventions.append({
+                "id": _normalize_text(item.get("artifact_id") or item.get("intervention_id") or item.get("id")) or f"intervention-{index + 1}",
+                "round": item.get("round") or item.get("round_number") or 0,
+                "label": _normalize_text(item.get("display_name") or item.get("label_zh") or item.get("name") or item.get("variable")) or "运行时干预",
+                "summary": _normalize_text(item.get("summary_zh") or item.get("description_zh") or item.get("description") or item.get("value")) or "该干预已写入运行账本。",
+                "target": _normalize_text(item.get("target_label_zh") or item.get("target_name") or item.get("target")),
+            })
+
+        executed_count = sum(1 for item in normalized_policies if item.get("status") == "executed")
+        blocked_count = sum(1 for item in normalized_policies if item.get("status") == "blocked")
+        return {
+            "tab": "intervention",
+            "policy_events": normalized_policies,
+            "interventions": normalized_interventions,
+            "summary": {
+                "policy_event_count": len(normalized_policies),
+                "executed_count": executed_count,
+                "blocked_count": blocked_count,
+                "intervention_count": len(normalized_interventions),
+            },
+            "causality_boundary": "当前页面展示执行前后状态及后续变化的时间和机制关联。没有对照分支时，不将这些关联表述为确定的因果效果。",
+        }
+
+    def _build_analysis_bundle_tab(self) -> Dict[str, Any]:
+        curated_bundle = self._curated_analysis_bundle()
+        if curated_bundle:
+            return {
+                "tab": "analysis-bundle",
+                "available": True,
+                "analysis_bundle": curated_bundle,
+                "counts": {
+                    "executive_findings": len(curated_bundle.get("executive_findings") or []),
+                    "turning_points": len(curated_bundle.get("turning_points") or []),
+                    "risk_outcomes": len(curated_bundle.get("risk_outcomes") or []),
+                    "intervention_observations": len(curated_bundle.get("intervention_observations") or []),
+                    "evidence_items": len(curated_bundle.get("evidence_index") or []),
+                    "uncertainty_boundaries": len(curated_bundle.get("uncertainty_boundaries") or []),
+                },
+            }
+        narrative_tab = self._build_narrative_tab()
+        risk_tab = self._build_risk_outcomes_tab()
+        intervention_tab = self._build_intervention_tab()
+        narratives = [
+            item for item in (narrative_tab.get("rounds") or [])
+            if isinstance(item, dict)
+        ]
+        risk_outcomes = [
+            item for item in (risk_tab.get("risk_outcomes") or [])
+            if isinstance(item, dict)
+        ]
+
+        executive_findings: List[Dict[str, Any]] = []
+        for item in narratives[-3:]:
+            executive_findings.append({
+                "finding_id": f"round-{item.get('round') or len(executive_findings) + 1}",
+                "round": item.get("round"),
+                "title": _normalize_text(item.get("headline")) or "本轮关键发现",
+                "summary": _normalize_text(item.get("amplifier")),
+                "top_region": item.get("top_region") if isinstance(item.get("top_region"), dict) else {},
+                "uncertainty": _normalize_text(item.get("uncertainty")),
+                "source": _normalize_text(item.get("narrative_source")) or "runtime_projection",
+            })
+
+        turning_points: List[Dict[str, Any]] = []
+        seen_turning_points = set()
+        for item in narratives:
+            for index, value in enumerate(item.get("turning_points") or []):
+                summary = _normalize_text(value)
+                dedupe_key = (item.get("round"), summary)
+                if not summary or dedupe_key in seen_turning_points:
+                    continue
+                seen_turning_points.add(dedupe_key)
+                turning_points.append({
+                    "turning_point_id": f"turn-{item.get('round') or 0}-{index + 1}",
+                    "round": item.get("round"),
+                    "summary": summary,
+                    "evidence_type": "round_reasoning",
+                })
+
+        intervention_observations = [
+            {**item, "observation_type": "policy_execution"}
+            for item in (intervention_tab.get("policy_events") or [])
+            if isinstance(item, dict)
+        ] + [
+            {**item, "observation_type": "runtime_intervention"}
+            for item in (intervention_tab.get("interventions") or [])
+            if isinstance(item, dict)
+        ]
+
+        analysis_graph = self._load_graph_data()
+        evidence_index: List[Dict[str, Any]] = []
+        for item in analysis_graph.get("nodes") or []:
+            if not isinstance(item, dict):
+                continue
+            attributes = item.get("attributes") if isinstance(item.get("attributes"), dict) else {}
+            evidence_refs = attributes.get("evidence_refs") or item.get("evidence_refs") or []
+            if not isinstance(evidence_refs, list) or not evidence_refs:
+                continue
+            node_id = _normalize_text(item.get("uuid") or item.get("id"))
+            evidence_index.append({
+                "evidence_id": f"evidence-{node_id or len(evidence_index) + 1}",
+                "node_id": node_id,
+                "node_name": _normalize_text(item.get("name") or item.get("label")) or "证据节点",
+                "evidence_refs": evidence_refs,
+                "evidence_count": len(evidence_refs),
+            })
+
+        affected_regions = list(dict.fromkeys(
+            _normalize_text(value)
+            for item in risk_outcomes
+            for value in (item.get("affected_regions") or [])
+            if _normalize_text(value)
+        ))
+        affected_subjects = list(dict.fromkeys(
+            _normalize_text(value)
+            for item in risk_outcomes
+            for value in (item.get("affected_subjects") or [])
+            if _normalize_text(value)
+        ))
+        uncertainty_boundaries = list(dict.fromkeys([
+            *[
+                _normalize_text(item.get("uncertainty"))
+                for item in executive_findings
+                if _normalize_text(item.get("uncertainty"))
+            ],
+            _normalize_text(risk_tab.get("analysis_boundary")),
+            _normalize_text(intervention_tab.get("causality_boundary")),
+        ]))
+        bundle = project_analysis_bundle(
+            executive_findings=executive_findings,
+            turning_points=turning_points,
+            risk_outcomes=risk_outcomes,
+            intervention_observations=intervention_observations,
+            impact_scope={
+                "latest_round": risk_tab.get("latest_round") or self._get_default_round(),
+                "affected_regions": affected_regions,
+                "affected_subjects": affected_subjects,
+                "region_count": len(affected_regions),
+                "subject_count": len(affected_subjects),
+            },
+            evidence_index=evidence_index,
+            uncertainty_boundaries=uncertainty_boundaries,
+            report_artifact_ref={
+                "report_id": self.report_id,
+                "simulation_id": self.simulation_id,
+                "status": self.report.status.value,
+            },
+        )
+        return {
+            "tab": "analysis-bundle",
+            "available": bool(executive_findings or risk_outcomes or turning_points or evidence_index),
+            "analysis_bundle": bundle,
+            "counts": {
+                "executive_findings": len(executive_findings),
+                "turning_points": len(turning_points),
+                "risk_outcomes": len(risk_outcomes),
+                "intervention_observations": len(intervention_observations),
+                "evidence_items": len(evidence_index),
+                "uncertainty_boundaries": len(uncertainty_boundaries),
+            },
+        }
+
     def get_overview(self) -> Dict[str, Any]:
         analysis_graph = self._load_graph_data()
         dynamic_edges = self._load_dynamic_edges()
@@ -1616,7 +2071,7 @@ class ReportAnalysisService:
             "default_round": self._get_default_round(),
             "max_round": self.max_round,
             "latest_timestamp": self.latest_snapshot.get("timestamp"),
-            "available_tabs": ["regions", "mechanisms", "feedback", "roles", "narrative", "node-explore", "report"],
+            "available_tabs": ["analysis-bundle", "regions", "risk-outcomes", "mechanisms", "feedback", "roles", "narrative", "intervention", "node-explore", "report"],
             "node_stats": {
                 "region_count": len(self.artifacts.get("region_graph") or []),
                 "subregion_count": len(self.artifacts.get("subregion_graph") or []),
@@ -1638,14 +2093,20 @@ class ReportAnalysisService:
     def get_tab_data(self, tab_id: str) -> Dict[str, Any]:
         if tab_id == "regions":
             payload = self._build_regions_tab()
+        elif tab_id == "analysis-bundle":
+            payload = self._build_analysis_bundle_tab()
         elif tab_id == "feedback":
             payload = self._build_feedback_tab()
         elif tab_id == "mechanisms":
             payload = self._build_mechanisms_tab()
+        elif tab_id == "risk-outcomes":
+            payload = self._build_risk_outcomes_tab()
         elif tab_id == "roles":
             payload = self._build_roles_tab()
         elif tab_id == "narrative":
             payload = self._build_narrative_tab()
+        elif tab_id == "intervention":
+            payload = self._build_intervention_tab()
         elif tab_id == "report":
             payload = self._build_report_tab()
         else:

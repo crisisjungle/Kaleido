@@ -269,6 +269,16 @@ class SemanticInputNormalizer:
             "target_catalog": self._target_catalog(map_context or {}),
         }
         fallback = self._fallback_scene(scene_payload, raw_variables)
+        fallback = fallback.model_copy(update={
+            "events": [
+                item.model_copy(update={"source_origin": "step1_suggestion"})
+                for item in fallback.events
+            ],
+            "policies": [
+                item.model_copy(update={"source_origin": "step1_suggestion"})
+                for item in fallback.policies
+            ],
+        })
         source["event_inputs"] = [item.model_dump(mode="json") for item in fallback.events]
         source["policy_inputs"] = [item.model_dump(mode="json") for item in fallback.policies]
         return self._normalize_and_store(
@@ -1012,7 +1022,7 @@ class SemanticInputNormalizer:
             open_concept="" if keys else name,
             target_region_ids=_list(raw.get("target_region_ids") or raw.get("target_regions")),
             target_entity_ids=_list(raw.get("target_entity_ids") or raw.get("target_nodes")),
-            target_labels=_list(raw.get("target_text") or raw.get("target")),
+            target_labels=_list(raw.get("target_labels") or raw.get("target_text") or raw.get("target")),
             expected_effects=_list(raw.get("expected_effects") or raw.get("effects")),
             time=SemanticTime(
                 start_round=self._optional_int(
@@ -1068,7 +1078,7 @@ class SemanticInputNormalizer:
             ])),
             target_region_ids=_list(raw.get("target_region_ids") or raw.get("target_regions")),
             target_entity_ids=_list(raw.get("target_entity_ids") or raw.get("target_nodes")),
-            target_labels=_list(raw.get("target_text") or raw.get("target")),
+            target_labels=_list(raw.get("target_labels") or raw.get("target_text") or raw.get("target")),
             time=SemanticTime(
                 start_round=self._optional_int(raw.get("start_round"), minimum=0),
                 duration_rounds=self._optional_int(raw.get("duration_rounds"), minimum=1),
@@ -1404,6 +1414,11 @@ class SemanticInputNormalizer:
             artifact_id=artifact_id,
             revision=revision,
             input_kind=input_kind,
+            authority=(
+                "authoritative"
+                if input_kind in {"scenario_configuration", "runtime_intervention"}
+                else "draft"
+            ),
             source_hash=source_hash,
             scene=scene,
             events=resolved_events,

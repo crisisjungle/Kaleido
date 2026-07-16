@@ -34,6 +34,10 @@ MACHINE_FIELD_NAMES = {
     "labels",
     "scope_basis",
     "primary_region",
+    "artifact_name",
+    "provenance",
+    "evidence_ref",
+    "evidence_refs",
 }
 MACHINE_FIELD_SUFFIXES = (
     "_id",
@@ -359,8 +363,8 @@ def _is_route_descriptor(value: Any) -> bool:
     return bool(
         isinstance(value, Mapping)
         and isinstance(value.get("name"), str)
-        and isinstance(value.get("params"), Mapping)
         and isinstance(value.get("query"), Mapping)
+        and ("params" not in value or isinstance(value.get("params"), Mapping))
     )
 
 
@@ -582,7 +586,16 @@ def _sanitize_markdown_line(line: str) -> str:
     if re.fullmatch(r"[{}\[\],]+", stripped):
         return ""
 
-    localized = re.sub(r"https?://\S+", "", line, flags=re.IGNORECASE)
+    # Preserve the human-readable citation label before removing the raw URL.
+    # Otherwise a Markdown link degrades into visible fragments such as
+    # ``[来源标题](`` in the formal report and printed PDF.
+    localized = re.sub(
+        r"!?\[([^\]]+)\]\((?:https?://|www\.)[^)\s]+\)",
+        r"\1",
+        line,
+        flags=re.IGNORECASE,
+    )
+    localized = re.sub(r"https?://\S+", "", localized, flags=re.IGNORECASE)
     localized = re.sub(r"/(?:api|v\d+)/[A-Za-z0-9_./?=&%:\-]+", "", localized, flags=re.IGNORECASE)
     localized = re.sub(r"\b(?:\d{1,3}\.){3}\d{1,3}(?::\d{1,5})?(?:/\S*)?", "", localized)
     localized = re.sub(
@@ -746,6 +759,10 @@ def _sanitize_display_value(
 
 
 def _sanitize_field(value: Any, *, field_name: str, owner: Mapping[str, Any]) -> Any:
+    # Machine contract fields win over display suffixes.  For example,
+    # ``artifact_name`` is a stable lookup key even though it ends in ``_name``.
+    if is_machine_field(field_name):
+        return sanitize_public_dto(value)
     if _normalized_field_name(field_name) == "name" and _is_route_descriptor(owner):
         return value
     if _normalized_field_name(field_name) in _MARKDOWN_DISPLAY_FIELDS:
@@ -794,7 +811,9 @@ def find_public_display_leaks(value: Any, path: str = "$") -> List[Tuple[str, st
             key_path = f"{path}.{key}"
             if _normalized_field_name(key) == "name" and _is_route_descriptor(value):
                 continue
-            if is_display_field(key):
+            if is_machine_field(key):
+                leaks.extend(find_public_display_leaks(item, key_path))
+            elif is_display_field(key):
                 leaks.extend(_find_display_value_leaks(item, key_path))
             else:
                 leaks.extend(find_public_display_leaks(item, key_path))

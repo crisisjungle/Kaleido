@@ -85,6 +85,8 @@ DISPLAY_TOKEN_ZH = {
     "commercial_hub": "商业中心",
     "office_cluster": "办公组团",
     "hospital": "医院",
+    "clinic": "诊所",
+    "doctors": "医疗门诊",
     "school": "学校",
     "university": "高校",
     "tourism": "旅游",
@@ -95,6 +97,11 @@ DISPLAY_TOKEN_ZH = {
     "pier": "码头",
     "marina": "游艇/小型码头",
     "ferry_terminal": "渡轮码头",
+    "shelter": "避难场所",
+    "community_centre": "社区服务中心",
+    "police": "警务机构",
+    "fire_station": "消防救援站",
+    "townhall": "政府机构",
     "industrial": "工业",
     "wastewater_plant": "污水处理设施",
     "power_plant": "电力设施",
@@ -795,19 +802,90 @@ class MapSeedManager:
         payload = read_json_file(path, default=None)
         if not isinstance(payload, dict):
             return None
-        if not list(payload.get("features") or []):
-            return None
+        cached_features = list(payload.get("features") or [])
+        persisted_status = dict(payload.get("status") or {})
+        if not cached_features:
+            batch_coverage = persisted_status.get("batch_coverage")
+            complete_empty_query = (
+                provider == "overpass"
+                and isinstance(batch_coverage, dict)
+                and batch_coverage.get("complete") is True
+            )
+            if not complete_empty_query:
+                return None
+            if age_seconds > max(
+                60,
+                int(Config.MAP_SOURCE_NEGATIVE_CACHE_TTL_SECONDS),
+            ):
+                return None
         result = dict(payload)
-        status = dict(result.get("status") or {})
+        status = persisted_status
+        source_status = str(status.get("status") or "").strip().lower()
         status.update(
             {
                 "status": "cached",
+                "cache_source_status": source_status,
                 "cache_age_seconds": round(age_seconds, 1),
                 "cache_key": cache_key,
             }
         )
         result["status"] = status
         return result
+
+    @staticmethod
+    def _overpass_batch_coverage(
+        expected_batches: List[str],
+        batch_summaries: List[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        """Describe which bounded Overpass batches have authoritative results.
+
+        A completed batch is covered even when it returned zero elements.  A
+        failed or absent batch is missing and must be retried.  This prevents
+        an administrative-boundary hit from making a partially collected
+        facility catalogue look complete.
+        """
+
+        expected = list(dict.fromkeys(str(item or "").strip() for item in expected_batches if str(item or "").strip()))
+        latest_by_batch: Dict[str, Dict[str, Any]] = {}
+        for summary in batch_summaries or []:
+            batch_name = str(summary.get("batch") or "").strip()
+            if batch_name in expected:
+                latest_by_batch[batch_name] = dict(summary)
+        completed = [
+            batch_name
+            for batch_name in expected
+            if str((latest_by_batch.get(batch_name) or {}).get("status") or "").lower()
+            in {"completed", "ready", "cached"}
+        ]
+        missing = [batch_name for batch_name in expected if batch_name not in completed]
+        failed = [
+            batch_name
+            for batch_name in missing
+            if str((latest_by_batch.get(batch_name) or {}).get("status") or "").lower() == "failed"
+        ]
+        return {
+            "expected_batches": expected,
+            "completed_batches": completed,
+            "missing_batches": missing,
+            "failed_batches": failed,
+            "complete": not missing,
+            "coverage_ratio": round(len(completed) / len(expected), 4) if expected else 1.0,
+        }
+
+    @classmethod
+    def _overpass_category_coverage(
+        cls,
+        expected_batches: List[str],
+        batch_summaries: List[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        batch_coverage = cls._overpass_batch_coverage(expected_batches, batch_summaries)
+        return {
+            "required_categories": list(batch_coverage["expected_batches"]),
+            "covered_categories": list(batch_coverage["completed_batches"]),
+            "missing_categories": list(batch_coverage["missing_batches"]),
+            "complete": bool(batch_coverage["complete"]),
+            "coverage_ratio": float(batch_coverage["coverage_ratio"]),
+        }
 
     def _write_source_cache(
         self,
@@ -1598,12 +1676,29 @@ class MapSeedManager:
                     + ");",
                 ),
                 (
-                    "human_infrastructure",
+                    "settlement_landuse",
                     "(\n  "
                     + f'nwr(around:{infrastructure_radius},{lat},{lon})[landuse~"industrial|residential|commercial|retail"]{named_filter};\n  '
-                    + f'nwr(around:{infrastructure_radius},{lat},{lon})[amenity~"wastewater_plant|hospital|school|university|marketplace|bus_station|ferry_terminal|police|fire_station|townhall"][name];\n  '
+                    + ");",
+                ),
+                (
+                    "public_facilities",
+                    "(\n  "
+                    + f'nwr(around:{infrastructure_radius},{lat},{lon})[amenity~"hospital|clinic|doctors|school|university|police|fire_station|townhall|shelter|community_centre"][name];\n  '
+                    + ");",
+                ),
+                (
+                    "critical_infrastructure",
+                    "(\n  "
+                    + f'nwr(around:{infrastructure_radius},{lat},{lon})[amenity="wastewater_plant"][name];\n  '
                     + f'nwr(around:{infrastructure_radius},{lat},{lon})[man_made~"pier|breakwater|groyne"]{named_filter};\n  '
                     + f'nwr(around:{infrastructure_radius},{lat},{lon})[power="plant"][name];\n'
+                    + ");",
+                ),
+                (
+                    "service_hubs",
+                    "(\n  "
+                    + f'nwr(around:{infrastructure_radius},{lat},{lon})[amenity~"marketplace|bus_station|ferry_terminal"][name];\n  '
                     + ");",
                 ),
                 (
@@ -1620,28 +1715,48 @@ class MapSeedManager:
             lat=lat,
             lon=lon,
             radius_m=radius_m,
-            profile=f"{granularity}:v4-batched-named",
+            profile=f"{granularity}:v5-batched-facilities",
         )
+        expected_batches = [batch_name for batch_name, _query_body in query_batches]
         cached = self._read_source_cache("overpass", cache_key)
-        if cached:
-            cached_status = dict(cached.get("status") or {})
+        cached_status = dict((cached or {}).get("status") or {})
+        cached_features = self._refresh_cached_feature_distances(
+            (cached or {}).get("features") or [],
+            lat=lat,
+            lon=lon,
+        )
+        cached_batch_summaries = [dict(item) for item in cached_status.get("batches") or []]
+        cached_coverage = self._overpass_batch_coverage(expected_batches, cached_batch_summaries)
+        if cached and cached_coverage["complete"]:
             cached_status["query_strategy"] = "thematic_batches"
             cached_status["cache_policy"] = "fresh_cache_first"
-            return self._refresh_cached_feature_distances(
-                cached.get("features") or [],
-                lat=lat,
-                lon=lon,
-            ), cached_status
+            cached_status["batch_coverage"] = cached_coverage
+            cached_status["category_coverage"] = self._overpass_category_coverage(
+                expected_batches,
+                cached_batch_summaries,
+            )
+            return cached_features, cached_status
         maxsize_bytes = max(16 * 1024 * 1024, int(Config.OVERPASS_MAXSIZE_BYTES))
         output_limit = max(120, min(600, int(feature_limit or 28) * 6))
         last_error = None
         attempts: List[Dict[str, Any]] = []
         batch_summaries: List[Dict[str, Any]] = []
-        elements: List[Dict[str, Any]] = []
-        successful_batches = 0
+        completed_cached_batches = set(cached_coverage["completed_batches"])
+        for cached_summary in cached_batch_summaries:
+            batch_name = str(cached_summary.get("batch") or "").strip()
+            if batch_name not in completed_cached_batches:
+                continue
+            summary = dict(cached_summary)
+            summary["source"] = "cache"
+            summary["cache_age_seconds"] = cached_status.get("cache_age_seconds")
+            batch_summaries.append(summary)
+        element_records: List[Tuple[str, Dict[str, Any]]] = []
+        live_successful_batches = 0
         failed_batches = 0
         started_at = time.monotonic()
         for batch_name, query_body in query_batches:
+            if batch_name in completed_cached_batches:
+                continue
             query = (
                 f"[out:json][timeout:{timeout_seconds}][maxsize:{maxsize_bytes}];\n"
                 + query_body
@@ -1712,30 +1827,23 @@ class MapSeedManager:
                 continue
 
             batch_elements = list(batch_payload.get("elements") or [])
-            elements.extend(batch_elements)
-            successful_batches += 1
+            element_records.extend((batch_name, element) for element in batch_elements)
+            live_successful_batches += 1
             batch_summaries.append(
                 {
                     "batch": batch_name,
                     "status": "completed",
                     "raw_element_count": len(batch_elements),
+                    "source": "live",
                     "attempts": batch_attempts,
                     "elapsed_ms": round((time.monotonic() - batch_started) * 1000),
                 }
             )
 
-        if successful_batches == 0:
-            cached = self._read_source_cache("overpass", cache_key)
-            if cached:
-                cached_status = dict(cached.get("status") or {})
-                cached_status["live_attempts"] = attempts
-                cached_status["live_error"] = str(last_error or "")
-                cached_status["batches"] = batch_summaries
-                return self._refresh_cached_feature_distances(
-                    cached.get("features") or [],
-                    lat=lat,
-                    lon=lon,
-                ), cached_status
+        total_successful_batches = len(completed_cached_batches) + live_successful_batches
+        batch_coverage = self._overpass_batch_coverage(expected_batches, batch_summaries)
+        category_coverage = self._overpass_category_coverage(expected_batches, batch_summaries)
+        if total_successful_batches == 0 and not cached_features:
             if last_error:
                 logger.warning(f"All Overpass endpoints failed, continuing with fallback features: {last_error}")
             return [], {
@@ -1745,7 +1853,10 @@ class MapSeedManager:
                 "attempts": attempts,
                 "batches": batch_summaries,
                 "batch_count": len(query_batches),
+                "successful_batch_count": 0,
                 "failed_batch_count": failed_batches,
+                "batch_coverage": batch_coverage,
+                "category_coverage": category_coverage,
                 "elapsed_ms": round((time.monotonic() - started_at) * 1000),
                 "granularity": granularity,
                 "query_profile": "named_macro" if regional else "named_local",
@@ -1755,13 +1866,14 @@ class MapSeedManager:
 
         features: List[Dict[str, Any]] = []
         seen_ids = set()
-        for element in elements:
+        for batch_name, element in element_records:
             element_id = f"{element.get('type', 'item')}_{element.get('id')}"
             if element_id in seen_ids:
                 continue
             seen_ids.add(element_id)
             tags = dict(element.get("tags") or {})
             tags["provider"] = "osm_overpass"
+            tags["overpass_batch"] = batch_name
             lat_value = element.get("lat")
             lon_value = element.get("lon")
             if lat_value is None or lon_value is None:
@@ -1795,17 +1907,9 @@ class MapSeedManager:
                 }
             )
 
-        cached_feature_count = 0
-        if failed_batches:
-            cached = self._read_source_cache("overpass", cache_key)
-            if cached:
-                cached_features = self._refresh_cached_feature_distances(
-                    cached.get("features") or [],
-                    lat=lat,
-                    lon=lon,
-                )
-                cached_feature_count = len(cached_features)
-                features = self._merge_feature_lists(features, cached_features)
+        cached_feature_count = len(cached_features)
+        if cached_features:
+            features = self._merge_feature_lists(features, cached_features)
 
         features.sort(key=lambda item: (-item["importance"], item["distance_m"], item["name"]))
 
@@ -1832,14 +1936,16 @@ class MapSeedManager:
             "status": provider_status,
             "provider": "osm_overpass",
             "feature_count": len(selected),
-            "raw_element_count": len(elements),
+            "raw_element_count": len(element_records),
             "classified_feature_count": len(features),
             "cached_feature_count": cached_feature_count,
             "attempts": attempts,
             "batches": batch_summaries,
             "batch_count": len(query_batches),
-            "successful_batch_count": successful_batches,
-            "failed_batch_count": failed_batches,
+            "successful_batch_count": len(batch_coverage["completed_batches"]),
+            "failed_batch_count": len(batch_coverage["failed_batches"]),
+            "batch_coverage": batch_coverage,
+            "category_coverage": category_coverage,
             "error": "; ".join(dict.fromkeys(failed_batch_errors)),
             "elapsed_ms": round((time.monotonic() - started_at) * 1000),
             "granularity": granularity,
@@ -1848,7 +1954,7 @@ class MapSeedManager:
             "maxsize_bytes": maxsize_bytes,
             "cache_key": cache_key,
         }
-        if selected:
+        if selected or batch_coverage["complete"]:
             self._write_source_cache(
                 "overpass",
                 cache_key,
@@ -2560,7 +2666,23 @@ class MapSeedManager:
                 "summary": f"OSM 用地分类 landuse={landuse}。",
                 "default_name": f"{landuse} area",
             }
-        if amenity in {"wastewater_plant", "hospital", "school", "university", "marketplace", "parking", "bus_station", "ferry_terminal", "police", "fire_station", "townhall"}:
+        if amenity in {
+            "wastewater_plant",
+            "hospital",
+            "clinic",
+            "doctors",
+            "school",
+            "university",
+            "marketplace",
+            "parking",
+            "bus_station",
+            "ferry_terminal",
+            "police",
+            "fire_station",
+            "townhall",
+            "shelter",
+            "community_centre",
+        }:
             return {
                 "category": "facility",
                 "subtype": amenity,

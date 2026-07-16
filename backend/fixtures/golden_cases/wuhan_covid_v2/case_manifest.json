@@ -1,0 +1,59 @@
+{
+  "case_id": "wuhan_covid_v2",
+  "title": "武汉疫情城市系统复盘",
+  "summary": "以公开历史节点为骨架，呈现发现监测、医疗救治、交通流动、社区治理、物资供应与公共信息六个城市系统在 108 天内的协同演化。",
+  "generation_mode": "curated_target_state",
+  "artifact_mode": "frozen",
+  "reference_time": "2019-12-22T00:00:00+08:00",
+  "end_time": "2020-04-08T00:00:00+08:00",
+  "total_rounds": 36,
+  "step_days": 3,
+  "playback_duration_ms": 203000,
+  "default_step": 1,
+  "capabilities": {
+    "editable": false,
+    "live_intervention": false,
+    "chapter_navigation": true,
+    "copy_as_new": true
+  },
+  "storylines": [
+    {"id": "detection", "name": "异常发现、检测与疫情上报"},
+    {"id": "healthcare", "name": "医疗收治、院感控制与容量扩充"},
+    {"id": "mobility", "name": "人员流动、交通网络与空间传播"},
+    {"id": "community", "name": "社区治理、重点人群照护与生活保障"},
+    {"id": "supply", "name": "医疗物资、药品、仓储和跨区调度"},
+    {"id": "governance", "name": "公共信息、热线反馈、社会信任与跨部门指挥"}
+  ],
+  "state_dimensions": [
+    {"id": "exposure_pressure", "name": "暴露压力", "direction": "lower_is_better"},
+    {"id": "detection_visibility", "name": "发现可见度", "direction": "higher_is_better"},
+    {"id": "testing_turnaround", "name": "检测时效", "direction": "higher_is_better"},
+    {"id": "healthcare_load", "name": "医疗负荷", "direction": "lower_is_better"},
+    {"id": "mobility_intensity", "name": "流动强度", "direction": "contextual"},
+    {"id": "supply_sufficiency", "name": "物资充足度", "direction": "higher_is_better"},
+    {"id": "community_support", "name": "社区支持度", "direction": "higher_is_better"},
+    {"id": "public_trust", "name": "公共信任度", "direction": "higher_is_better"}
+  ],
+  "chapters": [
+    {"id": "chapter_1", "name": "异常出现", "round_start": 0, "round_end": 3, "date_range": "2019-12-22—2019-12-31", "storyline_ids": ["detection", "healthcare", "mobility"]},
+    {"id": "chapter_2", "name": "识别与监测", "round_start": 4, "round_end": 8, "date_range": "2020-01-03—2020-01-15", "storyline_ids": ["detection", "healthcare", "governance", "mobility"]},
+    {"id": "chapter_3", "name": "传播确认", "round_start": 9, "round_end": 11, "date_range": "2020-01-18—2020-01-24", "storyline_ids": ["detection", "mobility", "healthcare", "governance"]},
+    {"id": "chapter_4", "name": "医疗承压", "round_start": 12, "round_end": 18, "date_range": "2020-01-27—2020-02-14", "storyline_ids": ["healthcare", "supply", "community", "governance"]},
+    {"id": "chapter_5", "name": "城市协同", "round_start": 19, "round_end": 28, "date_range": "2020-02-17—2020-03-15", "storyline_ids": ["community", "supply", "healthcare", "governance"]},
+    {"id": "chapter_6", "name": "恢复与重启", "round_start": 29, "round_end": 36, "date_range": "2020-03-18—2020-04-08", "storyline_ids": ["community", "mobility", "governance", "supply"]}
+  ],
+  "macro_scenarios": [
+    {"id": "early_cluster", "name": "早期病例聚集与发现网络", "center": [114.278, 30.618], "system_ids": ["detection", "healthcare"]},
+    {"id": "clinical_sentinel", "name": "临床哨点与院感网络", "center": [114.295, 30.602], "system_ids": ["detection", "healthcare"]},
+    {"id": "public_health", "name": "疾控检测与信息上报网络", "center": [114.332, 30.552], "system_ids": ["detection", "governance"]},
+    {"id": "emergency_care", "name": "急诊转运与定点救治网络", "center": [114.314, 30.586], "system_ids": ["healthcare"]},
+    {"id": "capacity_expansion", "name": "医疗容量扩充网络", "center": [114.086, 30.529], "system_ids": ["healthcare", "supply"]},
+    {"id": "fangcang_network", "name": "方舱与分级收治网络", "center": [114.263, 30.535], "system_ids": ["healthcare", "community"]},
+    {"id": "rail_mobility", "name": "铁路枢纽与跨区流动网络", "center": [114.327, 30.529], "system_ids": ["mobility"]},
+    {"id": "airport_gateway", "name": "机场门户与健康筛查网络", "center": [114.209, 30.783], "system_ids": ["mobility", "detection"]},
+    {"id": "community_grid", "name": "社区网格与重点人群照护网络", "center": [114.308, 30.573], "system_ids": ["community"]},
+    {"id": "supply_network", "name": "仓储物流与生活保障网络", "center": [114.169, 30.592], "system_ids": ["supply", "community"]},
+    {"id": "command_network", "name": "应急指挥与跨部门协同网络", "center": [114.305, 30.593], "system_ids": ["governance"]},
+    {"id": "recovery_network", "name": "健康核验与城市恢复网络", "center": [114.349, 30.607], "system_ids": ["mobility", "community", "governance"]}
+  ]
+}

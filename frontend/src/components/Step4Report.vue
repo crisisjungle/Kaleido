@@ -5,7 +5,11 @@
         <p class="eyebrow">正式交付</p>
         <h2>{{ title }}</h2>
       </div>
-      <span class="status-pill" :class="statusTone">{{ statusLabel }}</span>
+      <div class="report-header-actions">
+        <button v-if="hasReportContent" type="button" class="report-delivery-btn" @click="exportMarkdown">导出 Markdown</button>
+        <button v-if="hasReportContent" type="button" class="report-delivery-btn" @click="printReport">打印 / PDF</button>
+        <span class="status-pill" :class="statusTone">{{ statusLabel }}</span>
+      </div>
     </header>
 
     <div v-if="loading && !report" class="empty-state">正在读取报告...</div>
@@ -225,6 +229,40 @@ function refreshReport() {
   loadReport({ showLoading: !report.value })
 }
 
+function reportFileName(extension) {
+  const base = title.value
+    .replace(/[\\/:*?"<>|]+/g, '-')
+    .replace(/\s+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 80)
+  return `${base || props.reportId || 'Kaleido-推演报告'}.${extension}`
+}
+
+function exportMarkdown() {
+  if (!hasReportContent.value) return
+  const blob = new Blob([`# ${title.value}\n\n${displayMarkdown.value.trim()}\n`], { type: 'text/markdown;charset=utf-8' })
+  const url = URL.createObjectURL(blob)
+  const anchor = document.createElement('a')
+  anchor.href = url
+  anchor.download = reportFileName('md')
+  document.body.appendChild(anchor)
+  anchor.click()
+  anchor.remove()
+  URL.revokeObjectURL(url)
+}
+
+function printReport() {
+  if (!hasReportContent.value) return
+  const previousTitle = document.title
+  const restoreTitle = () => {
+    document.title = previousTitle
+    window.removeEventListener('afterprint', restoreTitle)
+  }
+  document.title = title.value
+  window.addEventListener('afterprint', restoreTitle, { once: true })
+  window.print()
+}
+
 function handleVisibilityChange() {
   if (document.visibilityState !== 'visible' || !shouldKeepPolling()) return
   stopPolling()
@@ -265,7 +303,7 @@ onBeforeUnmount(() => {
   border: 0;
   border-radius: 0;
   background: transparent;
-  padding: 20px 4px 28px;
+  padding: 20px var(--k-space-4, 16px) 28px;
   overflow: visible;
   color: var(--k-color-text);
   font-family: var(--k-font-sans);
@@ -279,6 +317,36 @@ onBeforeUnmount(() => {
   justify-content: space-between;
   gap: 16px;
   margin-bottom: 20px;
+}
+
+.report-header-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.report-delivery-btn {
+  min-height: 2rem;
+  border: 1px solid var(--k-color-border-strong);
+  border-radius: var(--k-radius-sm);
+  padding: 0 10px;
+  background: transparent;
+  color: var(--k-color-brand-700);
+  font: inherit;
+  font-size: var(--k-text-meta);
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.report-delivery-btn:hover {
+  background: var(--k-color-brand-050);
+}
+
+.report-delivery-btn:focus-visible {
+  outline: 2px solid var(--k-color-brand-600);
+  outline-offset: 2px;
 }
 
 .eyebrow {
@@ -430,7 +498,86 @@ h2 {
   }
 
   .report-panel {
-    padding: 16px 0 24px;
+    padding: 16px var(--k-space-3, 12px) 24px;
+  }
+
+  .report-header-actions {
+    justify-content: flex-start;
+  }
+}
+
+@page {
+  size: A4;
+  margin: 16mm 14mm 18mm;
+}
+
+@media print {
+  :global(html),
+  :global(body),
+  :global(#app),
+  :global(.workflow-shell),
+  :global(.workflow-shell__body),
+  :global(.workflow-shell__workbench),
+  :global(.analysis-panel),
+  :global(.report-delivery-overlay),
+  :global(.report-delivery-body) {
+    position: static !important;
+    width: auto !important;
+    height: auto !important;
+    min-height: 0 !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    overflow: visible !important;
+    background: #fff !important;
+  }
+
+  :global(.workflow-shell__header),
+  :global(.workflow-shell__visual),
+  :global(.analysis-panel > :not(.report-delivery-overlay)),
+  :global(.report-delivery-head) {
+    display: none !important;
+  }
+
+  :global(.workflow-shell__body) {
+    display: block !important;
+  }
+
+  .report-panel {
+    position: static;
+    width: auto;
+    min-height: 0;
+    padding: 0;
+    color: #111;
+    background: #fff;
+    print-color-adjust: exact;
+    -webkit-print-color-adjust: exact;
+  }
+
+  .report-header-actions {
+    display: none;
+  }
+
+  .report-header {
+    margin-bottom: 10mm;
+    break-after: avoid-page;
+  }
+
+  .report-body :deep(h1),
+  .report-body :deep(h2),
+  .report-body :deep(h3) {
+    break-after: avoid-page;
+  }
+
+  .report-body :deep(p),
+  .report-body :deep(li) {
+    orphans: 3;
+    widows: 3;
+  }
+
+  .report-body :deep(table),
+  .report-body :deep(pre),
+  .report-body :deep(blockquote) {
+    break-inside: avoid-page;
   }
 }
 </style>

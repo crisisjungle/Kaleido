@@ -9,11 +9,24 @@ const STATUS_PRIORITY = {
 }
 
 const createDefaultSteps = () => [
-  { step: 1, name: '背景定义', route: { name: 'SceneComposer', query: { restore: '1' } }, visited: false, status: 'todo', summary: '' },
+  { step: 1, name: '背景定义', route: null, visited: false, status: 'todo', summary: '' },
   { step: 2, name: '场景生成', route: null, visited: false, status: 'todo', summary: '' },
   { step: 3, name: '推演运行', route: null, visited: false, status: 'todo', summary: '' },
   { step: 4, name: '分析与报告', route: null, visited: false, status: 'todo', summary: '' }
 ]
+
+function cleanQuery(query = {}) {
+  return Object.entries(query || {}).reduce((next, [key, value]) => {
+    if (value === undefined || value === null || value === '') return next
+    next[key] = value
+    return next
+  }, {})
+}
+
+function cleanId(value) {
+  if (Array.isArray(value)) return cleanId(value[0])
+  return String(value || '').trim()
+}
 
 function safeParse(value, fallback) {
   try {
@@ -75,6 +88,90 @@ export function markWorkflowStep(step, updates = {}) {
 
 export function getWorkflowSteps() {
   return state.steps
+}
+
+export function hasWorkflowRoute(item) {
+  return Boolean(item?.route?.name)
+}
+
+export function hydrateWorkflowFromSimulation({
+  simulationId = '',
+  projectId = '',
+  reportId = '',
+  query = {},
+  step3Status = '',
+  step3Summary = '',
+  step4Status = 'done',
+  step4Summary = '分析与报告'
+} = {}) {
+  const safeSimulationId = cleanId(simulationId)
+  const safeProjectId = cleanId(projectId)
+  const safeReportId = cleanId(reportId)
+  const baseQuery = cleanQuery(query)
+  const reportQuery = safeReportId
+    ? { ...baseQuery, report_id: safeReportId }
+    : baseQuery
+  const resolvedStep3Status = step3Status || (safeReportId ? 'done' : 'active')
+  const resolvedStep3Summary = step3Summary || (safeReportId ? '推演结果' : '推演播放中')
+
+  if (safeSimulationId || safeProjectId) {
+    markWorkflowStep(2, {
+      visited: true,
+      status: 'done',
+      summary: '场景配置',
+      route: safeSimulationId
+        ? { name: 'Simulation', params: { simulationId: safeSimulationId }, query: baseQuery }
+        : { name: 'Process', params: { projectId: safeProjectId }, query: baseQuery }
+    })
+  }
+
+  if (safeSimulationId) {
+    markWorkflowStep(3, {
+      visited: true,
+      status: resolvedStep3Status,
+      summary: resolvedStep3Summary,
+      route: { name: 'SimulationRun', params: { simulationId: safeSimulationId }, query: reportQuery }
+    })
+  }
+
+  if (safeReportId) {
+    markWorkflowStep(4, {
+      visited: true,
+      status: step4Status,
+      summary: step4Summary,
+      route: { name: 'Analysis', params: { reportId: safeReportId }, query: baseQuery }
+    })
+  }
+}
+
+export function hydrateWorkflowFromGoldenCase({ stepRoutes = {}, currentStep = 1 } = {}) {
+  const routeByStep = {
+    1: stepRoutes.foundation,
+    2: stepRoutes.scenario,
+    3: stepRoutes.runtime,
+    4: stepRoutes.analysis
+  }
+  const summaries = {
+    1: '研究范围与事实边界',
+    2: '故事线、主体与机制',
+    3: '36轮城市系统演化',
+    4: '转折、风险与政策观察'
+  }
+  for (const step of [1, 2, 3, 4]) {
+    const targetRoute = routeByStep[step]
+    if (!targetRoute?.name) continue
+    markWorkflowStep(step, {
+      visited: true,
+      status: step === Number(currentStep) ? 'active' : 'done',
+      forceStatus: true,
+      summary: summaries[step],
+      route: {
+        ...targetRoute,
+        params: { ...(targetRoute.params || {}) },
+        query: cleanQuery(targetRoute.query || {})
+      }
+    })
+  }
 }
 
 export function saveSceneComposerSnapshot(snapshot) {

@@ -44,7 +44,7 @@ import Step2EnvSetup from '../components/Step2EnvSetup.vue'
 import { generateOntology, getProject, buildGraph, getTaskStatus, getGraphData } from '../api/graph'
 import { getPendingUpload, clearPendingUpload } from '../store/pendingUpload'
 import { createSimulation, getSimulationGraphRealtime, listSimulations } from '../api/simulation'
-import { attachSceneSeedContextToProject, attachSceneSeedContextToSimulation, getSceneSeedContextByProject } from '../store/sceneSeedBridge'
+import { attachSceneSeedContextToProject, attachSceneSeedContextToSimulation, getSceneSeedContextByProject, mergeProjectSceneSeedContext } from '../store/sceneSeedBridge'
 import { markWorkflowStep } from '../store/workflowNavigation'
 import { safeDisplayError, safeDisplayText } from '../utils/displayText'
 
@@ -220,6 +220,7 @@ const mapProjection = computed(() => {
 // Polling timers
 let pollTimer = null
 let graphPollTimer = null
+let canonicalStep2Handoff = false
 
 // --- Computed Layout Styles ---
 const leftPanelStyle = computed(() => {
@@ -318,7 +319,7 @@ const handleNextStep = async (params = {}) => {
     visited: true,
     status: 'done',
     summary: '场景配置',
-    route: { name: 'Process', params: { projectId: currentProjectId.value || route.params.projectId || 'new' } }
+    route: { name: 'Simulation', params: { simulationId }, query: { ...route.query } }
   })
   markWorkflowStep(3, {
     visited: true,
@@ -347,7 +348,9 @@ const handleGoBack = () => {
 
 const markCurrentWorkflowStep = () => {
   const routePayload = currentStep.value === 2
-    ? { name: 'Process', params: { projectId: currentProjectId.value || route.params.projectId || 'new' } }
+    ? currentSimulationId.value
+      ? { name: 'Simulation', params: { simulationId: currentSimulationId.value }, query: { ...route.query } }
+      : { name: 'Process', params: { projectId: currentProjectId.value || route.params.projectId || 'new' }, query: { ...route.query } }
     : null
   markWorkflowStep(currentStep.value, {
     visited: true,
@@ -355,6 +358,23 @@ const markCurrentWorkflowStep = () => {
     summary: currentStep.value === 2 ? '场景设计进行中' : '',
     route: routePayload
   })
+}
+
+const handoffToCanonicalStep2 = async (simulationId) => {
+  if (!simulationId || canonicalStep2Handoff || route.name !== 'Process') return
+  canonicalStep2Handoff = true
+  const canonicalRoute = {
+    name: 'Simulation',
+    params: { simulationId },
+    query: { ...route.query }
+  }
+  markWorkflowStep(2, {
+    visited: true,
+    status: 'active',
+    summary: '场景设计进行中',
+    route: canonicalRoute
+  })
+  await router.replace(canonicalRoute)
 }
 
 const updateStepStatus = (status) => {
@@ -377,39 +397,8 @@ const getLatestProjectSimulation = async () => {
   }
 }
 
-const buildProjectSceneSeedContext = (project, recoveryContext = null) => {
-  if (!project || typeof project !== 'object') return recoveryContext || null
-
-  const semanticInput = project.semantic_input
-  const hasPersistedSemanticInput = semanticInput && typeof semanticInput === 'object'
-  const context = recoveryContext && typeof recoveryContext === 'object' ? recoveryContext : {}
-
-  if (!hasPersistedSemanticInput && !Object.keys(context).length) return null
-
-  return {
-    initialVariables: hasPersistedSemanticInput ? [] : (context.initialVariables || []),
-    normalizedEventInputs: hasPersistedSemanticInput
-      ? (Array.isArray(semanticInput.events) ? semanticInput.events : [])
-      : (context.normalizedEventInputs || []),
-    normalizedPolicyInputs: hasPersistedSemanticInput
-      ? (Array.isArray(semanticInput.policies) ? semanticInput.policies : [])
-      : (context.normalizedPolicyInputs || []),
-    selectedPoints: context.selectedPoints || [],
-    mapSeedId: project.map_seed_id || context.mapSeedId || '',
-    areaLabel: semanticInput?.scene?.location || context.areaLabel || project.name || '',
-    radiusMeters: context.radiusMeters || 0,
-    semanticArtifactRef: project.semantic_artifact_ref || context.semanticArtifactRef || null,
-    semanticRevision: Number(semanticInput?.revision || context.semanticRevision || 0),
-    effortSnapshot: project.effort_snapshot || context.effortSnapshot || null,
-    effortSnapshotId: project.effort_snapshot?.effort_snapshot_id || context.effortSnapshotId || '',
-    effortLevel: project.effort_snapshot?.effort_level || context.effortLevel || 'high',
-    effortLocked: Boolean(project.effort_snapshot || context.effortLocked),
-    sceneId: project.scene_id || context.sceneId || ''
-  }
-}
-
 const applyProjectSceneSeedContext = (project, recoveryContext = null) => {
-  const sceneSeedContext = buildProjectSceneSeedContext(project, recoveryContext)
+  const sceneSeedContext = mergeProjectSceneSeedContext(project, recoveryContext)
   currentSceneSeedContext.value = sceneSeedContext
   initialInjectedVariables.value = sceneSeedContext?.normalizedEventInputs?.length || sceneSeedContext?.normalizedPolicyInputs?.length
     ? [
@@ -438,7 +427,7 @@ const ensureSimulationForProject = async () => {
       attachSceneSeedContextToSimulation(existing.simulation_id, sceneSeedContext)
     }
     addLog('已连接已有模拟入口')
-    await refreshMapProjection()
+    await handoffToCanonicalStep2(existing.simulation_id)
     return existing.simulation_id
   }
 
@@ -458,7 +447,7 @@ const ensureSimulationForProject = async () => {
       attachSceneSeedContextToSimulation(res.data.simulation_id, sceneSeedContext)
     }
     addLog('模拟入口创建完成')
-    await refreshMapProjection()
+    await handoffToCanonicalStep2(res.data.simulation_id)
     return res.data.simulation_id
   }
 

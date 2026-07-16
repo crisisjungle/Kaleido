@@ -143,9 +143,15 @@ class SimulationRealtimeGraphBuilder:
             nodes.append(
                 {
                     "uuid": node_id,
-                    "name": mechanism_node.get("name") or mechanism_node.get("label") or "未命名机制节点",
+                    "name": (
+                        mechanism_node.get("display_name")
+                        or mechanism_node.get("label_zh")
+                        or mechanism_node.get("name")
+                        or mechanism_node.get("label")
+                        or "未命名机制节点"
+                    ),
                     "labels": ["Entity", "MechanismNode", f"mechanism_{node_type}"],
-                    "summary": mechanism_node.get("description") or "",
+                    "summary": mechanism_node.get("description_zh") or mechanism_node.get("description") or "",
                     "attributes": {
                         "mechanism_node_id": node_id,
                         "node_type": node_type,

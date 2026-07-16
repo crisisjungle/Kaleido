@@ -158,6 +158,12 @@ def test_compose_no_llm_persists_editable_business_result(monkeypatch, tmp_path)
     assert "未生成" not in seed["report_markdown"]
     assert "LLM" not in seed["report_markdown"]
     assert seed["semantic_artifact_ref"]["contract_version"] == "semantic-input.v1"
+    assert seed["semantic_artifact_ref"]["authority"] == "draft"
+    assert seed["suggested_event_inputs"]
+    assert seed["suggested_event_inputs"][0]["source_origin"] == "step1_suggestion"
+    assert seed["suggested_event_inputs"][0]["authority"] == "draft"
+    assert seed["normalized_event_inputs"] == seed["suggested_event_inputs"]
+    assert "risk_definitions" not in seed
 
     # Seed was persisted and is re-readable via the public accessor.
     reloaded = SceneMaterialGenerator.get_seed(seed["scene_id"])

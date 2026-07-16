@@ -81,11 +81,25 @@ function normalizeContext(value) {
   const initialVariables = normalizeVariableList(value.initialVariables)
     .filter((item) => !isBaselineContextVariable(item))
   const normalizedEventInputs = normalizeVariableList(
-    value.normalizedEventInputs || value.normalized_event_inputs
-  )
+    value.suggestedEventInputs
+    || value.suggested_event_inputs
+    || value.normalizedEventInputs
+    || value.normalized_event_inputs
+  ).map((item) => ({
+    ...item,
+    source_origin: 'step1_suggestion',
+    authority: 'draft'
+  }))
   const normalizedPolicyInputs = normalizeVariableList(
-    value.normalizedPolicyInputs || value.normalized_policy_inputs
-  )
+    value.suggestedPolicyInputs
+    || value.suggested_policy_inputs
+    || value.normalizedPolicyInputs
+    || value.normalized_policy_inputs
+  ).map((item) => ({
+    ...item,
+    source_origin: 'step1_suggestion',
+    authority: 'draft'
+  }))
   const selectedPoints = normalizePointList(
     value.selectedPoints || value.selected_points || value.locations
   )
@@ -127,6 +141,10 @@ function normalizeContext(value) {
     || semanticArtifactRef?.revision
     || 0
   )
+  const rawFoundationRef = value.foundationRef || value.foundation_ref
+  const foundationRef = rawFoundationRef && typeof rawFoundationRef === 'object'
+    ? safeClone(rawFoundationRef)
+    : (mapSeedId ? { map_seed_id: mapSeedId } : null)
   if (
     initialVariables.length === 0
     && normalizedEventInputs.length === 0
@@ -151,7 +169,8 @@ function normalizeContext(value) {
     effortSnapshot,
     sceneId,
     semanticArtifactRef,
-    semanticRevision: Number.isFinite(semanticRevision) ? semanticRevision : 0
+    semanticRevision: Number.isFinite(semanticRevision) ? semanticRevision : 0,
+    foundationRef
   }
 }
 
@@ -188,6 +207,41 @@ export function consumePendingSceneSeedContext() {
   state.pending = null
   writeState(state)
   return context
+}
+
+export function mergeProjectSceneSeedContext(project, recoveryContext = null) {
+  if (!project || typeof project !== 'object') return normalizeContext(recoveryContext)
+
+  const context = normalizeContext(recoveryContext) || {}
+  const semanticInput = project.semantic_input && typeof project.semantic_input === 'object'
+    ? project.semantic_input
+    : null
+  const mapSeedId = String(project.map_seed_id || context.mapSeedId || '').trim()
+  const foundationRef = {
+    ...(context.foundationRef || {}),
+    ...(mapSeedId ? { map_seed_id: mapSeedId } : {})
+  }
+
+  return normalizeContext({
+    ...context,
+    initialVariables: semanticInput ? [] : (context.initialVariables || []),
+    normalizedEventInputs: semanticInput
+      ? semanticInput.events || []
+      : context.normalizedEventInputs || [],
+    normalizedPolicyInputs: semanticInput
+      ? semanticInput.policies || []
+      : context.normalizedPolicyInputs || [],
+    mapSeedId,
+    areaLabel: semanticInput?.scene?.location || context.areaLabel || project.name || '',
+    semanticArtifactRef: project.semantic_artifact_ref || context.semanticArtifactRef || null,
+    semanticRevision: Number(semanticInput?.revision || context.semanticRevision || 0),
+    effortSnapshot: project.effort_snapshot || context.effortSnapshot || null,
+    effortSnapshotId: project.effort_snapshot?.effort_snapshot_id || context.effortSnapshotId || '',
+    effortLevel: project.effort_snapshot?.effort_level || context.effortLevel || 'high',
+    effortLocked: Boolean(project.effort_snapshot || context.effortLocked),
+    sceneId: project.scene_id || context.sceneId || '',
+    foundationRef
+  })
 }
 
 export function attachSceneSeedContextToProject(projectId, context) {

@@ -20,9 +20,16 @@ from .simulation_realtime_graph import SimulationRealtimeGraphBuilder
 logger = get_logger("envfish.animation")
 
 
-TIMELINE_CONTRACT_VERSION = "simulation-playback-timeline.v2"
+TIMELINE_CONTRACT_VERSION = "simulation-playback-timeline.v3"
+PREVIOUS_TIMELINE_CONTRACT_VERSION = "simulation-playback-timeline.v2"
 ANIMATION_CONTRACT_VERSION = "simulation-animation.v2"
 EDGE_REFERENCE_CONTRACT_VERSION = "split-path-related.v1"
+
+# V3 owns one canonical story clock across every committed round.  The fixed
+# minimum keeps a committed round segment stable when later rounds are appended;
+# events may extend a segment when their causal chain needs more room.
+_TIMELINE_ROUND_MIN_DURATION_MS = 5000
+_TIMELINE_EMPTY_ROUND_DURATION_MS = 900
 
 _PRIMARY_TIMELINE_LEDGERS = (
     "spread_event_ledger.jsonl",
@@ -40,11 +47,11 @@ _TIMELINE_PHASE_ORDER = {
 }
 
 _TIMELINE_PHASE_TIMING = {
-    "environment_diffusion": (0, 500),
-    "agent_response": (520, 480),
-    "relationship_change": (1040, 640),
-    "risk_change": (1720, 360),
-    "legacy_playback": (0, 1800),
+    "environment_diffusion": (0, 1000),
+    "agent_response": (1300, 1000),
+    "relationship_change": (2600, 1100),
+    "risk_change": (4000, 700),
+    "legacy_playback": (0, 4500),
 }
 
 _TIMELINE_KIND_ORDER = {
@@ -106,18 +113,20 @@ class SimulationAnimationService:
         self,
         after_cursor: Optional[int] = None,
         after_round: Optional[int] = None,
+        timeline_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         existing = self._load_existing_animation()
         if existing:
             payload = self._normalize_animation_payload(existing)
         else:
             payload = self._normalize_animation_payload(self._build_animation_payload())
-        if after_cursor is None and after_round is None:
+        if after_cursor is None and after_round is None and timeline_id is None:
             return payload
         return self._filter_timeline_after_cursor(
             payload,
             after_cursor=after_cursor,
             after_round=after_round,
+            timeline_id=timeline_id,
         )
 
     def _filter_timeline_after_cursor(
@@ -125,6 +134,7 @@ class SimulationAnimationService:
         payload: Dict[str, Any],
         after_cursor: Optional[int],
         after_round: Optional[int] = None,
+        timeline_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         safe_cursor = (
             max(0, self._safe_int(after_cursor))
@@ -137,6 +147,58 @@ class SimulationAnimationService:
             else None
         )
         timeline = dict(payload.get("timeline") or {})
+        current_timeline_id = str(timeline.get("timeline_id") or "")
+        requested_timeline_id = str(timeline_id or "").strip() or None
+        head = dict(timeline.get("head") or {})
+        head_cursor = int(head.get("cursor") or timeline.get("cursor") or 0)
+        head_round = int(
+            head.get("checkpoint_round")
+            or head.get("round")
+            or timeline.get("latest_round")
+            or 0
+        )
+        head_global_ms = int(
+            head.get("global_end_ms")
+            or (timeline.get("clock") or {}).get("committed_end_ms")
+            or 0
+        )
+        reset_reason = ""
+        if requested_timeline_id and requested_timeline_id != current_timeline_id:
+            reset_reason = "timeline_changed"
+        elif safe_cursor is not None and safe_cursor > head_cursor:
+            reset_reason = "cursor_ahead_of_head"
+        elif safe_round is not None and safe_round > head_round:
+            reset_reason = "round_ahead_of_head"
+
+        if reset_reason:
+            timeline["events"] = []
+            timeline["rounds"] = []
+            timeline["window"] = {
+                "mode": "reset",
+                "timeline_id": current_timeline_id,
+                "epoch_id": str(timeline.get("epoch_id") or ""),
+                "requested_timeline_id": requested_timeline_id,
+                "after_cursor": safe_cursor,
+                "after_round": safe_round,
+                "ack_cursor": safe_cursor,
+                "next_cursor": head_cursor,
+                "head_cursor": head_cursor,
+                "head_round": head_round,
+                "head_global_ms": head_global_ms,
+                "returned_count": 0,
+                "returned_frame_count": 0,
+                "returned_round_count": 0,
+                "has_more": False,
+                "reset_required": True,
+                "reset_reason": reset_reason,
+                "frames_included": False,
+                "layout_included": False,
+            }
+            return {
+                "meta": dict(payload.get("meta") or {}),
+                "timeline": timeline,
+            }
+
         events = [
             dict(item)
             for item in list(timeline.get("events") or [])
@@ -160,25 +222,66 @@ class SimulationAnimationService:
             and safe_round is not None
             and int(frame.get("round") or 0) > safe_round
         ]
-        grouped: Dict[int, List[Dict[str, Any]]] = defaultdict(list)
-        for event in events:
-            grouped[int(event.get("round") or 0)].append(event)
-        timeline["events"] = events
-        timeline["rounds"] = [
-            {
-                "round": round_num,
-                "event_ids": [str(item.get("id") or "") for item in round_events],
-                "start_sequence": int(round_events[0].get("sequence") or 0),
-                "end_sequence": int(round_events[-1].get("sequence") or 0),
-            }
-            for round_num, round_events in sorted(grouped.items())
+        round_segments = [
+            dict(segment)
+            for segment in list(timeline.get("rounds") or [])
+            if isinstance(segment, dict)
+            and (
+                (
+                    safe_cursor is not None
+                    and int(segment.get("end_cursor") or 0) > safe_cursor
+                )
+                or (
+                    safe_round is not None
+                    and int(segment.get("round") or 0) > safe_round
+                )
+            )
         ]
+        timeline["events"] = events
+        timeline["rounds"] = round_segments
+        next_cursor = (
+            int(events[-1].get("sequence") or 0)
+            if events
+            else min(safe_cursor, head_cursor)
+            if safe_cursor is not None
+            else head_cursor
+        )
+        returned_start_ms = min(
+            [
+                int((event.get("timing") or {}).get("global_start_ms") or 0)
+                for event in events
+            ]
+            + [int(segment.get("start_ms") or 0) for segment in round_segments],
+            default=head_global_ms,
+        )
+        returned_end_ms = max(
+            [
+                int((event.get("timing") or {}).get("global_end_ms") or 0)
+                for event in events
+            ]
+            + [int(segment.get("end_ms") or 0) for segment in round_segments],
+            default=head_global_ms,
+        )
         timeline["window"] = {
+            "mode": "delta",
+            "timeline_id": current_timeline_id,
+            "epoch_id": str(timeline.get("epoch_id") or ""),
+            "requested_timeline_id": requested_timeline_id,
             "after_cursor": safe_cursor,
             "after_round": safe_round,
+            "ack_cursor": safe_cursor,
+            "next_cursor": next_cursor,
+            "head_cursor": head_cursor,
+            "head_round": head_round,
+            "head_global_ms": head_global_ms,
             "returned_count": len(events),
             "returned_frame_count": len(frames),
+            "returned_round_count": len(round_segments),
+            "returned_start_ms": returned_start_ms,
+            "returned_end_ms": returned_end_ms,
             "has_more": False,
+            "reset_required": False,
+            "reset_reason": "",
             "frames_included": bool(frames),
             "layout_included": bool(events or frames),
         }
@@ -487,12 +590,12 @@ class SimulationAnimationService:
             else []
         )
         existing_timeline = payload.get("timeline")
-        if is_live_artifact and self._is_v2_timeline(existing_timeline):
+        if is_live_artifact and self._is_timeline_payload(existing_timeline):
             existing_timeline = self._filter_timeline_to_completed_rounds(
                 dict(existing_timeline),
                 completed_rounds,
             )
-        if self._is_v2_timeline(existing_timeline):
+        if self._is_timeline_payload(existing_timeline):
             existing_timeline = self._normalize_timeline_edge_references(
                 dict(existing_timeline)
             )
@@ -596,7 +699,7 @@ class SimulationAnimationService:
             )
 
         timeline = existing_timeline
-        if not self._is_v2_timeline(timeline):
+        if not self._is_timeline_payload(timeline):
             sources = self._read_timeline_sources()
             timeline = self._build_timeline(
                 spread_events=sources["spread_event_ledger.jsonl"],
@@ -618,6 +721,24 @@ class SimulationAnimationService:
                     layout_edges,
                 ),
             )
+
+        timeline_rounds = {
+            int(frame.get("round") or 0)
+            for frame in normalized_frames
+            if isinstance(frame, dict)
+        }
+        timeline_rounds.update(
+            int(segment.get("round") or 0)
+            for segment in list((timeline or {}).get("rounds") or [])
+            if isinstance(segment, dict)
+        )
+        if is_live_artifact and completed_rounds:
+            timeline_rounds.update(completed_rounds)
+            timeline_rounds.add(0)
+        timeline = self._compose_global_timeline(
+            dict(timeline),
+            round_numbers=timeline_rounds,
+        )
 
         event_ids_by_round: Dict[int, List[str]] = defaultdict(list)
         for event in list(timeline.get("events") or []):
@@ -642,10 +763,11 @@ class SimulationAnimationService:
             "timeline": timeline,
         }
 
-    def _is_v2_timeline(self, timeline: Any) -> bool:
+    def _is_timeline_payload(self, timeline: Any) -> bool:
         return bool(
             isinstance(timeline, dict)
-            and timeline.get("contract_version") == TIMELINE_CONTRACT_VERSION
+            and timeline.get("contract_version")
+            in {TIMELINE_CONTRACT_VERSION, PREVIOUS_TIMELINE_CONTRACT_VERSION}
             and isinstance(timeline.get("events"), list)
         )
 
@@ -756,33 +878,30 @@ class SimulationAnimationService:
                 or int(event.get("round") or 0) in committed
             )
         ]
-        grouped: Dict[int, List[Dict[str, Any]]] = defaultdict(list)
-        for event in events:
-            grouped[int(event.get("round") or 0)].append(event)
-        rounds = [
-            {
-                "round": round_num,
-                "event_ids": [str(item.get("id") or "") for item in round_events],
-                "start_sequence": int(round_events[0].get("sequence") or 0),
-                "end_sequence": int(round_events[-1].get("sequence") or 0),
-            }
-            for round_num, round_events in sorted(grouped.items())
-        ]
         fallback_count = sum(
             1
             for event in events
             if bool((event.get("grounding") or {}).get("fallback"))
         )
+        rounds = [
+            dict(segment)
+            for segment in list(timeline.get("rounds") or [])
+            if isinstance(segment, dict)
+            and (
+                int(segment.get("round") or 0) == 0
+                or int(segment.get("round") or 0) in committed
+            )
+        ]
         return {
             **timeline,
-            "cursor": int(events[-1].get("sequence") or 0) if events else 0,
+            "cursor": max(
+                (self._safe_int(event.get("sequence")) for event in events),
+                default=0,
+            ),
             "event_count": len(events),
             "observed_event_count": len(events) - fallback_count,
             "fallback_event_count": fallback_count,
-            "latest_round": max(
-                (int(event.get("round") or 0) for event in events),
-                default=0,
-            ),
+            "latest_round": max(committed, default=0),
             "rounds": rounds,
             "events": events,
         }
@@ -893,50 +1012,315 @@ class SimulationAnimationService:
 
         source_counts = {name: len(records) for name, records in source_records.items()}
         missing_ledgers = [name for name in _PRIMARY_TIMELINE_LEDGERS if source_counts.get(name, 0) == 0]
-        rounds: List[Dict[str, Any]] = []
-        grouped: Dict[int, List[Dict[str, Any]]] = defaultdict(list)
-        for event in finalized:
-            grouped[int(event.get("round") or 0)].append(event)
-        for round_num in sorted(grouped):
-            round_events = grouped[round_num]
-            rounds.append(
+        committed_round_numbers = {
+            int(frame.get("round") or 0)
+            for frame in frames or []
+            if isinstance(frame, dict)
+        }
+        if allowed_rounds is not None:
+            committed_round_numbers.update(allowed_rounds)
+            committed_round_numbers.add(0)
+        return self._compose_global_timeline(
+            {
+                "contract_version": TIMELINE_CONTRACT_VERSION,
+                "edge_reference_contract": EDGE_REFERENCE_CONTRACT_VERSION,
+                "source_mode": source_mode,
+                "grounding": {
+                    "mode": grounding_mode,
+                    "missing_ledgers": missing_ledgers,
+                    "fallback_used": fallback_event_count > 0,
+                },
+                "source_counts": source_counts,
+                "generated_from": [name for name, count in source_counts.items() if count > 0],
+                "event_count": len(finalized),
+                "observed_event_count": observed_event_count,
+                "fallback_event_count": fallback_event_count,
+                "events": finalized,
+            },
+            round_numbers=committed_round_numbers,
+        )
+
+    def _compose_global_timeline(
+        self,
+        timeline: Dict[str, Any],
+        *,
+        round_numbers: Optional[Iterable[int]] = None,
+    ) -> Dict[str, Any]:
+        """Add the V3 canonical clock without removing V2 event fields.
+
+        ``timing.start_ms`` remains the V2 round-local offset.  V3 adds an
+        explicit local alias plus absolute global bounds.  Completed rounds are
+        represented as immutable segments, including rounds with no event, so a
+        live client can advance its round checkpoint independently of the event
+        cursor.
+
+        This projector is append-stable when newly committed data belongs to a
+        later round: previous event ids, sequences, local timing, global timing,
+        and round segments remain byte-for-byte unchanged.  Preventing a late
+        write into an already committed round still requires a persisted runtime
+        commit index; this read-side projector intentionally does not fabricate
+        such a commit boundary.
+        """
+
+        raw_events = [
+            dict(event)
+            for event in list(timeline.get("events") or [])
+            if isinstance(event, dict)
+        ]
+        sequence_values = [
+            self._safe_int(event.get("sequence")) for event in raw_events
+        ]
+        has_stable_sequence = (
+            bool(raw_events)
+            and all(value > 0 for value in sequence_values)
+            and len(set(sequence_values)) == len(sequence_values)
+        )
+        if has_stable_sequence:
+            events = [
+                event
+                for _, event in sorted(
+                    enumerate(raw_events),
+                    key=lambda item: (
+                        self._safe_int(item[1].get("sequence")),
+                        item[0],
+                    ),
+                )
+            ]
+        else:
+            events = raw_events
+            for sequence, event in enumerate(events, start=1):
+                event["sequence"] = sequence
+
+        requested_rounds = {
+            max(0, self._safe_int(round_num))
+            for round_num in (round_numbers or [])
+        }
+        requested_rounds.update(
+            max(0, self._safe_int(event.get("round"))) for event in events
+        )
+        ordered_rounds = sorted(requested_rounds)
+        events_by_round: Dict[int, List[Dict[str, Any]]] = defaultdict(list)
+        for event in events:
+            events_by_round[max(0, self._safe_int(event.get("round")))].append(event)
+
+        upgrading_v2 = (
+            timeline.get("contract_version") == PREVIOUS_TIMELINE_CONTRACT_VERSION
+        )
+        phase_counts: Dict[Tuple[int, str], int] = defaultdict(int)
+        phase_offsets: Dict[Tuple[int, str], int] = defaultdict(int)
+        if upgrading_v2:
+            for event in events:
+                phase_counts[
+                    (
+                        max(0, self._safe_int(event.get("round"))),
+                        str(event.get("phase") or "legacy_playback"),
+                    )
+                ] += 1
+
+        epoch_id, timeline_id = self._timeline_identity()
+        event_end_by_id: Dict[str, int] = {}
+        last_global_start_ms = 0
+        committed_cursor = 0
+        round_start_ms = 0
+        segments: List[Dict[str, Any]] = []
+
+        for round_num in ordered_rounds:
+            round_events = sorted(
+                events_by_round.get(round_num, []),
+                key=lambda event: self._safe_int(event.get("sequence")),
+            )
+            start_cursor = committed_cursor
+            round_event_end_ms = round_start_ms
+            for event in round_events:
+                timing = dict(event.get("timing") or {})
+                if upgrading_v2:
+                    phase = str(event.get("phase") or "legacy_playback")
+                    phase_key = (round_num, phase)
+                    phase_sequence = phase_offsets[phase_key]
+                    phase_offsets[phase_key] += 1
+                    phase_start, phase_window = _TIMELINE_PHASE_TIMING.get(
+                        phase,
+                        _TIMELINE_PHASE_TIMING["legacy_playback"],
+                    )
+                    phase_count = max(1, phase_counts[phase_key])
+                    phase_step = min(160, max(1, phase_window // phase_count))
+                    global_offset_ms = phase_start + phase_sequence * phase_step
+                    # Preserve the V2 round-local field exactly.  Only the new
+                    # absolute V3 clock uses the more readable phase placement.
+                    local_start_ms = max(
+                        0,
+                        self._safe_int(
+                            timing.get("local_start_ms")
+                            if timing.get("local_start_ms") is not None
+                            else timing.get("start_ms")
+                        ),
+                    )
+                    duration_ms = self._timeline_event_duration_ms(
+                        str(event.get("kind") or "")
+                    )
+                else:
+                    local_start_ms = max(
+                        0,
+                        self._safe_int(
+                            timing.get("local_start_ms")
+                            if timing.get("local_start_ms") is not None
+                            else timing.get("start_ms")
+                        ),
+                    )
+                    duration_ms = max(
+                        1,
+                        self._safe_int(timing.get("duration_ms"))
+                        or self._timeline_event_duration_ms(
+                            str(event.get("kind") or "")
+                        ),
+                    )
+                    global_offset_ms = local_start_ms
+                parent_end_ms = max(
+                    (
+                        event_end_by_id.get(str(parent_id or ""), 0)
+                        for parent_id in list(event.get("parent_event_ids") or [])
+                    ),
+                    default=0,
+                )
+                global_start_ms = max(
+                    round_start_ms + global_offset_ms,
+                    parent_end_ms,
+                    last_global_start_ms,
+                )
+                global_end_ms = global_start_ms + duration_ms
+                timing.update(
+                    {
+                        # V2 compatibility: start_ms is intentionally local.
+                        "start_ms": local_start_ms,
+                        "local_start_ms": local_start_ms,
+                        "duration_ms": duration_ms,
+                        "global_start_ms": global_start_ms,
+                        "global_end_ms": global_end_ms,
+                    }
+                )
+                event["timing"] = timing
+                event_id = str(event.get("id") or "")
+                if event_id:
+                    event_end_by_id[event_id] = global_end_ms
+                last_global_start_ms = global_start_ms
+                committed_cursor = max(
+                    committed_cursor,
+                    self._safe_int(event.get("sequence")),
+                )
+                round_event_end_ms = max(round_event_end_ms, global_end_ms)
+
+            minimum_duration_ms = (
+                _TIMELINE_ROUND_MIN_DURATION_MS
+                if round_events
+                else _TIMELINE_EMPTY_ROUND_DURATION_MS
+            )
+            round_end_ms = max(
+                round_start_ms + minimum_duration_ms,
+                round_event_end_ms,
+            )
+            event_ids = [str(event.get("id") or "") for event in round_events]
+            start_sequence = (
+                self._safe_int(round_events[0].get("sequence"))
+                if round_events
+                else start_cursor
+            )
+            end_sequence = (
+                self._safe_int(round_events[-1].get("sequence"))
+                if round_events
+                else committed_cursor
+            )
+            epoch_token = epoch_id.rsplit("::", 1)[-1]
+            segments.append(
                 {
                     "round": round_num,
-                    "event_ids": [str(item.get("id") or "") for item in round_events],
-                    "start_sequence": int(round_events[0].get("sequence") or 0),
-                    "end_sequence": int(round_events[-1].get("sequence") or 0),
+                    "checkpoint_id": f"checkpoint::{epoch_token}::{round_num}",
+                    "event_ids": event_ids,
+                    "event_count": len(round_events),
+                    # V2 compatibility fields retained on the richer segment.
+                    "start_sequence": start_sequence,
+                    "end_sequence": end_sequence,
+                    "start_cursor": start_cursor,
+                    "end_cursor": committed_cursor,
+                    "start_ms": round_start_ms,
+                    "end_ms": round_end_ms,
+                    "duration_ms": round_end_ms - round_start_ms,
                 }
             )
+            round_start_ms = round_end_ms
 
+        cursor = max(
+            (self._safe_int(event.get("sequence")) for event in events),
+            default=0,
+        )
+        latest_round = segments[-1]["round"] if segments else 0
+        committed_end_ms = segments[-1]["end_ms"] if segments else 0
+        checkpoint_id = segments[-1]["checkpoint_id"] if segments else ""
+        fallback_count = sum(
+            1
+            for event in events
+            if bool((event.get("grounding") or {}).get("fallback"))
+        )
+        return {
+            **timeline,
+            "contract_version": TIMELINE_CONTRACT_VERSION,
+            "compatible_contract_versions": [PREVIOUS_TIMELINE_CONTRACT_VERSION],
+            "edge_reference_contract": EDGE_REFERENCE_CONTRACT_VERSION,
+            "timeline_id": timeline_id,
+            "epoch_id": epoch_id,
+            "clock": {
+                "unit": "ms",
+                "origin_ms": 0,
+                "canonical_rate": 1.0,
+                "duration_ms": committed_end_ms,
+                "committed_end_ms": committed_end_ms,
+                "default_round_duration_ms": _TIMELINE_ROUND_MIN_DURATION_MS,
+                "empty_round_duration_ms": _TIMELINE_EMPTY_ROUND_DURATION_MS,
+            },
+            "head": {
+                "cursor": cursor,
+                "round": latest_round,
+                "checkpoint_round": latest_round,
+                "checkpoint_id": checkpoint_id,
+                "global_end_ms": committed_end_ms,
+                "event_count": len(events),
+            },
+            "cursor": cursor,
+            "event_count": len(events),
+            "observed_event_count": int(
+                timeline.get("observed_event_count")
+                if timeline.get("observed_event_count") is not None
+                else len(events) - fallback_count
+            ),
+            "fallback_event_count": int(
+                timeline.get("fallback_event_count")
+                if timeline.get("fallback_event_count") is not None
+                else fallback_count
+            ),
+            "latest_round": latest_round,
+            "rounds": segments,
+            "events": events,
+        }
+
+    def _timeline_identity(self) -> Tuple[str, str]:
         simulation_id = str(getattr(self, "simulation_id", "") or "unknown")
-        timeline_digest = hashlib.sha1(
+        state = getattr(self, "state", None)
+        created_at = str(getattr(state, "created_at", "") or "")
+        epoch_digest = hashlib.sha1(
             json.dumps(
-                [simulation_id, TIMELINE_CONTRACT_VERSION],
+                [simulation_id, created_at],
                 ensure_ascii=False,
                 separators=(",", ":"),
             ).encode("utf-8")
         ).hexdigest()[:16]
-        cursor = int(finalized[-1].get("sequence") or 0) if finalized else 0
-        return {
-            "contract_version": TIMELINE_CONTRACT_VERSION,
-            "edge_reference_contract": EDGE_REFERENCE_CONTRACT_VERSION,
-            "timeline_id": f"timeline::{timeline_digest}",
-            "cursor": cursor,
-            "source_mode": source_mode,
-            "grounding": {
-                "mode": grounding_mode,
-                "missing_ledgers": missing_ledgers,
-                "fallback_used": fallback_event_count > 0,
-            },
-            "source_counts": source_counts,
-            "generated_from": [name for name, count in source_counts.items() if count > 0],
-            "event_count": len(finalized),
-            "observed_event_count": observed_event_count,
-            "fallback_event_count": fallback_event_count,
-            "latest_round": max((int(item.get("round") or 0) for item in finalized), default=0),
-            "rounds": rounds,
-            "events": finalized,
-        }
+        epoch_id = f"epoch::{epoch_digest}"
+        timeline_digest = hashlib.sha1(
+            json.dumps(
+                [epoch_id, TIMELINE_CONTRACT_VERSION],
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()[:16]
+        return epoch_id, f"timeline::{timeline_digest}"
 
     def _finalize_timeline_events(self, events: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
         ordered = sorted(
@@ -1019,16 +1403,16 @@ class SimulationAnimationService:
 
     def _timeline_event_duration_ms(self, kind: str) -> int:
         if kind == "spread_applied":
-            return 760
+            return 1500
         if kind == "agent_interaction":
-            return 560
+            return 1300
         if kind.startswith("dynamic_edge_"):
-            return 620
+            return 1300
         if kind == "relationship_event":
-            return 520
+            return 1300
         if kind == "risk_transition":
-            return 720
-        return 600
+            return 1500
+        return 1400
 
     def _base_timeline_event(
         self,

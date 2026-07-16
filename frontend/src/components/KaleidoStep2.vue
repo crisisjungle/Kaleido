@@ -63,11 +63,13 @@
             <span>事件 {{ String(index + 1).padStart(2, '0') }}</span>
             <strong>{{ resolveVariableDisplayName(event) }}</strong>
             <p>{{ event.description || '未填写事件描述' }}</p>
+            <small class="locked-variable-scope">{{ variableTargetScopeLine(event) }}</small>
           </article>
           <article v-for="policy in policyInputs" :key="policy.id">
             <span>政策措施</span>
             <strong>{{ resolveVariableDisplayName(policy) }}</strong>
             <p>{{ policy.intent || '未填写政策意图' }}</p>
+            <small class="locked-variable-scope">{{ variableTargetScopeLine(policy) }}</small>
           </article>
         </div>
       </aside>
@@ -149,6 +151,25 @@
           </div>
         </aside>
 
+        <section class="catalog parameter-stage scenario-location-section">
+          <div class="panel-title-row parameter-stage-head">
+            <div>
+              <span class="section-order">推演作用范围</span>
+              <h3>沿用背景地点，或在这里明确新地点</h3>
+              <p>留空即沿用第一步范围；填写新地点时，生成前会自动核对并补充现实底座。</p>
+            </div>
+          </div>
+          <label>
+            新地点或地理范围（可选）
+            <input
+              v-model="scenarioLocation"
+              type="text"
+              :placeholder="props.sceneSeedContext?.areaLabel ? `当前：${props.sceneSeedContext.areaLabel}` : '沿用第一步地点和范围'"
+              :disabled="!canEditParameters"
+            />
+          </label>
+        </section>
+
         <section class="catalog parameter-stage primary-condition-section event-input-section">
           <div class="panel-title-row parameter-stage-head">
             <div>
@@ -168,7 +189,7 @@
                   <span class="variable-index">事件 {{ String(index + 1).padStart(2, '0') }}</span>
                   <strong>{{ event.name || '未命名灾害事件' }}</strong>
                   <div class="variable-badges">
-                    <span v-if="event.uiOrigin === 'seed'" class="variable-badge origin">来自背景定义</span>
+                    <span v-if="event.uiOrigin === 'seed'" class="variable-badge origin">背景建议</span>
                     <span v-else-if="event.uiOrigin === 'system_split'" class="variable-badge origin">系统拆分 · 可编辑</span>
                     <span v-else class="variable-badge manual">本步新增</span>
                   </div>
@@ -217,6 +238,15 @@
                   </select>
                 </label>
               </div>
+              <label>
+                补充真实地点或设施（可选）
+                <input
+                  v-model="event.targetText"
+                  type="text"
+                  placeholder="例：深圳市第三人民医院、福田泵站；系统会核对真实对象"
+                  :disabled="!canEditParameters"
+                />
+              </label>
             </article>
           </div>
           <div v-else class="empty-state compact">至少添加一个灾害事件，系统才能规划后续演化。</div>
@@ -241,7 +271,7 @@
                   <span class="variable-index">政策措施</span>
                   <strong>{{ policy.name || '未命名政策措施' }}</strong>
                   <div class="variable-badges">
-                    <span v-if="policy.uiOrigin === 'seed'" class="variable-badge origin">来自背景定义</span>
+                    <span v-if="policy.uiOrigin === 'seed'" class="variable-badge origin">背景建议</span>
                     <span v-else class="variable-badge manual">本步新增</span>
                   </div>
                 </div>
@@ -276,6 +306,15 @@
                   </select>
                 </label>
               </div>
+              <label>
+                补充真实地点或设施（可选）
+                <input
+                  v-model="policy.targetText"
+                  type="text"
+                  placeholder="例：指定医院、泵站或港口；系统会核对真实对象"
+                  :disabled="!canEditParameters"
+                />
+              </label>
             </article>
           </div>
           <div v-else class="empty-state compact">没有预设政策时可以留空，系统会先推演灾害事件的自然演化。</div>
@@ -378,6 +417,109 @@
       </section>
 
       <section
+        v-if="isReviewPhase && activeWorkspaceTab === 'plan'"
+        class="briefing-section panel workspace-panel scenario-plan-panel"
+      >
+        <div class="panel-title-row briefing-head static-head">
+          <div>
+            <span class="section-order">可运行场景 · 时间与顺序</span>
+            <h3>演化计划</h3>
+          </div>
+          <span class="hint">{{ curatedEventCount }} 个事件 · {{ safeDisplayText(scenarioPlanningInput?.temporal_plan?.coverage_label_zh, `${maxRounds} 轮`) }}</span>
+        </div>
+
+        <section v-if="isCuratedTargetState" class="curated-scenario-overview" aria-label="武汉案例策划总览">
+          <div class="curated-storyline-grid">
+            <article v-for="item in curatedStorylines" :key="item.id">
+              <span>贯穿故事线</span>
+              <strong>{{ safeDisplayText(item.name, '城市系统故事线') }}</strong>
+            </article>
+          </div>
+          <div class="curated-chapter-strip">
+            <article v-for="item in curatedChapters" :key="item.id">
+              <span>R{{ item.round_start }}–R{{ item.round_end }}</span>
+              <strong>{{ safeDisplayText(item.name, '演化章节') }}</strong>
+              <small>{{ safeDisplayText(item.date_range, '') }}</small>
+            </article>
+          </div>
+          <p>12 个宏观场景 · {{ curatedSpatialAnchors.length }} 个差异化空间锚点 · 240 个职能化或聚合主体。公开事实约束日期与地点，运行关系与连续状态为策划推演。</p>
+        </section>
+
+        <div class="scenario-plan-summary">
+          <article>
+            <span>每轮步长</span>
+            <strong>{{ temporalProfileLabel }}</strong>
+            <p>推演总覆盖 {{ totalCoverageLabel }}</p>
+          </article>
+          <article>
+            <span>事件序列</span>
+            <strong>{{ curatedEventCount }} 项</strong>
+            <p>{{ isCuratedTargetState ? '六条故事线跨章节交叉推进' : (timePlanMode === 'manual' ? '包含人工时间纠正' : '由系统统一规划') }}</p>
+          </article>
+          <article>
+            <span>政策窗口</span>
+            <strong>{{ scenarioPolicyPlan.length }} 项</strong>
+            <p>{{ scenarioPolicyPlan.length ? '已绑定预定作用窗口' : '本场景没有预设政策' }}</p>
+          </article>
+        </div>
+
+        <ol v-if="!isCuratedTargetState" class="scenario-event-timeline">
+          <li v-for="(event, index) in eventInputs" :key="event.id">
+            <span class="scenario-event-index mono">{{ String(index + 1).padStart(2, '0') }}</span>
+            <div>
+              <strong>{{ resolveVariableDisplayName(event) }}</strong>
+              <p>{{ event.description || '事件说明已记录。' }}</p>
+              <small>{{ variableTargetScopeLine(event) }}</small>
+            </div>
+          </li>
+        </ol>
+
+        <section v-if="scenarioPolicyPlan.length" class="catalog scenario-policy-plan">
+          <div class="catalog-title">政策作用计划</div>
+          <div class="scenario-policy-list">
+            <article v-for="(policy, index) in scenarioPolicyPlan" :key="policy.policy_id || policy.id || index">
+              <strong>{{ safeDisplayText(policy.display_name || policy.name || policy.title, `政策措施 ${index + 1}`) }}</strong>
+              <p>{{ safeDisplayText(policy.intent || policy.description || policy.summary, '政策作用窗口已写入场景定义。') }}</p>
+            </article>
+          </div>
+        </section>
+      </section>
+
+      <section
+        v-if="isReviewPhase && activeWorkspaceTab === 'mechanism'"
+        class="briefing-section panel workspace-panel scenario-mechanism-panel"
+      >
+        <div class="panel-title-row briefing-head static-head">
+          <div>
+            <span class="section-order">可运行场景 · 因果逻辑</span>
+            <h3>机制模型</h3>
+          </div>
+          <span class="hint">{{ mechanismNodes.length }} 个节点 · {{ mechanismEdges.length }} 条机制边</span>
+        </div>
+
+        <div v-if="mechanismNodes.length" class="scenario-mechanism-node-grid">
+          <article v-for="(node, index) in mechanismNodes" :key="node.id || node.node_id || index">
+            <span class="mono">M{{ String(index + 1).padStart(2, '0') }}</span>
+            <strong>{{ safeDisplayText(node.display_name || node.label_zh || node.label || node.name || node.title, '机制节点') }}</strong>
+            <p>{{ safeDisplayText(node.description_zh || node.description || node.summary, '该节点参与场景状态演化。') }}</p>
+          </article>
+        </div>
+        <div v-else class="empty-state">当前场景还没有可展示的机制节点。</div>
+
+        <section v-if="mechanismEdges.length" class="catalog scenario-mechanism-edges">
+          <div class="catalog-title">机制关系</div>
+          <article v-for="(edge, index) in mechanismEdges" :key="edge.id || edge.edge_id || index">
+            <div class="scenario-mechanism-route">
+              <strong>{{ safeDisplayText(edge.source_label || edge.source_name || edge.source, '上游机制') }}</strong>
+              <span aria-hidden="true">→</span>
+              <strong>{{ safeDisplayText(edge.target_label || edge.target_name || edge.target, '下游机制') }}</strong>
+            </div>
+            <p>{{ safeDisplayText(edge.mechanism_zh || edge.mechanism || edge.description || edge.relation_label, '已记录机制作用关系。') }}</p>
+          </article>
+        </section>
+      </section>
+
+      <section
         v-if="isReviewPhase && activeWorkspaceTab === 'agents'"
         class="briefing-section bsec-agents panel workspace-panel agents"
       >
@@ -389,6 +531,11 @@
           <span class="region-coverage-note">{{ agentConfigStatusLabel }}</span>
         </div>
 
+        <label class="agent-search-field">
+          <span>搜索主体</span>
+          <input v-model.trim="agentSearch" type="search" placeholder="按名称、角色、区域或能力搜索" />
+        </label>
+
         <div v-if="agentCategorySummaryLabel" class="agent-category-summary">
           <span>类型分布</span>
           <strong>{{ agentCategorySummaryLabel }}</strong>
@@ -399,11 +546,19 @@
             <span>角色需求覆盖</span>
             <strong>{{ agentPlanAudit.coveredDemandCount }} / {{ agentPlanAudit.roleDemandCount }}</strong>
           </div>
-          <div>
+          <div v-if="isCuratedTargetState">
+            <span>核心叙事主体</span>
+            <strong>{{ agentPlanAudit.coreAgentCount }}</strong>
+          </div>
+          <div v-if="isCuratedTargetState">
+            <span>背景与聚合主体</span>
+            <strong>{{ agentPlanAudit.backgroundAgentCount }}</strong>
+          </div>
+          <div v-if="!isCuratedTargetState">
             <span>待补能力需求</span>
             <strong>{{ agentPlanAudit.unresolvedDemandCount }}</strong>
           </div>
-          <div>
+          <div v-if="!isCuratedTargetState">
             <span>新建聚合代理体</span>
             <strong>{{ agentPlanAudit.aggregateAgentCount }}</strong>
           </div>
@@ -442,7 +597,7 @@
                 :aria-controls="`agent-detail-${agentPageStartIndex + index}`"
                 @click="toggleAgentDetail(agent.agentKey)"
               >
-                <span class="agent-table-index mono">A{{ String(agentPageStartIndex + index + 1).padStart(3, '0') }}</span>
+                <span class="agent-table-index mono">{{ String(agentPageStartIndex + index + 1).padStart(3, '0') }}</span>
                 <strong class="agent-table-name">{{ agent.displayName }}</strong>
                 <span class="agent-table-text">{{ agent.agentTypeLabel || agent.familyLabel }}</span>
                 <span class="agent-table-text agent-table-region">{{ agent.primaryRegionLabel || '未指定区域' }}</span>
@@ -495,7 +650,7 @@
             </div>
           </div>
           <nav class="agent-pagination" aria-label="代理体分页">
-            <span>{{ agentPageStartIndex + 1 }}–{{ agentPageEndIndex }} / {{ agentCards.length }} 个</span>
+            <span>{{ filteredAgentCards.length ? agentPageStartIndex + 1 : 0 }}–{{ agentPageEndIndex }} / {{ filteredAgentCards.length }} 个</span>
             <div>
               <button type="button" :disabled="agentPage <= 1" @click="setAgentPage(agentPage - 1)">上一页</button>
               <strong>第 {{ agentPage }} / {{ agentTotalPages }} 页</strong>
@@ -510,11 +665,14 @@
       </section>
 
       <section
-        v-if="isReviewPhase && activeWorkspaceTab === 'relations'"
+        v-if="isReviewPhase && activeWorkspaceTab === 'agents'"
         class="briefing-section bsec-relations panel workspace-panel relations"
       >
         <div class="panel-title-row briefing-head static-head">
-          <h3>{{ relationSectionTitle }}</h3>
+          <div>
+            <span class="section-order">主体系统 · 初始状态</span>
+            <h3>初始关系骨架</h3>
+          </div>
           <span class="hint">{{ relationSourceLabel }}</span>
         </div>
 
@@ -836,30 +994,14 @@
             </div>
           </div>
 
-          <div class="risk-causal-chain" aria-label="风险对象机制链">
-            <div class="risk-causal-node">
-              <span>触发源</span>
-              <strong>{{ safeDisplayText(selectedRiskStatement.trigger_name || selectedRiskObject.root_pressures?.[0], '场景触发因素') }}</strong>
-            </div>
-            <span class="risk-causal-arrow" aria-hidden="true">→</span>
-            <div class="risk-causal-node mechanism">
-              <span>机制步骤</span>
-              <div class="risk-step-list">
-                <strong v-for="step in selectedRiskMechanismSteps" :key="step">{{ displayToken(step) }}</strong>
-                <strong v-if="selectedRiskMechanismSteps.length === 0">{{ selectedRiskObject.mechanism_edge_ids?.length || 0 }} 条已校验机制边</strong>
-              </div>
-            </div>
-            <span class="risk-causal-arrow" aria-hidden="true">→</span>
-            <div class="risk-causal-node">
-              <span>受影响对象</span>
-              <strong>{{ safeDisplayText(selectedRiskStatement.receptor_name, '主要受影响对象') }}</strong>
-            </div>
-            <span class="risk-causal-arrow" aria-hidden="true">→</span>
-            <div class="risk-causal-node consequence">
-              <span>具体后果</span>
-              <strong>{{ safeDisplayText(selectedRiskStatement.consequence || selectedRiskObject.summary, '等待具体后果说明。') }}</strong>
-            </div>
-          </div>
+          <KMechanismChain
+            :trigger="safeDisplayText(selectedRiskStatement.trigger_name || selectedRiskObject.root_pressures?.[0], '场景触发因素')"
+            :steps="selectedRiskMechanismSteps.map(displayToken)"
+            :empty-step-label="`${selectedRiskObject.mechanism_edge_ids?.length || 0} 条已校验机制边`"
+            :receptor="safeDisplayText(selectedRiskStatement.receptor_name, '主要受影响对象')"
+            :consequence="safeDisplayText(selectedRiskStatement.consequence || selectedRiskObject.summary, '等待具体后果说明。')"
+            aria-label="风险对象机制链"
+          />
 
           <div class="risk-node-grid">
               <section class="risk-mini-panel">
@@ -943,9 +1085,53 @@
       </div>
 
       <div v-else class="empty-state">
-        当前场景没有通过证据校验的风险对象，可返回输入补充事实或调整范围。
+        场景准备完成，未形成通过证据校验的风险对象。
       </div>
     </section>
+    </section>
+
+    <section
+      v-if="isReviewPhase && readinessChecks.length"
+      class="readiness-panel"
+      :class="{ 'has-blocking': readinessBlockingCount > 0, 'is-expanded': showReadinessDetails }"
+      aria-label="运行准备检查"
+    >
+      <button
+        class="readiness-disclosure"
+        type="button"
+        :aria-expanded="showReadinessDetails"
+        aria-controls="step2-readiness-details"
+        @click="showReadinessDetails = !showReadinessDetails"
+      >
+        <span class="readiness-status-mark" aria-hidden="true">{{ readinessBlockingCount > 0 ? '!' : '✓' }}</span>
+        <span class="readiness-compact-copy" aria-live="polite" aria-atomic="true">
+          <strong>运行准备检查</strong>
+          <span id="step2-readiness-summary">{{ readinessOutcomeLabel }} · {{ readinessSummaryLine }}</span>
+        </span>
+        <span class="readiness-disclosure-action">
+          {{ showReadinessDetails ? '收起详情' : (readinessBlockingCount > 0 ? '展开处理' : '查看详情') }}
+          <span class="readiness-chevron" aria-hidden="true">⌄</span>
+        </span>
+      </button>
+
+      <div v-show="showReadinessDetails" id="step2-readiness-details" class="readiness-details">
+        <p class="readiness-details-intro">检查事件、时间、机制、空间、主体和风险引用能否被运行时一致读取。</p>
+        <div class="readiness-check-list">
+          <button
+            v-for="item in readinessChecks"
+            :key="item.key"
+            type="button"
+            class="readiness-check"
+            :class="`is-${item.status}`"
+            @click="handleReadinessCheck(item)"
+          >
+            <span class="readiness-check-status">{{ safeDisplayText(item.status_label_zh, '需复核') }}</span>
+            <strong>{{ safeDisplayText(item.label_zh, '运行检查') }}</strong>
+            <p>{{ safeDisplayText(item.summary_zh, '查看对应配置。') }}</p>
+            <span class="readiness-check-action">定位到{{ workspaceTabLabel(item.target_tab) }} →</span>
+          </button>
+        </div>
+      </div>
     </section>
 
     <WorkflowActionBar
@@ -964,7 +1150,12 @@
         <button class="secondary-btn" type="button" @click="showLockedInputs = !showLockedInputs">
           {{ showLockedInputs ? '收起已锁定输入' : '查看已锁定输入' }}
         </button>
-        <button class="primary-btn" :disabled="!isReady" @click="handleNextStep">进入推演 →</button>
+        <button
+          class="primary-btn"
+          :disabled="!isReady || readinessBlockingCount > 0"
+          :aria-describedby="readinessBlockingCount > 0 ? 'step2-readiness-summary' : undefined"
+          @click="handleNextStep"
+        >{{ isCuratedTargetState ? '查看运行主线 →' : '进入推演 →' }}</button>
       </template>
     </WorkflowActionBar>
 
@@ -995,9 +1186,11 @@ import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { getPrepareStatus, getSimulationConfig, getSimulationConfigRealtime, prepareSimulation, getSimulation } from '../api/simulation'
 import KProgress from './ui/KProgress.vue'
 import KTag from './ui/KTag.vue'
+import KMechanismChain from './ui/KMechanismChain.vue'
 import KWorkflowTabs from './ui/KWorkflowTabs.vue'
 import WorkflowActionBar from './ui/WorkflowActionBar.vue'
 import { formatTokenLabelZh, normalizeDisplayLabels, safeDisplayError, safeDisplayText, safeDisplayToken, sanitizeDisplayCopy, translateDisplayToken } from '../utils/displayText'
+import { STEP2_WORKSPACE_TABS } from '../config/workflowArchitecture'
 
 const props = defineProps({
   simulationId: String,
@@ -1075,13 +1268,16 @@ const timeStepUnit = ref('hour')
 const timeStepSize = ref(1)
 const timePlanReasoning = ref('')
 const referenceTimeLocal = ref('')
+const scenarioLocation = ref('')
 const maxRounds = ref(36)
-const activeWorkspaceTab = ref('risk')
+const activeWorkspaceTab = ref('plan')
 const selectedRegionKey = ref('')
 const agentPage = ref(1)
+const agentSearch = ref('')
 const expandedAgentKey = ref('')
 const workspaceShellRef = ref(null)
 const injectedVariables = ref(buildInitialVariables(props.initialInjectedVariables, { sourceOrigin: 'seed' }))
+const lastAppliedSeedSignature = ref(seedInputSignature(props.initialInjectedVariables))
 const phase = ref('idle')
 const prepareProgress = ref(0)
 const prepareMessage = ref('')
@@ -1094,6 +1290,7 @@ const simulationSnapshot = ref(null)
 const hasSubmittedParameters = ref(false)
 const userAdjustedTimePlan = ref(false)
 const showLockedInputs = ref(false)
+const showReadinessDetails = ref(false)
 
 const resolvedSimulationArchitecture = computed(() => FIXED_SIMULATION_ARCHITECTURE)
 const isReady = computed(() => phase.value === 'ready')
@@ -1207,6 +1404,56 @@ const scenarioPlanningInput = computed(() => {
   return candidates.find(item => item && typeof item === 'object' && Object.keys(item).length > 0) || null
 })
 
+const scenarioDefinition = computed(() => {
+  const candidates = [
+    resolvedConfig.value?.scenario_definition,
+    configRealtime.value?.scenario_definition,
+    configRealtime.value?.config?.scenario_definition,
+    configSnapshot.value?.scenario_definition,
+    configSnapshot.value?.config?.scenario_definition,
+    simulationSnapshot.value?.scenario_definition,
+    simulationSnapshot.value?.config?.scenario_definition,
+    props.simulationData?.scenario_definition,
+    props.simulationData?.config?.scenario_definition
+  ]
+  return candidates.find(item => item && typeof item === 'object' && Object.keys(item).length > 0) || null
+})
+const isCuratedTargetState = computed(() => String(
+  resolvedConfig.value?.generation_mode
+  || scenarioDefinition.value?.generation_mode
+  || ''
+) === 'curated_target_state')
+const curatedStorylines = computed(() => asArray(
+  scenarioDefinition.value?.storylines || resolvedConfig.value?.storylines
+))
+const curatedChapters = computed(() => asArray(
+  scenarioDefinition.value?.chapters || resolvedConfig.value?.story_chapters
+))
+const curatedSpatialAnchors = computed(() => asArray(
+  scenarioDefinition.value?.spatial_anchors || resolvedConfig.value?.subregion_graph
+))
+const curatedEventCount = computed(() => (
+  isCuratedTargetState.value ? curatedStorylines.value.length : eventInputs.value.length
+))
+
+const readinessChecks = computed(() => asArray(scenarioDefinition.value?.readiness_checks))
+const readinessBlockingCount = computed(() => readinessChecks.value.filter(item => Boolean(item?.blocking)).length)
+const readinessWarningCount = computed(() => readinessChecks.value.filter(item => (
+  !item?.blocking && String(item?.status || '') === 'warning'
+)).length)
+const readinessReadyCount = computed(() => readinessChecks.value.filter(item => (
+  !item?.blocking && String(item?.status || '') !== 'warning'
+)).length)
+const readinessOutcomeLabel = computed(() => (
+  readinessBlockingCount.value > 0 ? `${readinessBlockingCount.value} 项需处理` : '可进入推演'
+))
+const readinessSummaryLine = computed(() => {
+  const parts = [`${readinessReadyCount.value} 项就绪`]
+  if (readinessWarningCount.value > 0) parts.push(`${readinessWarningCount.value} 项建议复核`)
+  if (readinessBlockingCount.value > 0) parts.push(`${readinessBlockingCount.value} 项阻断`)
+  return parts.join(' · ')
+})
+
 const mechanismGraph = computed(() => scenarioPlanningInput.value?.event_mechanism_graph || {})
 const mechanismNodes = computed(() => asArray(mechanismGraph.value?.nodes))
 const mechanismEdges = computed(() => asArray(mechanismGraph.value?.edges))
@@ -1273,6 +1520,8 @@ const agentPlanAudit = computed(() => {
     coveredDemandCount,
     unresolvedDemandCount,
     aggregateAgentCount,
+    coreAgentCount: Number(plan?.core_agent_count ?? 0) || 0,
+    backgroundAgentCount: Number(plan?.background_agent_count ?? aggregateAgentCount) || 0,
     boundPolicyCount,
     policyCount,
     selectedAgentCount: Number(generation.selected_agent_count ?? plan?.planned_agents?.length ?? 0) || 0,
@@ -1284,6 +1533,9 @@ const agentPlanAudit = computed(() => {
 })
 const agentPlanAuditDescription = computed(() => {
   if (!agentPlanAudit.value.available) return ''
+  if (isCuratedTargetState.value) {
+    return `${agentPlanAudit.value.coreAgentCount} 个核心叙事主体承载行动与状态生命周期，${agentPlanAudit.value.backgroundAgentCount} 个背景与聚合主体维持城市系统密度；六类系统和 ${agentPlanAudit.value.roleDemandCount} 种角色原型均已覆盖。`
+  }
   if (agentPlanAudit.value.unresolvedDemandCount > 0) {
     if (agentPlanAudit.value.budgetDeferredCount > 0) {
       return `按角色需求、空间证据与执行能力生成；${agentPlanAudit.value.budgetDeferredCount} 项需求达到当前分析强度的代理体上限。`
@@ -1420,10 +1672,22 @@ const agentCategoryGroups = computed(() => {
 })
 
 const AGENT_PAGE_SIZE = 12
-const agentTotalPages = computed(() => Math.max(1, Math.ceil(agentCards.value.length / AGENT_PAGE_SIZE)))
+const filteredAgentCards = computed(() => {
+  const query = String(agentSearch.value || '').trim().toLowerCase()
+  if (!query) return agentCards.value
+  return agentCards.value.filter((agent) => [
+    agent.displayName,
+    agent.agentTypeLabel,
+    agent.roleTypeLabel,
+    agent.archetypeLabel,
+    agent.primaryRegionLabel,
+    ...(agent.capabilityLabels || [])
+  ].some((value) => String(value || '').toLowerCase().includes(query)))
+})
+const agentTotalPages = computed(() => Math.max(1, Math.ceil(filteredAgentCards.value.length / AGENT_PAGE_SIZE)))
 const agentPageStartIndex = computed(() => (agentPage.value - 1) * AGENT_PAGE_SIZE)
-const agentPageEndIndex = computed(() => Math.min(agentPageStartIndex.value + AGENT_PAGE_SIZE, agentCards.value.length))
-const pagedAgentCards = computed(() => agentCards.value.slice(agentPageStartIndex.value, agentPageEndIndex.value))
+const agentPageEndIndex = computed(() => Math.min(agentPageStartIndex.value + AGENT_PAGE_SIZE, filteredAgentCards.value.length))
+const pagedAgentCards = computed(() => filteredAgentCards.value.slice(agentPageStartIndex.value, agentPageEndIndex.value))
 const agentCategorySummaryLabel = computed(() => agentCategoryGroups.value
   .filter(group => group.count > 0)
   .map(group => `${group.label} ${group.count}`)
@@ -1445,6 +1709,10 @@ watch(() => agentCards.value.length, () => {
   if (expandedAgentKey.value && !agentCards.value.some(agent => agent.agentKey === expandedAgentKey.value)) {
     expandedAgentKey.value = ''
   }
+})
+watch(agentSearch, () => {
+  agentPage.value = 1
+  expandedAgentKey.value = ''
 })
 
 const regionAgentMap = computed(() => buildRegionAgentMap(regionRecords.value, agentCards.value))
@@ -1649,6 +1917,67 @@ function resolveNodeOptionValue(value) {
   return matchedAgent ? String(matchedAgent.agentId) : ''
 }
 
+function resolveVariableRegionLabel(value) {
+  const raw = toDisplayString(value, '')
+  if (!raw) return ''
+  const normalized = normalizeKey(raw)
+  const region = regionRecords.value.find((item) => {
+    return [item.region_id, item.regionKey, item.name, item.displayName]
+      .some((token) => normalizeKey(token) === normalized)
+  })
+  if (region) return safeDisplayName(region.displayName || region.name, '')
+
+  const node = resolveGraphNodeByToken(raw)
+  if (node) return safeDisplayName(node.name || node.label || node.title, '')
+  return safeDisplayName(raw, '')
+}
+
+function resolveVariableEntityLabel(value) {
+  const raw = toDisplayString(value, '')
+  if (!raw) return ''
+  const normalized = normalizeKey(raw)
+  const agent = agentCards.value.find((item) => {
+    return [item.agentId, item.sourceEntityUuid, item.username, item.displayName]
+      .some((token) => normalizeKey(token) === normalized)
+  })
+  if (agent) return safeDisplayName(agent.displayName || agent.username, '')
+
+  const node = resolveGraphNodeByToken(raw)
+  if (node) return safeDisplayName(node.name || node.label || node.title, '')
+  return safeDisplayName(raw, '')
+}
+
+function uniqueDisplayLabels(values) {
+  const seen = new Set()
+  return values.flatMap((value) => {
+    const label = safeDisplayName(value, '')
+    const key = normalizeKey(label)
+    if (!label || !key || seen.has(key)) return []
+    seen.add(key)
+    return [label]
+  })
+}
+
+function variableTargetScopeLine(variable) {
+  const regionRefs = uniqueList([
+    ...asArray(variable?.targetRegionIds),
+    variable?.targetRegionId
+  ].filter(Boolean))
+  const entityRefs = uniqueList([
+    ...asArray(variable?.targetEntityIds),
+    variable?.targetNodeId
+  ].filter(Boolean))
+  const regionLabels = uniqueDisplayLabels(regionRefs.map(resolveVariableRegionLabel))
+  const entityLabels = uniqueDisplayLabels([
+    ...entityRefs.map(resolveVariableEntityLabel),
+    ...parseTargetLabels(variable?.targetText)
+  ])
+  const scopeParts = []
+  if (regionLabels.length) scopeParts.push(`作用区域：${regionLabels.join('、')}`)
+  if (entityLabels.length) scopeParts.push(`真实对象：${entityLabels.join('、')}`)
+  return scopeParts.join(' · ') || '作用范围由系统解析'
+}
+
 function syncVariableSelections() {
   injectedVariables.value = injectedVariables.value.map((variable) => ({
     ...variable,
@@ -1787,29 +2116,22 @@ const paramsSummaryLine = computed(() => {
 })
 
 const workspaceTabs = computed(() => {
-  return [
-    {
-      value: 'risk',
-      label: '风险定义',
-      meta: `${riskObjects.value.length} 个对象 · ${primaryRiskObjectId.value ? '已聚焦' : '待生成'}`
-    },
-    {
-      value: 'region',
-      label: '区域结构',
-      meta: `${regionRecords.value.length} 个区域 · ${regionAnchorTotal.value} 个锚点`
-    },
-    {
-      value: 'agents',
-      label: '代理体配置',
-      meta: `${agentCards.value.length} 个 · ${agentSourceLabel.value}`
-    },
-    {
-      value: 'relations',
-      label: '关系网络',
-      meta: `${relationSummary.value.total} 条 · ${relationSummary.value.types.length} 类`
-    },
-  ]
+  const riskStatusLabel = riskObjects.value.length === 0
+    ? (isReviewPhase.value ? '未形成' : '待生成')
+    : (primaryRiskObjectId.value ? '已聚焦' : '已生成')
+  const metaByTab = {
+    plan: `${curatedEventCount.value} 个事件 · ${maxRounds.value} 轮`,
+    mechanism: `${mechanismNodes.value.length} 个节点 · ${mechanismEdges.value.length} 条边`,
+    region: `${regionRecords.value.length} 个区域 · ${isCuratedTargetState.value ? curatedSpatialAnchors.value.length : regionAnchorTotal.value} 个锚点`,
+    agents: `${agentCards.value.length} 个主体 · ${relationSummary.value.total} 条初始关系`,
+    risk: `${riskObjects.value.length} 个对象 · ${riskStatusLabel}`,
+  }
+  return STEP2_WORKSPACE_TABS.map(item => ({ ...item, meta: metaByTab[item.value] }))
 })
+
+function workspaceTabLabel(tab) {
+  return STEP2_WORKSPACE_TABS.find(item => item.value === tab)?.label || '演化计划'
+}
 
 async function selectResultTab(tab) {
   if (!workspaceTabs.value.some(item => item.value === tab) || tab === activeWorkspaceTab.value) return
@@ -1819,6 +2141,11 @@ async function selectResultTab(tab) {
   const tabs = shell?.querySelector('.result-tabs')
   if (shell && tabs) shell.scrollTop = Math.max(0, tabs.offsetTop - 6)
   if (tab === 'risk') await revealSelectedRiskObject()
+}
+
+async function handleReadinessCheck(item) {
+  showReadinessDetails.value = false
+  await selectResultTab(item?.target_tab || 'plan')
 }
 
 const groundingSummary = computed(() => {
@@ -2715,10 +3042,11 @@ const prepareMessageLabel = computed(() => {
 const generationSteps = computed(() => {
   const progress = clamp(Number(prepareProgress.value) || 0, 0, 100)
   const definitions = [
-    { label: '解析复合事件', note: '拆分用户输入并保留来源、顺序与作用对象', start: 0, end: 14 },
-    { label: '构建机制与传播图', note: '组合原子机制，建立因果边与多介质传播分支', start: 14, end: 31 },
-    { label: '生成时间和空间计划', note: '推导事件阶段、传播延迟、持续周期与作用范围', start: 31, end: 48 },
-    { label: '提取角色能力需求', note: '形成角色需求，不预设代理体数量', start: 48, end: 62 },
+    { label: '核对并补充现实范围', note: '确认地点、设施与环境对象均有真实空间支撑', start: 0, end: 10 },
+    { label: '解析复合事件', note: '拆分用户输入并保留来源、顺序与作用对象', start: 10, end: 22 },
+    { label: '构建机制与传播图', note: '组合原子机制，建立因果边与多介质传播分支', start: 22, end: 38 },
+    { label: '生成时间和空间计划', note: '推导事件阶段、传播延迟、持续周期与作用范围', start: 38, end: 52 },
+    { label: '提取角色能力需求', note: '形成角色需求，不预设代理体数量', start: 52, end: 62 },
     { label: '生成代理体与关系', note: '根据场景规划生成正式配置', start: 62, end: 85 },
     { label: '装配和校验场景', note: '校验中文展示与完整性，准备四个审阅视图', start: 85, end: 101 }
   ]
@@ -2738,6 +3066,10 @@ const payloadPreview = computed(() => {
     scenario_mode: scenarioMode.value,
     event_inputs: serializeEventInputs(),
     policy_inputs: serializePolicyInputs(),
+    scenario_location: scenarioLocation.value.trim() || null,
+    foundation_ref: props.sceneSeedContext?.foundationRef || {
+      map_seed_id: props.sceneSeedContext?.mapSeedId || ''
+    },
     advanced_overrides: buildAdvancedOverrides(),
     effort_snapshot_id: effortSnapshotId.value || null
   }, null, 2)
@@ -2990,7 +3322,8 @@ function createVariable(type = 'disaster') {
     advancedStartRound: '',
     advancedDurationRounds: '',
     advancedIntensity: '',
-    sourceOrigin: 'manual'
+    sourceOrigin: 'step2_user',
+    uiOrigin: 'manual'
   }
 }
 
@@ -3019,7 +3352,15 @@ function normalizeExternalVariable(variable, index = 0, options = {}) {
       : toDisplayString(variable.target_node || variable.targetNode, '')
         ? [variable.target_node || variable.targetNode]
         : []
-  const sourceOrigin = toDisplayString(variable.source_origin || variable.sourceOrigin || options.sourceOrigin, options.sourceOrigin || 'manual')
+  const sourceOrigin = toDisplayString(
+    variable.source_origin || variable.sourceOrigin || options.sourceOrigin,
+    options.sourceOrigin === 'seed' ? 'step1_suggestion' : 'step2_user'
+  )
+  const targetLabels = Array.isArray(variable.target_labels)
+    ? variable.target_labels
+    : Array.isArray(variable.targetLabels)
+      ? variable.targetLabels
+      : []
   const sourceInputId = String(
     variable.source_input_id
     || variable.sourceInputId
@@ -3042,10 +3383,7 @@ function normalizeExternalVariable(variable, index = 0, options = {}) {
     description: safeDisplayText(variable.description || variable.summary, ''),
     intent: safeDisplayText(variable.intent || variable.policy_intent || variable.description, ''),
     targetText: safeDisplayText(
-      variable.target || variable.policy_target || variable.target_text || [
-        ...targetRegions.map(item => toDisplayString(item, '')),
-        ...targetNodes.map(item => toDisplayString(item, ''))
-      ].filter(Boolean).join('、'),
+      variable.target || variable.policy_target || variable.target_text || targetLabels.join('、'),
       ''
     ),
     targetRegionId: toDisplayString(targetRegions[0], ''),
@@ -3091,6 +3429,20 @@ function buildInitialVariables(source, options = {}) {
   return normalized.length > 0 ? normalized : [createVariable('disaster')]
 }
 
+function seedInputSignature(source) {
+  const items = Array.isArray(source) ? source : []
+  if (items.length === 0) return ''
+  return JSON.stringify(items.map((item) => ({
+    id: item?.input_id || item?.sourceInputId || item?.id || '',
+    type: item?.type || item?.input_type || item?.kind || '',
+    name: item?.name || item?.title || item?.label || '',
+    description: item?.description || item?.summary || item?.intent || '',
+    target_region_ids: item?.target_region_ids || item?.targetRegionIds || [],
+    target_entity_ids: item?.target_entity_ids || item?.targetEntityIds || [],
+    target_labels: item?.target_labels || item?.targetLabels || []
+  })))
+}
+
 function applyInjectedVariables(source, options = {}) {
   injectedVariables.value = buildInitialVariables(source, options)
   syncVariableSelections()
@@ -3112,6 +3464,7 @@ function serializeEventInput(variable, index) {
     ...(Array.isArray(variable.targetEntityIds) ? variable.targetEntityIds : []),
     variable.targetNodeId
   ].map(item => String(item || '').trim()).filter(Boolean)))
+  const targetLabels = parseTargetLabels(variable.targetText)
   return {
     input_id: variable.sourceInputId || variable.id,
     order: index + 1,
@@ -3119,6 +3472,7 @@ function serializeEventInput(variable, index) {
     description: variable.description || '',
     target_region_ids: targetRegionIds,
     target_entity_ids: targetEntityIds,
+    target_labels: targetLabels,
     atomic_keys: Array.isArray(variable.atomicKeys) ? variable.atomicKeys : [],
     open_concept: variable.openConcept || '',
     expected_effects: Array.isArray(variable.expectedEffects) ? variable.expectedEffects : [],
@@ -3132,7 +3486,7 @@ function serializeEventInput(variable, index) {
       label_zh: variable.intensityLabel || ''
     },
     raw_text: variable.rawText || '',
-    source_origin: variable.sourceOrigin || 'manual'
+    source_origin: variable.sourceOrigin || 'step2_user'
   }
 }
 
@@ -3145,6 +3499,7 @@ function serializePolicyInput(variable, index) {
     ...(Array.isArray(variable.targetEntityIds) ? variable.targetEntityIds : []),
     variable.targetNodeId
   ].map(item => String(item || '').trim()).filter(Boolean)))
+  const targetLabels = parseTargetLabels(variable.targetText)
   return {
     input_id: variable.sourceInputId || variable.id,
     order: index + 1,
@@ -3152,6 +3507,7 @@ function serializePolicyInput(variable, index) {
     intent: variable.intent || '',
     target_region_ids: targetRegionIds,
     target_entity_ids: targetEntityIds,
+    target_labels: targetLabels,
     action_primitives: Array.isArray(variable.actionPrimitives) ? variable.actionPrimitives : [],
     executor_capability_keys: Array.isArray(variable.executorCapabilityKeys) ? variable.executorCapabilityKeys : [],
     expected_effects: Array.isArray(variable.expectedEffects) ? variable.expectedEffects : [],
@@ -3166,8 +3522,17 @@ function serializePolicyInput(variable, index) {
       label_zh: variable.intensityLabel || ''
     },
     raw_text: variable.rawText || '',
-    source_origin: variable.sourceOrigin || 'manual'
+    source_origin: variable.sourceOrigin || 'step2_user'
   }
+}
+
+function parseTargetLabels(value) {
+  return Array.from(new Set(
+    String(value || '')
+      .split(/[，,、;；\n]+/)
+      .map(item => item.trim())
+      .filter(Boolean)
+  ))
 }
 
 function serializeEventInputs() {
@@ -3973,7 +4338,14 @@ function normalizeRegionRecordsFromGraph(nodes) {
   if (regionNodes.length === 0) return []
 
   return regionNodes.map((node, index) => {
-    const regionKey = normalizeKey(node?.uuid || node?.id || node?.name || node?.label || `graph-region-${index}`)
+    const rawRegionId = firstNonEmptyString(
+      node?.uuid,
+      node?.id,
+      node?.region_id,
+      node?.key,
+      `graph-region-${index}`
+    )
+    const regionKey = normalizeKey(rawRegionId || node?.name || node?.label)
     const displayName = localizedDisplayText(node?.label || node?.name, `区域 ${index + 1}`)
     const rawTags = uniqueList([
       node?.type,
@@ -3983,7 +4355,7 @@ function normalizeRegionRecordsFromGraph(nodes) {
     ])
     return {
       regionKey,
-      region_id: regionKey,
+      region_id: rawRegionId || regionKey,
       displayName,
       name: displayName,
       regionTypeLabel: humanizeSnakeCase(node?.type || node?.entity_type || node?.category || 'region', '区域'),
@@ -4086,7 +4458,7 @@ function normalizeAgentRecords(config, regions) {
       ...(agent?.capabilities || []),
       ...(agent?.capability_keys || [])
     ].map(item => displayToken(item, '')).filter(Boolean))
-    const permissionLabels = uniqueList((agent?.permission_keys || [])
+    const permissionLabels = uniqueList((agent?.permission_keys || agent?.permissions || [])
       .map(item => displayToken(item, ''))
       .filter(Boolean))
     const actionLabels = uniqueList([
@@ -4146,7 +4518,10 @@ function normalizeAgentRecords(config, regions) {
         ? `相对资源：${resourceRows.join('；')}`
         : '当前没有可核验的专属资源预算。',
       lifecycleStatusLabel: displayToken(lifecycleStatus, '活跃'),
-      representationLabel: displayToken(representation, agent?.is_aggregate ? '区域聚合' : '机构主体'),
+      representationLabel: safeDisplayText(
+        agent?.representation_label_zh,
+        displayToken(representation, agent?.is_aggregate ? '区域聚合' : '机构主体')
+      ),
       profileConfidenceLabel: `${Math.round(Math.max(0, Math.min(1, profileConfidence)) * 100)}%`,
       isAggregate: Boolean(agent?.is_aggregate),
       roleDemandCount: uniqueList(agent?.role_demand_refs || []).length,
@@ -4575,7 +4950,9 @@ function inputPayloadRoot(payload) {
 
 function hasPreparedInputPayload(payload) {
   const root = inputPayloadRoot(payload)
-  return Array.isArray(root.event_inputs) || Array.isArray(root.policy_inputs)
+  // A newly-created simulation exposes empty arrays before Step 2 is submitted.
+  // Only a non-empty event list can be an authoritative scenario configuration.
+  return Array.isArray(root.event_inputs) && root.event_inputs.length > 0
 }
 
 function applyInputsFromPayload(payload, options = {}) {
@@ -4719,11 +5096,12 @@ async function handlePrepare(options = {}) {
     applyAutoScenarioRecommendations()
   }
   hasSubmittedParameters.value = true
-  activeWorkspaceTab.value = 'risk'
+  activeWorkspaceTab.value = 'plan'
 
   isPreparing.value = true
   phase.value = 'preparing'
   prepareProgress.value = 0
+  prepareStage.value = '核对并补充现实范围'
   prepareMessage.value = autoTriggered ? '正在自动生成正式代理体配置' : '正在提交 Kaleido 场景配置'
   emit('update-status', 'processing')
   addLog(
@@ -4738,6 +5116,10 @@ async function handlePrepare(options = {}) {
       scenario_mode: scenarioMode.value,
       event_inputs: serializeEventInputs(),
       policy_inputs: serializePolicyInputs(),
+      scenario_location: scenarioLocation.value.trim() || undefined,
+      foundation_ref: props.sceneSeedContext?.foundationRef || {
+        map_seed_id: props.sceneSeedContext?.mapSeedId || ''
+      },
       advanced_overrides: buildAdvancedOverrides(),
       effort_snapshot_id: effortSnapshotId.value || null,
       semantic_artifact_ref: props.sceneSeedContext?.semanticArtifactRef || undefined
@@ -4925,12 +5307,15 @@ watch(
 watch(
   () => props.initialInjectedVariables,
   (value) => {
+    const nextSeedSignature = seedInputSignature(value)
+    if (!nextSeedSignature || nextSeedSignature === lastAppliedSeedSignature.value) return
     const hasPersistedInputs = hasPreparedInputPayload(configSnapshot.value) ||
       Boolean(configSnapshot.value?.injected_variables?.length)
     const hasRealtimeInputs = hasPreparedInputPayload(configRealtime.value) ||
       Boolean(inputPayloadRoot(configRealtime.value)?.injected_variables?.length)
     if (!hasPersistedInputs && !hasRealtimeInputs) {
       applyInjectedVariables(value, { sourceOrigin: 'seed' })
+      lastAppliedSeedSignature.value = nextSeedSignature
     }
   },
   { deep: true }
@@ -4940,6 +5325,7 @@ watch(
   () => props.simulationId,
   async (value, previousValue) => {
     if (!value || value === previousValue) return
+    showReadinessDetails.value = false
     prepareMessage.value = '场景配置入口'
     await bootstrapSimulation()
   }
@@ -4964,10 +5350,13 @@ watch(
 watch(
   shouldShowDisplayTabs,
   (visible) => {
-    if (visible && !['risk', 'region', 'agents', 'relations'].includes(activeWorkspaceTab.value)) {
-      activeWorkspaceTab.value = 'risk'
+    if (visible && !STEP2_WORKSPACE_TABS.some(item => item.value === activeWorkspaceTab.value)) {
+      activeWorkspaceTab.value = 'plan'
     }
-    if (!visible) showLockedInputs.value = false
+    if (!visible) {
+      showLockedInputs.value = false
+      showReadinessDetails.value = false
+    }
   },
   { immediate: true }
 )
@@ -5667,6 +6056,14 @@ onUnmounted(() => {
   color: #66738a;
   font-size: 11px;
   line-height: 1.45;
+}
+
+.locked-variable-scope {
+  display: block;
+  margin-top: 8px;
+  color: #49617d;
+  font-size: 10px;
+  line-height: 1.5;
 }
 
 .preparing-workspace {
@@ -7535,6 +7932,25 @@ textarea {
   font-weight: 500;
 }
 
+.agent-search-field {
+  display: grid;
+  grid-template-columns: auto minmax(180px, 360px);
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 10px;
+  color: var(--step-muted);
+  font-size: 11px;
+}
+
+.agent-search-field input {
+  min-height: 36px;
+  padding: 0 11px;
+  border: 1px solid var(--step-border);
+  border-radius: 9px;
+  background: #fff;
+  color: var(--step-text);
+}
+
 .agent-table-shell {
   overflow-x: auto;
   border: 1px solid var(--step-border);
@@ -8051,5 +8467,323 @@ textarea {
 .evidence-status {
   font-size: var(--k-text-caption);
   line-height: var(--k-leading-ui);
+}
+
+.readiness-panel {
+  flex: 0 0 auto;
+  overflow: hidden;
+  border-top: 1px solid var(--step-border);
+  background: rgba(248, 250, 248, 0.92);
+}
+
+.readiness-panel.has-blocking {
+  background: rgba(155, 74, 57, 0.045);
+}
+
+.readiness-disclosure {
+  width: 100%;
+  min-height: 58px;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 11px;
+  padding: 10px 16px;
+  border: 0;
+  background: transparent;
+  color: var(--step-text);
+  text-align: left;
+  cursor: pointer;
+  transition: background 180ms ease;
+}
+
+.readiness-disclosure:hover {
+  background: rgba(31, 106, 84, 0.045);
+}
+
+.readiness-disclosure:focus-visible {
+  outline: 2px solid rgba(31, 106, 84, 0.42);
+  outline-offset: -3px;
+}
+
+.readiness-status-mark {
+  width: 27px;
+  height: 27px;
+  display: grid;
+  place-items: center;
+  border-radius: 8px;
+  background: rgba(31, 106, 84, 0.09);
+  color: var(--step-accent);
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.readiness-panel.has-blocking .readiness-status-mark {
+  background: rgba(155, 74, 57, 0.1);
+  color: #9b4a39;
+}
+
+.readiness-compact-copy {
+  min-width: 0;
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+}
+
+.readiness-compact-copy strong {
+  flex: none;
+  font-size: var(--k-text-ui);
+  font-weight: 700;
+}
+
+.readiness-compact-copy span {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--step-muted);
+  font-size: var(--k-text-meta);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.readiness-panel.has-blocking .readiness-compact-copy span {
+  color: #8c4b3d;
+}
+
+.readiness-disclosure-action {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--step-accent);
+  font-size: var(--k-text-meta);
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.readiness-panel.has-blocking .readiness-disclosure-action {
+  color: #9b4a39;
+}
+
+.readiness-chevron {
+  display: inline-block;
+  font-size: 14px;
+  line-height: 1;
+  transform: translateY(-1px);
+  transition: transform 180ms ease;
+}
+
+.readiness-panel.is-expanded .readiness-chevron {
+  transform: rotate(180deg) translateY(1px);
+}
+
+.readiness-details {
+  padding: 12px 16px 16px;
+  border-top: 1px solid var(--step-border);
+}
+
+.readiness-details-intro {
+  margin: 0 0 10px;
+  color: var(--step-muted);
+  font-size: var(--k-text-meta);
+  line-height: 1.55;
+}
+
+.readiness-check-list {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.readiness-check {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+  padding: 12px;
+  border: 1px solid var(--step-border);
+  border-left: 3px solid #93a199;
+  border-radius: 10px;
+  background: #fff;
+  color: var(--step-text);
+  text-align: left;
+  cursor: pointer;
+  transition: border-color 180ms ease, transform 180ms ease;
+}
+
+.readiness-check:hover {
+  border-color: var(--step-accent);
+  transform: translateY(-1px);
+}
+
+.readiness-check:focus-visible {
+  outline: 2px solid rgba(31, 106, 84, 0.42);
+  outline-offset: 2px;
+}
+
+.readiness-check.is-pass {
+  border-left-color: var(--step-accent);
+}
+
+.readiness-check.is-warning {
+  border-left-color: #b1833f;
+}
+
+.readiness-check.is-blocking {
+  border-left-color: #9b4a39;
+}
+
+.readiness-check-status,
+.readiness-check-action {
+  color: var(--step-muted);
+  font-size: var(--k-text-meta);
+}
+
+.readiness-check strong {
+  font-size: var(--k-text-ui);
+}
+
+.readiness-check p {
+  margin: 0;
+  color: var(--step-muted);
+  font-size: var(--k-text-meta);
+  line-height: 1.55;
+}
+
+.readiness-check-action {
+  margin-top: 2px;
+  color: var(--step-accent);
+}
+
+@media (max-width: 1080px) {
+  .readiness-check-list {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 720px) {
+  .readiness-disclosure {
+    grid-template-columns: auto minmax(0, 1fr);
+  }
+
+  .readiness-compact-copy {
+    display: grid;
+    gap: 2px;
+  }
+
+  .readiness-disclosure-action {
+    grid-column: 2;
+    justify-self: start;
+  }
+
+  .readiness-check-list {
+    grid-template-columns: 1fr;
+  }
+}
+</style>
+
+<style scoped>
+.scenario-plan-summary,
+.scenario-mechanism-node-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: var(--k-space-3);
+}
+
+.curated-scenario-overview {
+  display: grid;
+  gap: var(--k-space-3);
+  margin-bottom: var(--k-space-5);
+  padding: var(--k-space-4);
+  border: 1px solid rgba(31, 106, 84, 0.18);
+  border-radius: var(--k-radius-md);
+  background: rgba(31, 106, 84, 0.045);
+}
+
+.curated-storyline-grid,
+.curated-chapter-strip {
+  display: grid;
+  gap: 8px;
+}
+
+.curated-storyline-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.curated-chapter-strip { grid-template-columns: repeat(6, minmax(0, 1fr)); }
+
+.curated-storyline-grid article,
+.curated-chapter-strip article {
+  display: grid;
+  gap: 3px;
+  padding: 10px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.72);
+}
+
+.curated-storyline-grid span,
+.curated-chapter-strip span,
+.curated-chapter-strip small {
+  color: var(--k-color-text-muted);
+  font-size: var(--k-text-meta);
+}
+
+.curated-scenario-overview > p {
+  margin: 0;
+  color: var(--k-color-text-muted);
+  line-height: var(--k-leading-body);
+}
+
+.scenario-plan-summary > article,
+.scenario-mechanism-node-grid > article,
+.scenario-policy-list > article,
+.scenario-mechanism-edges > article {
+  display: grid;
+  gap: var(--k-space-2);
+  padding: var(--k-space-4);
+  border: 1px solid var(--k-color-border);
+  border-radius: var(--k-radius-md);
+  background: var(--k-color-surface);
+}
+
+.scenario-plan-summary span,
+.scenario-event-timeline small,
+.scenario-mechanism-node-grid span {
+  color: var(--k-color-text-muted);
+  font-size: var(--k-text-meta);
+}
+
+.scenario-plan-summary p,
+.scenario-event-timeline p,
+.scenario-policy-list p,
+.scenario-mechanism-node-grid p,
+.scenario-mechanism-edges p {
+  margin: 0;
+  color: var(--k-color-text-muted);
+  line-height: var(--k-leading-body);
+}
+
+.scenario-event-timeline {
+  display: grid;
+  gap: var(--k-space-2);
+  margin: var(--k-space-5) 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.scenario-event-timeline li {
+  display: grid;
+  grid-template-columns: 2.5rem minmax(0, 1fr);
+  gap: var(--k-space-3);
+  padding: var(--k-space-4) 0;
+  border-bottom: 1px solid var(--k-color-border);
+}
+
+.scenario-event-index { color: var(--k-color-brand-600); font-weight: 700; }
+.scenario-policy-plan,
+.scenario-mechanism-edges { margin-top: var(--k-space-5); }
+.scenario-policy-list,
+.scenario-mechanism-edges { display: grid; gap: var(--k-space-2); }
+.scenario-mechanism-route { display: flex; align-items: center; gap: var(--k-space-3); }
+.scenario-mechanism-route span { color: var(--k-color-brand-600); }
+
+@media (max-width: 900px) {
+  .scenario-plan-summary,
+  .scenario-mechanism-node-grid,
+  .curated-storyline-grid,
+  .curated-chapter-strip { grid-template-columns: 1fr; }
 }
 </style>
